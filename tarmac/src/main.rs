@@ -58,11 +58,19 @@ fn main() {
 
     // Set up polling for app launches/terminations
     let poller = WorkspacePollingObserver::new(
-        Box::new(move |pid, name, _bundle| {
-            tracing::debug!(pid, app = %name, "will observe new app");
+        Box::new(move |pid, name, bundle| {
+            WM_STATE.with(|s| {
+                if let Some(state) = s.borrow_mut().as_mut() {
+                    state.on_app_launched(pid, &name, &bundle);
+                }
+            });
         }),
         Box::new(move |pid| {
-            tracing::debug!(pid, "will clean up terminated app");
+            WM_STATE.with(|s| {
+                if let Some(state) = s.borrow_mut().as_mut() {
+                    state.on_app_terminated(pid);
+                }
+            });
         }),
     );
     WORKSPACE_POLLER.with(|p| *p.borrow_mut() = Some(poller));
