@@ -2,12 +2,13 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
 
+use tarmac::core::input::{Action, KeybindManager};
 use tarmac::core::state::WmState;
+use tarmac::platform::event_tap::EventTap;
 use tarmac::platform::permissions;
 use tarmac::platform::workspace_observer::WorkspacePollingObserver;
 use tracing_subscriber::EnvFilter;
 
-// Store the polling observer in a thread-local so the timer callback can access it.
 thread_local! {
     static WORKSPACE_POLLER: RefCell<Option<WorkspacePollingObserver>> = const { RefCell::new(None) };
 }
@@ -26,9 +27,32 @@ fn main() {
     init_config_dir();
     install_signal_handlers();
 
-    // Initialize window manager state: discover windows, install observers
+    // Initialize window manager state
     let state = RefCell::new(WmState::new());
     state.borrow_mut().discover_and_observe();
+
+    // Set up keybinds and event tap
+    let keybinds = KeybindManager::with_defaults();
+    let _event_tap = EventTap::install(Box::new(move |event| {
+        if let Some(action) = keybinds.dispatch(&event) {
+            tracing::info!(?action, "keybind matched");
+            match action {
+                Action::SpawnTerminal => {
+                    spawn_terminal();
+                }
+                Action::CloseWindow => {
+                    tracing::info!("close window (not yet wired)");
+                }
+            }
+            true // suppress the event
+        } else {
+            false // pass through
+        }
+    }));
+
+    if _event_tap.is_none() {
+        tracing::error!("failed to create event tap — check accessibility permissions");
+    }
 
     // Set up polling for app launches/terminations
     let poller = WorkspacePollingObserver::new(
@@ -41,22 +65,29 @@ fn main() {
     );
     WORKSPACE_POLLER.with(|p| *p.borrow_mut() = Some(poller));
 
-    // Install a CFRunLoop timer that polls every 500ms
     install_polling_timer();
-
     run_app();
+}
+
+fn spawn_terminal() {
+    tracing::info!("spawning terminal");
+    std::process::Command::new("open")
+        .arg("-na")
+        .arg("WezTerm")
+        .spawn()
+        .ok();
 }
 
 fn install_polling_timer() {
     unsafe {
         let timer = CFRunLoopTimerCreate(
-            ptr::null(),                      // allocator
-            CFAbsoluteTimeGetCurrent() + 0.5, // first fire
-            0.5,                              // interval (500ms)
-            0,                                // flags
-            0,                                // order
+            ptr::null(),
+            CFAbsoluteTimeGetCurrent() + 0.5,
+            0.5,
+            0,
+            0,
             Some(poll_timer_callback),
-            ptr::null_mut(), // context
+            ptr::null_mut(),
         );
         let run_loop = CFRunLoopGetCurrent();
         CFRunLoopAddTimer(run_loop, timer, kCFRunLoopCommonModes);
@@ -71,7 +102,7 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
     });
 }
 
-// CFRunLoop timer FFI
+#[allow(non_upper_case_globals)]
 unsafe extern "C" {
     fn CFAbsoluteTimeGetCurrent() -> f64;
     fn CFRunLoopGetCurrent() -> *const c_void;
