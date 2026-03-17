@@ -44,11 +44,15 @@ fn main() {
         tracing::error!("failed to create hotkey manager");
     }
 
-    // CGEventTap for mouse click-to-focus only (hotkeys use Carbon)
-    let _event_tap = EventTap::install(Box::new(move |x, y| {
+    // CGEventTap for mouse events: click-to-focus and focus-follows-mouse
+    let _event_tap = EventTap::install(Box::new(move |event| {
+        use tarmac::platform::event_tap::MouseEvent;
         WM_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
-                state.click_to_focus(x, y);
+                match event {
+                    MouseEvent::Click { x, y } => state.click_to_focus(x, y),
+                    MouseEvent::Moved { x, y } => state.mouse_moved(x, y),
+                }
             }
         });
     }));
