@@ -55,6 +55,9 @@ block2 = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Lua configuration
+mlua = { version = "0.10", features = ["lua54", "vendored"] }
+
 # Error handling
 thiserror = "2"
 anyhow = "1"
