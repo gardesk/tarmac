@@ -215,11 +215,14 @@ impl KeybindManager {
     }
 
     /// Check if a key event matches any binding. Returns the action if matched.
+    /// Strips the Fn modifier before matching since macOS auto-sets it for arrows/F-keys.
     pub fn dispatch(&self, event: &KeyEvent) -> Option<Action> {
         let key = keycode_to_key(event.keycode)?;
+        // Strip Fn flag — macOS sets it automatically for arrow keys and function keys
+        let mods = event.modifiers & !Modifiers::FN;
         self.binds
             .iter()
-            .find(|b| b.key == key && b.modifiers == event.modifiers)
+            .find(|b| b.key == key && b.modifiers == mods)
             .map(|b| b.action)
     }
 
@@ -246,11 +249,15 @@ impl KeybindManager {
         mgr.add(m, Key::Up, Action::Focus(Up));
         mgr.add(m, Key::Right, Action::Focus(Right));
 
-        // Swap: Option+Shift+hjkl
+        // Swap: Cmd+Shift+hjkl and Cmd+Shift+Arrows
         mgr.add(ms, Key::H, Action::Swap(Left));
         mgr.add(ms, Key::J, Action::Swap(Down));
         mgr.add(ms, Key::K, Action::Swap(Up));
         mgr.add(ms, Key::L, Action::Swap(Right));
+        mgr.add(ms, Key::Left, Action::Swap(Left));
+        mgr.add(ms, Key::Down, Action::Swap(Down));
+        mgr.add(ms, Key::Up, Action::Swap(Up));
+        mgr.add(ms, Key::Right, Action::Swap(Right));
 
         // Resize: Option+Ctrl+hjkl
         mgr.add(mc, Key::H, Action::Resize(Left));
