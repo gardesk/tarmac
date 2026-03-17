@@ -1,5 +1,17 @@
-docs
+# Build
+target/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# macOS
+.DS_Store
+
+# Internal
+docs/
 .fackr/
-.claude
+.claude/
 CLAUDE.md
-.ref
+.ref/
