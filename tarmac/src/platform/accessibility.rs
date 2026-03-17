@@ -199,7 +199,7 @@ pub fn ax_get_windows(app_element: &AXUIElement) -> AxResult<Vec<CFRetained<AXUI
     let attr = CFString::from_static_str("AXWindows");
     let value = match ax_copy_attribute(app_element, &attr) {
         Ok(v) => v,
-        Err(AxError::Ax(err)) if err == AXError(-25212) => return Ok(Vec::new()), // cannotComplete
+        Err(AxError::Ax(AXError(-25212))) => return Ok(Vec::new()), // cannotComplete
         Err(e) => return Err(e),
     };
 
