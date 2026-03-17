@@ -177,6 +177,7 @@ fn handle_action(action: Action) {
                 }
                 Action::Exit => {
                     tracing::info!("exit requested");
+                    cleanup_socket();
                     std::process::exit(0);
                 }
             }
@@ -498,10 +499,16 @@ fn init_config_dir() {
 
 fn install_signal_handlers() {
     if let Err(e) = ctrlc::set_handler(|| {
+        cleanup_socket();
         std::process::exit(0);
     }) {
         tracing::warn!("failed to set ctrl-c handler: {}", e);
     }
+}
+
+fn cleanup_socket() {
+    let path = tarmac::ipc::protocol::socket_path();
+    let _ = std::fs::remove_file(&path);
 }
 
 fn run_app() {
