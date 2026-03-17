@@ -192,15 +192,20 @@ impl WmState {
             }
         }
         self.workspaces.active_mut().record_focus(id);
+
+        // Re-apply floating window levels after every focus change.
+        // App activation can reset window ordering, so we re-set the level.
+        self.enforce_floating_levels();
+
         tracing::debug!(id, "focused window");
     }
 
-    /// Raise all floating windows via AXRaise.
-    fn raise_floating_windows(&self) {
+    /// Re-apply SkyLight window levels for all floating windows.
+    /// Called after every focus change since app activation can reset ordering.
+    fn enforce_floating_levels(&self) {
+        use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
         for fw in &self.workspaces.active().floating {
-            if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
-                let _ = ax_perform_action(ax_ref, "AXRaise");
-            }
+            set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
         }
     }
 
@@ -291,7 +296,7 @@ impl WmState {
                 // Set window level to floating so it stays above all normal windows
                 use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
                 set_window_level(focused, K_CG_FLOATING_WINDOW_LEVEL);
-                self.raise_floating_windows();
+                self.enforce_floating_levels();
                 tracing::info!(id = focused, "window floated (level=floating)");
             } else {
                 // Restore to normal window level
