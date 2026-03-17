@@ -44,6 +44,7 @@ struct DragState {
 pub struct WmState {
     pub registry: WindowRegistry,
     pub workspaces: WorkspaceManager,
+    pub monitors: super::monitor::MonitorManager,
     ax_refs: HashMap<WindowId, CFRetained<AXUIElement>>,
     observers: HashMap<i32, AppObserver>,
     screen_rect: Rect,
@@ -69,6 +70,7 @@ impl WmState {
         Self {
             registry: WindowRegistry::new(),
             workspaces: WorkspaceManager::new(),
+            monitors: super::monitor::MonitorManager::new(),
             ax_refs: HashMap::new(),
             observers: HashMap::new(),
             screen_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
@@ -85,14 +87,33 @@ impl WmState {
     }
 
     pub fn discover_and_observe(&mut self) {
-        self.screen_rect = get_usable_frame();
+        // Discover all displays
+        let displays = crate::platform::display::discover_displays();
+        self.monitors.set_monitors(displays);
+
+        // Use focused monitor's usable frame for layout
+        self.screen_rect = self
+            .monitors
+            .focused_monitor()
+            .map(|m| m.usable_frame)
+            .unwrap_or_else(get_usable_frame);
         tracing::info!(
             x = self.screen_rect.x,
             y = self.screen_rect.y,
             w = self.screen_rect.width,
             h = self.screen_rect.height,
+            monitors = self.monitors.count(),
             "usable screen frame"
         );
+
+        // Assign workspace N to monitor N (sorted by position)
+        let sorted_ids: Vec<u32> = self
+            .monitors
+            .sorted_by_position()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        self.workspaces.assign_monitors(&sorted_ids);
 
         let windows = discover_all_windows();
         for w in &windows {
@@ -557,6 +578,47 @@ impl WmState {
         };
         let prev = if current <= 1 { 10 } else { current - 1 };
         self.switch_workspace(prev);
+    }
+
+    pub fn focus_monitor_next(&mut self) {
+        let current = self.monitors.focused;
+        if let Some(next) = self.monitors.next_monitor(current) {
+            self.monitors.focused = next;
+            self.workspaces.set_focused_monitor(next);
+            // Update screen_rect for the new monitor
+            if let Some(m) = self.monitors.get(next) {
+                self.screen_rect = m.usable_frame;
+            }
+            // Focus the workspace's focused window
+            if let Some(wid) = self.workspaces.active().focused {
+                self.focus_window(wid);
+            }
+            tracing::info!(monitor = next, ws = %self.workspaces.active_id(), "focused monitor");
+        }
+    }
+
+    pub fn focus_monitor_prev(&mut self) {
+        let current = self.monitors.focused;
+        if let Some(prev) = self.monitors.prev_monitor(current) {
+            self.monitors.focused = prev;
+            self.workspaces.set_focused_monitor(prev);
+            if let Some(m) = self.monitors.get(prev) {
+                self.screen_rect = m.usable_frame;
+            }
+            if let Some(wid) = self.workspaces.active().focused {
+                self.focus_window(wid);
+            }
+            tracing::info!(monitor = prev, ws = %self.workspaces.active_id(), "focused monitor");
+        }
+    }
+
+    pub fn move_to_monitor_next(&mut self) {
+        // TODO: Move focused window from current monitor's workspace to next monitor's workspace
+        tracing::info!("move to monitor next (not yet implemented)");
+    }
+
+    pub fn move_to_monitor_prev(&mut self) {
+        tracing::info!("move to monitor prev (not yet implemented)");
     }
 
     pub fn move_to_workspace(&mut self, num: u8) {
