@@ -12,7 +12,7 @@ use crate::platform::accessibility::{
 use crate::platform::application::{
     discover_all_windows, discover_applications, enumerate_windows,
 };
-use crate::platform::display::get_usable_frame;
+use crate::platform::display::{get_full_display_frame, get_usable_frame};
 use crate::platform::observer::{AppObserver, WindowEvent};
 
 use super::tree::{Node, Rect};
@@ -227,15 +227,19 @@ impl WmState {
             "workspace transition"
         );
 
-        // Hide old windows — position fully beyond the bottom-right corner.
-        // Offset by the window's own size so title bar doesn't peek.
+        // Hide windows using AeroSpace's approach: set the window's top-left
+        // to the bottom-right corner of the full display (not just usable area).
+        // kAXPositionAttribute is the window's top-left, so the entire window
+        // body extends below and to the right — fully off-screen.
+        // Use the FULL display frame (including dock/menubar area) to ensure
+        // we're truly at the physical screen edge.
+        let full_display = get_full_display_frame();
+        let hide_x = full_display.x + full_display.width;
+        let hide_y = full_display.y + full_display.height;
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
-                let (w, h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let hide_x = self.screen_rect.x + self.screen_rect.width + w;
-                let hide_y = self.screen_rect.y + self.screen_rect.height + h;
                 let _ = ax_set_position(ax_ref, hide_x, hide_y);
-                tracing::debug!(wid, "hidden");
+                tracing::debug!(wid, hide_x, hide_y, "hidden");
             }
         }
 
@@ -266,11 +270,11 @@ impl WmState {
             .workspaces
             .move_window_to(focused, target.clone(), self.screen_rect)
         {
-            // Hide the moved window fully beyond the bottom-right corner
+            // Hide the moved window at the full display's bottom-right corner
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let (w, h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let hide_x = self.screen_rect.x + self.screen_rect.width + w;
-                let hide_y = self.screen_rect.y + self.screen_rect.height + h;
+                let full_display = get_full_display_frame();
+                let hide_x = full_display.x + full_display.width;
+                let hide_y = full_display.y + full_display.height;
                 let _ = ax_set_position(ax_ref, hide_x, hide_y);
             }
 
