@@ -308,6 +308,22 @@ impl WmState {
         self.install_observer_for_app(pid, &ax_app, name, bundle_id);
     }
 
+    /// Called when the poller detects a window ID disappeared from screen.
+    pub fn on_window_closed(&mut self, wid: u32) {
+        let id = wid as WindowId;
+        if !self.registry.contains(id) {
+            return;
+        }
+        tracing::info!(id, "window closed → retiling");
+        self.registry.remove(id);
+        self.ax_refs.remove(&id);
+        self.tree.remove(id);
+        if self.focused == Some(id) {
+            self.focused = self.tree.first_window();
+        }
+        self.apply_layout();
+    }
+
     /// Called when the poller detects a new window ID on screen.
     /// This handles the race where an app launches but its window isn't ready
     /// when we first enumerate.

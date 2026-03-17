@@ -56,12 +56,19 @@ fn main() {
         tracing::error!("failed to create event tap — check accessibility permissions");
     }
 
-    // Set up polling for new windows and app terminations
+    // Set up polling for new/closed windows and app terminations
     let poller = WorkspacePollingObserver::new(
         Box::new(move |pid, owner, wid| {
             WM_STATE.with(|s| {
                 if let Some(state) = s.borrow_mut().as_mut() {
                     state.on_new_window_detected(pid, &owner, wid);
+                }
+            });
+        }),
+        Box::new(move |wid, _pid| {
+            WM_STATE.with(|s| {
+                if let Some(state) = s.borrow_mut().as_mut() {
+                    state.on_window_closed(wid);
                 }
             });
         }),

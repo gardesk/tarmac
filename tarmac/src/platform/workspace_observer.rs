@@ -4,9 +4,10 @@ use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
 
 use super::application::get_cg_window_list;
 
-/// Callback for new windows detected via CGWindowList.
-/// Args: pid, owner_name, window_id
+/// Callback for new windows detected via CGWindowList. Args: pid, owner_name, window_id
 pub type NewWindowCallback = Box<dyn Fn(i32, String, u32)>;
+/// Callback for windows that disappeared from screen. Args: window_id, pid
+pub type WindowClosedCallback = Box<dyn Fn(u32, i32)>;
 /// Callback for app termination. Args: pid
 pub type AppTerminateCallback = Box<dyn Fn(i32)>;
 
@@ -18,11 +19,16 @@ pub struct WorkspacePollingObserver {
     /// All known PIDs (windows + NSWorkspace)
     known_pids: HashSet<i32>,
     on_new_window: NewWindowCallback,
+    on_window_closed: WindowClosedCallback,
     on_terminate: AppTerminateCallback,
 }
 
 impl WorkspacePollingObserver {
-    pub fn new(on_new_window: NewWindowCallback, on_terminate: AppTerminateCallback) -> Self {
+    pub fn new(
+        on_new_window: NewWindowCallback,
+        on_window_closed: WindowClosedCallback,
+        on_terminate: AppTerminateCallback,
+    ) -> Self {
         let mut known_windows = HashMap::new();
         let mut known_pids = HashSet::new();
 
@@ -52,6 +58,7 @@ impl WorkspacePollingObserver {
             known_windows,
             known_pids,
             on_new_window,
+            on_window_closed,
             on_terminate,
         }
     }
@@ -71,6 +78,14 @@ impl WorkspacePollingObserver {
             if !self.known_windows.contains_key(&cg.wid) {
                 tracing::info!(wid = cg.wid, pid = cg.pid, owner = %cg.owner, "new window detected");
                 (self.on_new_window)(cg.pid, cg.owner.clone(), cg.wid);
+            }
+        }
+
+        // Detect windows that disappeared
+        for (wid, pid) in &self.known_windows {
+            if !current_windows.contains_key(wid) {
+                tracing::info!(wid, pid, "window disappeared");
+                (self.on_window_closed)(*wid, *pid);
             }
         }
 
