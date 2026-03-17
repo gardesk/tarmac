@@ -195,6 +195,9 @@ impl WmState {
                     sr_h = screen_rect.height,
                     "apply_layout"
                 );
+                // Two-pass layout: resize all first (shrink to fit), then
+                // position all. Prevents macOS from pushing windows around
+                // during intermediate overlap states.
                 for (wid, rect) in &geometries {
                     tracing::debug!(
                         wid,
@@ -205,11 +208,13 @@ impl WmState {
                         "layout position"
                     );
                     if let Some(ax_ref) = self.ax_refs.get(wid) {
-                        // Size first, then position — prevents macOS from
-                        // pushing windows around when moving to smaller tiles
                         if let Err(e) = ax_set_size(ax_ref, rect.width, rect.height) {
                             tracing::warn!(wid, ?e, "ax_set_size failed");
                         }
+                    }
+                }
+                for (wid, rect) in &geometries {
+                    if let Some(ax_ref) = self.ax_refs.get(wid) {
                         if let Err(e) = ax_set_position(ax_ref, rect.x, rect.y) {
                             tracing::warn!(wid, ?e, "ax_set_position failed");
                         }
