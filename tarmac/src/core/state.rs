@@ -158,18 +158,38 @@ impl WmState {
 
     // --- Layout ---
 
+    /// Apply layout for ALL visible workspaces on their respective monitors.
     pub fn apply_layout(&self) {
-        let geometries = self
-            .workspaces
-            .active()
-            .tree
-            .calculate_geometries_with_gaps(self.screen_rect, self.gap_inner, self.gap_outer, true);
-        for (wid, rect) in &geometries {
-            if let Some(ax_ref) = self.ax_refs.get(wid) {
-                let _ = ax_set_position(ax_ref, rect.x, rect.y);
-                let _ = ax_set_size(ax_ref, rect.width, rect.height);
+        for (monitor_id, ws_id) in self.workspaces.monitor_assignments() {
+            let screen_rect = self
+                .monitors
+                .get(*monitor_id)
+                .map(|m| m.usable_frame)
+                .unwrap_or(self.screen_rect);
+
+            if let Some(ws) = self.workspaces.get_workspace(ws_id) {
+                let geometries = ws.tree.calculate_geometries_with_gaps(
+                    screen_rect,
+                    self.gap_inner,
+                    self.gap_outer,
+                    true,
+                );
+                for (wid, rect) in &geometries {
+                    if let Some(ax_ref) = self.ax_refs.get(wid) {
+                        let _ = ax_set_position(ax_ref, rect.x, rect.y);
+                        let _ = ax_set_size(ax_ref, rect.width, rect.height);
+                    }
+                }
             }
         }
+    }
+
+    /// Get the screen rect for the focused monitor.
+    pub fn focused_screen_rect(&self) -> Rect {
+        self.monitors
+            .focused_monitor()
+            .map(|m| m.usable_frame)
+            .unwrap_or(self.screen_rect)
     }
 
     // --- Window operations ---
@@ -180,7 +200,8 @@ impl WmState {
             Some(f) => f,
             None => return,
         };
-        let geoms = ws.tree.calculate_geometries(self.screen_rect);
+        let sr = self.focused_screen_rect();
+        let geoms = ws.tree.calculate_geometries(sr);
         if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
             self.focus_window(target);
             if self.mouse_follows_focus
@@ -567,19 +588,13 @@ impl WmState {
             "workspace transition"
         );
 
-        // Hide using AeroSpace's exact approach:
-        // Position at (1 - width, visibleRect.maxY - 1)
-        // Right edge at x=1, top edge 1px above screen bottom.
-        let vis_max_y = self.screen_rect.y + self.screen_rect.height;
+        // Hide windows off ALL monitors
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
                 let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let hide_x = 1.0 - w;
-                let hide_y = vis_max_y - 1.0;
+                let (hide_x, hide_y) = compute_hide_position(&self.monitors, w);
                 let _ = ax_set_position(ax_ref, hide_x, hide_y);
-                if let Ok((ax, ay)) = ax_get_position(ax_ref) {
-                    tracing::debug!(wid, req_x = hide_x, req_y = hide_y, ax, ay, "hidden");
-                }
+                tracing::debug!(wid, hide_x, hide_y, "hidden");
             }
         }
 
@@ -788,11 +803,11 @@ impl WmState {
             .workspaces
             .move_window_to(focused, target.clone(), self.screen_rect)
         {
-            // Hide the moved window
+            // Hide the moved window off all monitors
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let vis_max_y = self.screen_rect.y + self.screen_rect.height;
                 let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let _ = ax_set_position(ax_ref, 1.0 - w, vis_max_y - 1.0);
+                let (hx, hy) = compute_hide_position(&self.monitors, w);
+                let _ = ax_set_position(ax_ref, hx, hy);
             }
 
             // Retile current workspace
@@ -1044,11 +1059,11 @@ impl WmState {
             tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
 
             if !is_active {
-                // Hide the window since it's on an inactive workspace
-                let vis_max_y = self.screen_rect.y + self.screen_rect.height;
+                // Hide the window off all monitors
                 if let Some(ax_ref) = self.ax_refs.get(id) {
                     let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                    let _ = ax_set_position(ax_ref, 1.0 - w, vis_max_y - 1.0);
+                    let (hx, hy) = compute_hide_position(&self.monitors, w);
+                    let _ = ax_set_position(ax_ref, hx, hy);
                 }
                 // Switch to the target workspace to follow the window
                 self.switch_workspace(ws_num);
@@ -1247,6 +1262,31 @@ fn should_auto_float(subrole: &str, _width: f64, _height: f64) -> bool {
         subrole,
         "AXDialog" | "AXSheet" | "AXFloatingWindow" | "AXSystemFloatingWindow"
     )
+}
+
+/// Compute a hide position for a window that's off-screen on ALL monitors.
+/// Uses the bottom-left corner of the leftmost monitor minus the window width,
+/// plus the full height of all monitors below the lowest monitor.
+fn compute_hide_position(
+    monitors: &super::monitor::MonitorManager,
+    window_width: f64,
+) -> (f64, f64) {
+    if monitors.count() == 0 {
+        return (1.0 - window_width, 10000.0);
+    }
+    // Find the leftmost x and the bottommost y across all monitors
+    let min_x = monitors
+        .all()
+        .iter()
+        .map(|m| m.frame.x)
+        .fold(f64::INFINITY, f64::min);
+    let max_y = monitors
+        .all()
+        .iter()
+        .map(|m| m.frame.y + m.frame.height)
+        .fold(f64::NEG_INFINITY, f64::max);
+    // Position: far left of leftmost monitor and below all monitors
+    (min_x - window_width - 100.0, max_y + 100.0)
 }
 
 /// Warp the mouse cursor to the center of a rect.
