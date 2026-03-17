@@ -205,10 +205,37 @@ impl WmState {
     }
 
     /// Raise all floating windows on the active workspace so they stay above tiled.
+    /// Uses AXRaise which works within an app's window stack. For cross-app raising,
+    /// we briefly set the floating window's app as frontmost then restore.
     fn raise_floating_windows(&self) {
-        for fw in &self.workspaces.active().floating {
-            if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
-                let _ = ax_perform_action(ax_ref, "AXRaise");
+        let ws = self.workspaces.active();
+        if ws.floating.is_empty() {
+            return;
+        }
+
+        let focused_id = ws.focused;
+        let focused_is_floating = focused_id.is_some_and(|f| ws.is_floating(f));
+
+        // Only do cross-app raising if the focused window is tiled
+        // (meaning a tiled window might be covering a floating window from another app)
+        if !focused_is_floating {
+            for fw in &ws.floating {
+                if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
+                    if let Some(w) = self.registry.get(fw.id) {
+                        // Activate floating window's app and raise
+                        let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
+                        let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                        let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+                    }
+                    let _ = ax_perform_action(ax_ref, "AXRaise");
+                }
+            }
+        } else {
+            // Focused is floating — just AXRaise each floater (same-app raise)
+            for fw in &ws.floating {
+                if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
+                    let _ = ax_perform_action(ax_ref, "AXRaise");
+                }
             }
         }
     }
