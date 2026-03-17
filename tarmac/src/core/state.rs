@@ -124,6 +124,9 @@ impl WmState {
     /// Call this from a timer tick on the main thread.
     pub fn process_events(&mut self) {
         let events: Vec<QueuedEvent> = self.event_queue.borrow_mut().drain(..).collect();
+        if !events.is_empty() {
+            tracing::debug!(count = events.len(), "processing queued events");
+        }
         for queued in events {
             self.handle_event(&queued.event, &queued.app_name, &queued.app_bundle);
         }
@@ -259,6 +262,7 @@ impl WmState {
 
     /// Install an observer for a newly launched app.
     pub fn on_app_launched(&mut self, pid: i32, name: &str, bundle_id: &str) {
+        tracing::info!(pid, app = name, "on_app_launched");
         let ax_app = unsafe { AXUIElement::new_application(pid) };
 
         let app_info = crate::platform::application::AppInfo {
@@ -268,6 +272,12 @@ impl WmState {
             ax_ref: ax_app.clone(),
         };
         let windows = enumerate_windows(&app_info);
+        tracing::info!(
+            pid,
+            app = name,
+            found = windows.len(),
+            "enumerated windows for new app"
+        );
         for w in &windows {
             if !self.registry.contains(w.id) {
                 self.registry.add(WindowState {
@@ -296,6 +306,63 @@ impl WmState {
         }
 
         self.install_observer_for_app(pid, &ax_app, name, bundle_id);
+    }
+
+    /// Called when the poller detects a new window ID on screen.
+    /// This handles the race where an app launches but its window isn't ready
+    /// when we first enumerate.
+    pub fn on_new_window_detected(&mut self, pid: i32, owner: &str, _wid: u32) {
+        // Already tracking this window?
+        if self.registry.all().any(|w| w.app_pid == pid) && self.observers.contains_key(&pid) {
+            // We already have windows for this PID and an observer.
+            // The observer's WindowCreated event should handle new windows.
+            // But check: maybe it fired and is sitting in the queue.
+            self.process_events();
+            return;
+        }
+
+        // New PID or PID with no windows yet — full enumerate
+        tracing::info!(pid, owner, "new window detected, enumerating");
+        let ax_app = unsafe { AXUIElement::new_application(pid) };
+        let app_info = crate::platform::application::AppInfo {
+            pid,
+            bundle_id: String::new(),
+            name: owner.to_string(),
+            ax_ref: ax_app.clone(),
+        };
+        let windows = enumerate_windows(&app_info);
+        tracing::debug!(pid, found = windows.len(), "enumerate for new window");
+
+        let mut added = false;
+        for w in &windows {
+            if !self.registry.contains(w.id) {
+                self.registry.add(WindowState {
+                    id: w.id,
+                    app_pid: w.app_pid,
+                    app_name: w.app_name.clone(),
+                    app_bundle_id: w.app_bundle_id.clone(),
+                    title: w.title.clone(),
+                    role: w.role.clone(),
+                    subrole: w.subrole.clone(),
+                    x: w.x,
+                    y: w.y,
+                    width: w.width,
+                    height: w.height,
+                    floating: false,
+                    minimized: false,
+                });
+                self.ax_refs.insert(w.id, w.ax_ref.clone());
+                self.tree
+                    .insert_with_rect(w.id, self.focused, self.screen_rect);
+                self.focused = Some(w.id);
+                added = true;
+            }
+        }
+        if added {
+            self.apply_layout();
+        }
+
+        self.install_observer_for_app(pid, &ax_app, owner, "");
     }
 
     /// Remove all windows and observer for a terminated app.

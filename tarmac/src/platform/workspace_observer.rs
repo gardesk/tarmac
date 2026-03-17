@@ -1,33 +1,37 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use objc2_app_kit::{NSApplicationActivationPolicy, NSWorkspace};
 
 use super::application::get_cg_window_list;
 
-/// Callback types for app lifecycle events.
-pub type AppLaunchCallback = Box<dyn Fn(i32, String, String)>; // pid, name, bundle_id
-pub type AppTerminateCallback = Box<dyn Fn(i32)>; // pid
+/// Callback for new windows detected via CGWindowList.
+/// Args: pid, owner_name, window_id
+pub type NewWindowCallback = Box<dyn Fn(i32, String, u32)>;
+/// Callback for app termination. Args: pid
+pub type AppTerminateCallback = Box<dyn Fn(i32)>;
 
-/// Polls both CGWindowList and NSWorkspace to detect app launches and terminations.
-/// CGWindowList catches non-bundled apps (wezterm-gui, etc.) that NSWorkspace misses.
-/// Called periodically from a CFRunLoop timer on the main thread.
+/// Polls CGWindowList to detect new windows appearing and apps terminating.
+/// This is the ground truth — if a window is on screen, CGWindowList sees it.
 pub struct WorkspacePollingObserver {
+    /// wid → pid for all known on-screen windows
+    known_windows: HashMap<u32, i32>,
+    /// All known PIDs (windows + NSWorkspace)
     known_pids: HashSet<i32>,
-    on_launch: AppLaunchCallback,
+    on_new_window: NewWindowCallback,
     on_terminate: AppTerminateCallback,
 }
 
 impl WorkspacePollingObserver {
-    pub fn new(on_launch: AppLaunchCallback, on_terminate: AppTerminateCallback) -> Self {
-        // Seed with PIDs from both sources
+    pub fn new(on_new_window: NewWindowCallback, on_terminate: AppTerminateCallback) -> Self {
+        let mut known_windows = HashMap::new();
         let mut known_pids = HashSet::new();
 
-        // CGWindowList: all on-screen window owners
         for cg in get_cg_window_list() {
+            known_windows.insert(cg.wid, cg.pid);
             known_pids.insert(cg.pid);
         }
 
-        // NSWorkspace: all Regular apps (may include apps with no on-screen windows)
+        // Also seed PIDs from NSWorkspace
         let workspace = NSWorkspace::sharedWorkspace();
         let apps = workspace.runningApplications();
         let count = apps.count();
@@ -38,56 +42,50 @@ impl WorkspacePollingObserver {
             }
         }
 
-        tracing::debug!(known = known_pids.len(), "workspace polling initialized");
+        tracing::debug!(
+            windows = known_windows.len(),
+            pids = known_pids.len(),
+            "workspace polling initialized"
+        );
 
         Self {
+            known_windows,
             known_pids,
-            on_launch,
+            on_new_window,
             on_terminate,
         }
     }
 
-    /// Call periodically to detect app launches and terminations.
+    /// Detect new windows and terminated apps.
     pub fn poll(&mut self) {
+        let cg_windows = get_cg_window_list();
+
+        let mut current_windows: HashMap<u32, i32> = HashMap::new();
         let mut current_pids = HashSet::new();
 
-        // Source 1: CGWindowList — catches non-bundled apps
-        let cg_windows = get_cg_window_list();
         for cg in &cg_windows {
-            if !current_pids.contains(&cg.pid) && !self.known_pids.contains(&cg.pid) {
-                tracing::info!(pid = cg.pid, app = %cg.owner, "app launched (CG)");
-                (self.on_launch)(cg.pid, cg.owner.clone(), String::new());
-            }
+            current_windows.insert(cg.wid, cg.pid);
             current_pids.insert(cg.pid);
+
+            // New window we haven't seen?
+            if !self.known_windows.contains_key(&cg.wid) {
+                tracing::info!(wid = cg.wid, pid = cg.pid, owner = %cg.owner, "new window detected");
+                (self.on_new_window)(cg.pid, cg.owner.clone(), cg.wid);
+            }
         }
 
-        // Source 2: NSWorkspace — catches bundled apps, gives bundle IDs
+        // Also check NSWorkspace for PIDs (some apps don't have on-screen windows yet)
         let workspace = NSWorkspace::sharedWorkspace();
         let apps = workspace.runningApplications();
         let count = apps.count();
         for i in 0..count {
             let app = apps.objectAtIndex(i);
-            if app.activationPolicy() != NSApplicationActivationPolicy::Regular {
-                continue;
+            if app.activationPolicy() == NSApplicationActivationPolicy::Regular {
+                current_pids.insert(app.processIdentifier());
             }
-
-            let pid = app.processIdentifier();
-            if !current_pids.contains(&pid) && !self.known_pids.contains(&pid) {
-                let name = app
-                    .localizedName()
-                    .map(|n| n.to_string())
-                    .unwrap_or_default();
-                let bundle = app
-                    .bundleIdentifier()
-                    .map(|b| b.to_string())
-                    .unwrap_or_default();
-                tracing::info!(pid, app = %name, bundle = %bundle, "app launched (NS)");
-                (self.on_launch)(pid, name, bundle);
-            }
-            current_pids.insert(pid);
         }
 
-        // Detect terminated apps: PIDs we knew about that are no longer in either source
+        // Detect terminated PIDs
         let terminated: Vec<i32> = self
             .known_pids
             .iter()
@@ -100,6 +98,7 @@ impl WorkspacePollingObserver {
             (self.on_terminate)(*pid);
         }
 
+        self.known_windows = current_windows;
         self.known_pids = current_pids;
     }
 }
