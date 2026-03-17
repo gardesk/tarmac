@@ -53,6 +53,8 @@ pub struct WmState {
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
+    pub gap_inner: f64,
+    pub gap_outer: f64,
 }
 
 impl Default for WmState {
@@ -75,6 +77,8 @@ impl WmState {
             drag: None,
             focus_follows_mouse: true,
             mouse_follows_focus: true,
+            gap_inner: 0.0,
+            gap_outer: 0.0,
         }
     }
 
@@ -136,7 +140,7 @@ impl WmState {
             .workspaces
             .active()
             .tree
-            .calculate_geometries(self.screen_rect);
+            .calculate_geometries_with_gaps(self.screen_rect, self.gap_inner, self.gap_outer, true);
         for (wid, rect) in &geometries {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
                 let _ = ax_set_position(ax_ref, rect.x, rect.y);
