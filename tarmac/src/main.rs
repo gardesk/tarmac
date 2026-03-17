@@ -44,6 +44,11 @@ fn main() {
                     handle_action(action);
                     true // suppress
                 } else {
+                    tracing::trace!(
+                        keycode = key_event.keycode,
+                        mods = ?key_event.modifiers,
+                        "unmatched key"
+                    );
                     false // pass through
                 }
             }
