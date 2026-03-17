@@ -150,6 +150,16 @@ fn main() {
     let ipc_rx = tarmac::ipc::server::start_server();
     IPC_RX.with(|r| *r.borrow_mut() = Some(ipc_rx));
 
+    // Register display hotplug callback
+    tarmac::platform::display::register_display_change_callback(Box::new(|| {
+        tracing::info!("display configuration changed, refreshing monitors");
+        WM_STATE.with(|s| {
+            if let Some(state) = s.borrow_mut().as_mut() {
+                state.refresh_monitors();
+            }
+        });
+    }));
+
     install_polling_timer();
     run_app();
 }
