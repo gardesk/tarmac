@@ -243,6 +243,9 @@ impl HotkeyManager {
         // Equalize
         self.register(m, Key::E, Action::Equalize);
 
+        // Toggle float
+        self.register(ms, Key::Space, Action::ToggleFloat);
+
         // Workspaces: Cmd+1-9, Cmd+0
         self.register(m, Key::Num1, Action::Workspace(1));
         self.register(m, Key::Num2, Action::Workspace(2));
