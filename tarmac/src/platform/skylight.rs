@@ -23,9 +23,13 @@ unsafe extern "C" {
 /// Use K_CG_FLOATING_WINDOW_LEVEL (3) to keep a window above all normal windows.
 pub fn set_window_level(window_id: u32, level: c_int) -> bool {
     let cid = unsafe { SLSMainConnectionID() };
+    tracing::info!(window_id, level, cid, "SLSSetWindowLevel calling");
     let result = unsafe { SLSSetWindowLevel(cid, window_id, level) };
     if result != 0 {
-        tracing::warn!(window_id, level, result, "SLSSetWindowLevel failed");
+        tracing::warn!(window_id, level, result, cid, "SLSSetWindowLevel FAILED");
+        false
+    } else {
+        tracing::info!(window_id, level, "SLSSetWindowLevel succeeded");
+        true
     }
-    result == 0
 }
