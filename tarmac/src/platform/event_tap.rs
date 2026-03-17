@@ -34,7 +34,7 @@ impl EventTap {
 
         let port = unsafe {
             CGEvent::tap_create(
-                CGEventTapLocation::SessionEventTap,
+                CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
                 CGEventTapOptions(0), // Default = active (can suppress)
                 mask,
