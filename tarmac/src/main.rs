@@ -44,20 +44,13 @@ fn main() {
         tracing::error!("failed to create hotkey manager");
     }
 
-    // Keep CGEventTap for mouse events only (click-to-focus)
-    let _event_tap = EventTap::install(Box::new(move |event| {
-        use tarmac::core::input::InputEvent;
-        match event {
-            InputEvent::Key(_) => false, // Hotkeys handled by Carbon now
-            InputEvent::MouseClick { x, y } => {
-                WM_STATE.with(|s| {
-                    if let Some(state) = s.borrow_mut().as_mut() {
-                        state.click_to_focus(x, y);
-                    }
-                });
-                false // always pass click through
+    // CGEventTap for mouse click-to-focus only (hotkeys use Carbon)
+    let _event_tap = EventTap::install(Box::new(move |x, y| {
+        WM_STATE.with(|s| {
+            if let Some(state) = s.borrow_mut().as_mut() {
+                state.click_to_focus(x, y);
             }
-        }
+        });
     }));
 
     // Set up polling for new/closed windows and app terminations
