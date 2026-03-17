@@ -82,6 +82,8 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
         }
     };
 
+    tracing::trace!(app = %app.name, ax_window_count = ax_windows.len(), "raw AX windows");
+
     let mut result = Vec::new();
     for ax_win in ax_windows {
         if !is_manageable_window(&ax_win) {
@@ -90,7 +92,10 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
 
         let id = match ax_get_window_id(&ax_win) {
             Ok(id) => id,
-            Err(_) => continue,
+            Err(e) => {
+                tracing::trace!(app = %app.name, err = %e, "failed to get window id");
+                continue;
+            }
         };
 
         let title = ax_get_string(&ax_win, "AXTitle").unwrap_or_default();

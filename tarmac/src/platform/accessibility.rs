@@ -225,17 +225,22 @@ pub fn is_manageable_window(element: &AXUIElement) -> bool {
         Ok(r) => r,
         Err(_) => return false,
     };
+    let subrole = ax_get_string(element, "AXSubrole").unwrap_or_default();
+    let title = ax_get_string(element, "AXTitle").unwrap_or_default();
+
     if role != "AXWindow" {
+        tracing::trace!(role, subrole, title, "skipping non-AXWindow");
         return false;
     }
-    let subrole = match ax_get_string(element, "AXSubrole") {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    matches!(
+
+    let dominated = matches!(
         subrole.as_str(),
         "AXStandardWindow" | "AXDialog" | "AXFloatingWindow"
-    )
+    );
+    if !dominated {
+        tracing::trace!(role, subrole, title, "skipping non-standard subrole");
+    }
+    dominated
 }
 
 // Raw C FFI for functions not yet in objc2-application-services with the right signatures
