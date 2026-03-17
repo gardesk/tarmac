@@ -2,9 +2,10 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
 
-use tarmac::core::input::{Action, KeybindManager};
+use tarmac::core::input::Action;
 use tarmac::core::state::WmState;
 use tarmac::platform::event_tap::EventTap;
+use tarmac::platform::hotkey::HotkeyManager;
 use tarmac::platform::permissions;
 use tarmac::platform::workspace_observer::WorkspacePollingObserver;
 use tracing_subscriber::EnvFilter;
@@ -33,31 +34,22 @@ fn main() {
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
-    // Set up keybinds and event tap
-    let keybinds = KeybindManager::with_defaults();
+    // Register global hotkeys via Carbon (works even when Firefox has focus)
+    let mut _hotkey_mgr = HotkeyManager::new(Box::new(|action| {
+        handle_action(action);
+    }));
+    if let Some(ref mut mgr) = _hotkey_mgr {
+        mgr.register_defaults();
+    } else {
+        tracing::error!("failed to create hotkey manager");
+    }
+
+    // Keep CGEventTap for mouse events only (click-to-focus)
     let _event_tap = EventTap::install(Box::new(move |event| {
         use tarmac::core::input::InputEvent;
         match event {
-            InputEvent::Key(key_event) => {
-                if let Some(action) = keybinds.dispatch(&key_event) {
-                    tracing::debug!(?action, "keybind matched");
-                    handle_action(action);
-                    true // suppress
-                } else {
-                    // Log at debug for modifier keys to help diagnose binding issues
-                    if !key_event.modifiers.is_empty() {
-                        tracing::debug!(
-                            keycode = format!("0x{:02X}", key_event.keycode),
-                            mods = ?key_event.modifiers,
-                            mods_stripped = ?(key_event.modifiers & !tarmac::core::input::Modifiers::FN),
-                            "unmatched key"
-                        );
-                    }
-                    false // pass through
-                }
-            }
+            InputEvent::Key(_) => false, // Hotkeys handled by Carbon now
             InputEvent::MouseClick { x, y } => {
-                // Click-to-focus: find which window was clicked, focus it
                 WM_STATE.with(|s| {
                     if let Some(state) = s.borrow_mut().as_mut() {
                         state.click_to_focus(x, y);
@@ -67,10 +59,6 @@ fn main() {
             }
         }
     }));
-
-    if _event_tap.is_none() {
-        tracing::error!("failed to create event tap — check accessibility permissions");
-    }
 
     // Set up polling for new/closed windows and app terminations
     let poller = WorkspacePollingObserver::new(
@@ -152,14 +140,12 @@ fn install_polling_timer() {
 }
 
 unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
-    // Drain queued AX observer events and process them
     WM_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.process_events();
         }
     });
 
-    // Poll for app launches/terminations
     WORKSPACE_POLLER.with(|p| {
         if let Some(poller) = p.borrow_mut().as_mut() {
             poller.poll();
