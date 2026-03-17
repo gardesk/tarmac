@@ -167,6 +167,7 @@ pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
             frame,
             usable_frame,
             is_primary: did == main_id,
+            active_workspace: 0,
         });
     }
 

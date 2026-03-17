@@ -2,7 +2,7 @@ use super::tree::Rect;
 
 pub type MonitorId = u32; // CGDirectDisplayID
 
-/// A tracked display with its geometry.
+/// A tracked display with its geometry and active workspace.
 #[derive(Debug, Clone)]
 pub struct Monitor {
     pub id: MonitorId,
@@ -11,89 +11,42 @@ pub struct Monitor {
     /// Usable area (excludes dock + menu bar)
     pub usable_frame: Rect,
     pub is_primary: bool,
+    /// Index of the workspace currently displayed on this monitor.
+    pub active_workspace: usize,
 }
 
-/// Manages all connected displays.
-#[derive(Debug)]
-pub struct MonitorManager {
-    monitors: Vec<Monitor>,
-    pub focused: MonitorId,
+/// Sort monitor indices left-to-right by x position.
+pub fn sorted_indices(monitors: &[Monitor]) -> Vec<usize> {
+    let mut indices: Vec<usize> = (0..monitors.len()).collect();
+    indices.sort_by(|&a, &b| {
+        monitors[a]
+            .usable_frame
+            .x
+            .partial_cmp(&monitors[b].usable_frame.x)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    indices
 }
 
-impl MonitorManager {
-    pub fn new() -> Self {
-        Self {
-            monitors: Vec::new(),
-            focused: 0,
-        }
-    }
-
-    pub fn set_monitors(&mut self, monitors: Vec<Monitor>) {
-        if let Some(primary) = monitors.iter().find(|m| m.is_primary) {
-            self.focused = primary.id;
-        } else if let Some(first) = monitors.first() {
-            self.focused = first.id;
-        }
-        self.monitors = monitors;
-    }
-
-    pub fn count(&self) -> usize {
-        self.monitors.len()
-    }
-
-    pub fn get(&self, id: MonitorId) -> Option<&Monitor> {
-        self.monitors.iter().find(|m| m.id == id)
-    }
-
-    pub fn focused_monitor(&self) -> Option<&Monitor> {
-        self.get(self.focused)
-    }
-
-    pub fn all(&self) -> &[Monitor] {
-        &self.monitors
-    }
-
-    /// Get monitors sorted left-to-right by x position.
-    pub fn sorted_by_position(&self) -> Vec<&Monitor> {
-        let mut sorted: Vec<&Monitor> = self.monitors.iter().collect();
-        sorted.sort_by(|a, b| {
-            a.usable_frame
-                .x
-                .partial_cmp(&b.usable_frame.x)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        sorted
-    }
-
-    /// Get the next monitor in position order.
-    pub fn next_monitor(&self, from: MonitorId) -> Option<MonitorId> {
-        let sorted = self.sorted_by_position();
-        let idx = sorted.iter().position(|m| m.id == from)?;
-        let next_idx = (idx + 1) % sorted.len();
-        Some(sorted[next_idx].id)
-    }
-
-    /// Get the previous monitor in position order.
-    pub fn prev_monitor(&self, from: MonitorId) -> Option<MonitorId> {
-        let sorted = self.sorted_by_position();
-        let idx = sorted.iter().position(|m| m.id == from)?;
-        let prev_idx = if idx == 0 { sorted.len() - 1 } else { idx - 1 };
-        Some(sorted[prev_idx].id)
-    }
-
-    /// Find which monitor contains a screen point.
-    pub fn monitor_at_point(&self, x: f64, y: f64) -> Option<MonitorId> {
-        self.monitors
-            .iter()
-            .find(|m| m.frame.contains_point(x, y))
-            .map(|m| m.id)
-    }
+/// Next monitor index in position order (wrapping).
+pub fn next_index(monitors: &[Monitor], from: usize) -> usize {
+    let sorted = sorted_indices(monitors);
+    let pos = sorted.iter().position(|&i| i == from).unwrap_or(0);
+    sorted[(pos + 1) % sorted.len()]
 }
 
-impl Default for MonitorManager {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Previous monitor index in position order (wrapping).
+pub fn prev_index(monitors: &[Monitor], from: usize) -> usize {
+    let sorted = sorted_indices(monitors);
+    let pos = sorted.iter().position(|&i| i == from).unwrap_or(0);
+    sorted[if pos == 0 { sorted.len() - 1 } else { pos - 1 }]
+}
+
+/// Find which monitor index contains a screen point.
+pub fn index_at_point(monitors: &[Monitor], x: f64, y: f64) -> Option<usize> {
+    monitors
+        .iter()
+        .position(|m| m.frame.contains_point(x, y))
 }
 
 #[cfg(test)]
@@ -107,53 +60,51 @@ mod tests {
                 frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
                 usable_frame: Rect::new(0.0, 25.0, 1920.0, 1055.0),
                 is_primary: true,
+                active_workspace: 0,
             },
             Monitor {
                 id: 2,
                 frame: Rect::new(1920.0, 0.0, 2560.0, 1440.0),
                 usable_frame: Rect::new(1920.0, 25.0, 2560.0, 1415.0),
                 is_primary: false,
+                active_workspace: 1,
             },
         ]
     }
 
     #[test]
-    fn primary_is_focused_by_default() {
-        let mut mgr = MonitorManager::new();
-        mgr.set_monitors(make_monitors());
-        assert_eq!(mgr.focused, 1);
+    fn sorted_left_to_right() {
+        let monitors = make_monitors();
+        assert_eq!(sorted_indices(&monitors), vec![0, 1]);
     }
 
     #[test]
     fn next_prev_cycle() {
-        let mut mgr = MonitorManager::new();
-        mgr.set_monitors(make_monitors());
-        assert_eq!(mgr.next_monitor(1), Some(2));
-        assert_eq!(mgr.next_monitor(2), Some(1)); // wraps
-        assert_eq!(mgr.prev_monitor(1), Some(2)); // wraps
-        assert_eq!(mgr.prev_monitor(2), Some(1));
+        let monitors = make_monitors();
+        assert_eq!(next_index(&monitors, 0), 1);
+        assert_eq!(next_index(&monitors, 1), 0); // wraps
+        assert_eq!(prev_index(&monitors, 0), 1); // wraps
+        assert_eq!(prev_index(&monitors, 1), 0);
     }
 
     #[test]
-    fn monitor_at_point() {
-        let mut mgr = MonitorManager::new();
-        mgr.set_monitors(make_monitors());
-        assert_eq!(mgr.monitor_at_point(500.0, 500.0), Some(1));
-        assert_eq!(mgr.monitor_at_point(2500.0, 500.0), Some(2));
-        assert_eq!(mgr.monitor_at_point(-100.0, 500.0), None);
+    fn point_lookup() {
+        let monitors = make_monitors();
+        assert_eq!(index_at_point(&monitors, 500.0, 500.0), Some(0));
+        assert_eq!(index_at_point(&monitors, 2500.0, 500.0), Some(1));
+        assert_eq!(index_at_point(&monitors, -100.0, 500.0), None);
     }
 
     #[test]
     fn single_monitor() {
-        let mut mgr = MonitorManager::new();
-        mgr.set_monitors(vec![Monitor {
+        let monitors = vec![Monitor {
             id: 42,
             frame: Rect::new(0.0, 0.0, 2048.0, 1326.0),
             usable_frame: Rect::new(0.0, 40.0, 2048.0, 1286.0),
             is_primary: true,
-        }]);
-        assert_eq!(mgr.count(), 1);
-        assert_eq!(mgr.focused, 42);
-        assert_eq!(mgr.next_monitor(42), Some(42)); // wraps to self
+            active_workspace: 0,
+        }];
+        assert_eq!(next_index(&monitors, 0), 0); // wraps to self
+        assert_eq!(prev_index(&monitors, 0), 0);
     }
 }

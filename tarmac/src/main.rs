@@ -166,7 +166,7 @@ fn handle_action(action: Action) {
                 Action::CloseWindow => state.close_focused(),
                 Action::Focus(dir) => {
                     state.focus_direction(dir);
-                    if let Some(id) = state.workspaces.active().focused {
+                    if let Some(id) = state.active_workspace().focused {
                         let id_str = id.to_string();
                         fire_lua_event("window_focused", &[&id_str]);
                     }
@@ -175,33 +175,33 @@ fn handle_action(action: Action) {
                 Action::Resize(dir) => state.resize_direction(dir),
                 Action::Equalize => state.equalize(),
                 Action::Workspace(num) => {
-                    let old = state.workspaces.active_id().to_string();
+                    let old = state.active_workspace().id.to_string();
                     state.switch_workspace(num);
-                    let new = state.workspaces.active_id().to_string();
+                    let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
                 }
                 Action::MoveToWorkspace(num) => state.move_to_workspace(num),
                 Action::WorkspaceNext => {
-                    let old = state.workspaces.active_id().to_string();
+                    let old = state.active_workspace().id.to_string();
                     state.workspace_next();
-                    let new = state.workspaces.active_id().to_string();
+                    let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
                 }
                 Action::WorkspacePrev => {
-                    let old = state.workspaces.active_id().to_string();
+                    let old = state.active_workspace().id.to_string();
                     state.workspace_prev();
-                    let new = state.workspaces.active_id().to_string();
+                    let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
                 }
                 Action::ToggleFloat => state.toggle_float(),
                 Action::FocusMonitorNext => {
                     state.focus_monitor_next();
-                    let mid = state.monitors.focused.to_string();
+                    let mid = state.focused_monitor.to_string();
                     fire_lua_event("monitor_focused", &[&mid]);
                 }
                 Action::FocusMonitorPrev => {
                     state.focus_monitor_prev();
-                    let mid = state.monitors.focused.to_string();
+                    let mid = state.focused_monitor.to_string();
                     fire_lua_event("monitor_focused", &[&mid]);
                 }
                 Action::MoveToMonitorNext => state.move_to_monitor_next(),
@@ -429,14 +429,14 @@ fn process_ipc_command(
                 Response::ok_empty()
             }
             "get-workspaces" => {
-                let active_id = state.workspaces.active_id().to_string();
+                let active_id = state.active_workspace().id.to_string();
                 let mut ws_list: Vec<serde_json::Value> = state
                     .workspaces
-                    .all_workspaces()
-                    .map(|(id, ws)| {
+                    .iter()
+                    .map(|ws| {
                         serde_json::json!({
-                            "id": id.to_string(),
-                            "active": id.to_string() == active_id,
+                            "id": ws.id.to_string(),
+                            "active": ws.id.to_string() == active_id,
                             "windows": ws.all_window_ids().len(),
                             "focused": ws.focused,
                         })
@@ -452,13 +452,13 @@ fn process_ipc_command(
                 use tarmac::platform::accessibility::{
                     ax_get_position, ax_get_size, ax_get_string,
                 };
-                if let Some(focused_id) = state.workspaces.active().focused {
+                if let Some(focused_id) = state.active_workspace().focused {
                     let app_name = state
                         .registry
                         .get(focused_id)
                         .map(|w| w.app_name.clone())
                         .unwrap_or_default();
-                    let floating = state.workspaces.active().is_floating(focused_id);
+                    let floating = state.active_workspace().is_floating(focused_id);
 
                     // Query live AX data for current title and geometry
                     let (title, x, y, width, height) =
@@ -478,7 +478,7 @@ fn process_ipc_command(
                         "x": x, "y": y,
                         "width": width, "height": height,
                         "floating": floating,
-                        "workspace": state.workspaces.active_id().to_string(),
+                        "workspace": state.active_workspace().id.to_string(),
                     }))
                 } else {
                     Response::ok(serde_json::json!({ "focused": null }))

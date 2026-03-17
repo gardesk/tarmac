@@ -12,12 +12,12 @@ use crate::platform::accessibility::{
 use crate::platform::application::{
     discover_all_windows, discover_applications, enumerate_windows,
 };
-use crate::platform::display::{get_usable_frame, warp_mouse};
+use crate::platform::display::warp_mouse;
 use crate::platform::observer::{AppObserver, WindowEvent};
 
 use super::tree::{Node, Rect};
 use super::window::{WindowId, WindowRegistry, WindowState};
-use super::workspace::{WorkspaceId, WorkspaceManager};
+use super::workspace::WorkspaceManager;
 
 struct QueuedEvent {
     event: WindowEvent,
@@ -44,10 +44,11 @@ struct DragState {
 pub struct WmState {
     pub registry: WindowRegistry,
     pub workspaces: WorkspaceManager,
-    pub monitors: super::monitor::MonitorManager,
+    pub monitors: Vec<super::monitor::Monitor>,
     ax_refs: HashMap<WindowId, CFRetained<AXUIElement>>,
     observers: HashMap<i32, AppObserver>,
-    screen_rect: Rect,
+    pub focused_monitor: usize,
+    pub bar_height: f64,
     event_queue: Rc<RefCell<Vec<QueuedEvent>>>,
     ffm_cooldown_until: Option<std::time::Instant>,
     ffm_last_window: Option<WindowId>,
@@ -70,10 +71,11 @@ impl WmState {
         Self {
             registry: WindowRegistry::new(),
             workspaces: WorkspaceManager::new(),
-            monitors: super::monitor::MonitorManager::new(),
+            monitors: Vec::new(),
             ax_refs: HashMap::new(),
             observers: HashMap::new(),
-            screen_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            focused_monitor: 0,
+            bar_height: 0.0,
             event_queue: Rc::new(RefCell::new(Vec::new())),
             ffm_cooldown_until: None,
             ffm_last_window: None,
@@ -86,45 +88,89 @@ impl WmState {
         }
     }
 
+    /// Active workspace index for focused monitor.
+    pub fn active_ws_idx(&self) -> usize {
+        self.monitors[self.focused_monitor].active_workspace
+    }
+
+    /// Active workspace (read-only).
+    pub fn active_workspace(&self) -> &super::workspace::Workspace {
+        self.workspaces.get(self.active_ws_idx())
+    }
+
+    /// Active workspace (mutable).
+    pub fn active_workspace_mut(&mut self) -> &mut super::workspace::Workspace {
+        let idx = self.active_ws_idx();
+        self.workspaces.get_mut(idx)
+    }
+
+    /// Usable frame for a monitor, adjusted for bar_height.
+    fn monitor_rect(&self, mi: usize) -> Rect {
+        let r = self.monitors[mi].usable_frame;
+        if self.bar_height > 0.0 {
+            Rect::new(r.x, r.y + self.bar_height, r.width, r.height - self.bar_height)
+        } else {
+            r
+        }
+    }
+
+    /// Usable frame for focused monitor.
+    fn focused_rect(&self) -> Rect {
+        self.monitor_rect(self.focused_monitor)
+    }
+
+    /// Find which monitor index has a workspace visible, if any.
+    fn monitor_showing_workspace(&self, ws_idx: usize) -> Option<usize> {
+        self.monitors.iter().position(|m| m.active_workspace == ws_idx)
+    }
+
     pub fn discover_and_observe(&mut self) {
         // Discover all displays
-        let displays = crate::platform::display::discover_displays();
-        self.monitors.set_monitors(displays);
+        let mut displays = crate::platform::display::discover_displays();
 
-        // Detect which monitor the cursor is on — that becomes the focused monitor
+        // Sort monitors by x position (left-to-right)
+        displays.sort_by(|a, b| {
+            a.usable_frame
+                .x
+                .partial_cmp(&b.usable_frame.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        self.monitors = displays;
+
+        // Detect which monitor the cursor is on
         let (cx, cy) = crate::platform::display::get_cursor_position();
         tracing::info!(cursor_x = cx, cursor_y = cy, "cursor position at startup");
-        if let Some(cursor_monitor) = self.monitors.monitor_at_point(cx, cy) {
-            self.monitors.focused = cursor_monitor;
-            tracing::info!(monitor = cursor_monitor, "focused monitor set to cursor location");
-        }
 
-        // Use focused monitor's usable frame for layout
-        self.screen_rect = self
-            .monitors
-            .focused_monitor()
-            .map(|m| m.usable_frame)
-            .unwrap_or_else(get_usable_frame);
-        tracing::info!(
-            x = self.screen_rect.x,
-            y = self.screen_rect.y,
-            w = self.screen_rect.width,
-            h = self.screen_rect.height,
-            monitors = self.monitors.count(),
-            "usable screen frame"
-        );
+        let cursor_mi = super::monitor::index_at_point(&self.monitors, cx, cy)
+            .unwrap_or(0);
+        self.focused_monitor = cursor_mi;
+        tracing::info!(monitor = cursor_mi, "focused monitor set to cursor location");
 
-        // Assign workspace 1 to the focused (cursor) monitor, then remaining
-        // monitors get workspace 2, 3, etc. in left-to-right order.
-        let focused_id = self.monitors.focused;
-        let mut ordered_ids: Vec<u32> = Vec::new();
-        ordered_ids.push(focused_id);
-        for m in self.monitors.sorted_by_position() {
-            if m.id != focused_id {
-                ordered_ids.push(m.id);
+        // Assign workspaces: cursor's monitor gets workspace 0 (ws1),
+        // then remaining monitors get 1, 2, etc. in left-to-right order.
+        let mut ws_idx = 0usize;
+        // Cursor monitor gets workspace 0
+        self.monitors[cursor_mi].active_workspace = ws_idx;
+        self.workspaces.get_mut(ws_idx).visible = true;
+        self.workspaces.get_mut(ws_idx).last_monitor = Some(cursor_mi);
+        ws_idx += 1;
+
+        // Remaining monitors in left-to-right order
+        for mi in 0..self.monitors.len() {
+            if mi == cursor_mi {
+                continue;
             }
+            self.monitors[mi].active_workspace = ws_idx;
+            self.workspaces.get_mut(ws_idx).visible = true;
+            self.workspaces.get_mut(ws_idx).last_monitor = Some(mi);
+            ws_idx += 1;
         }
-        self.workspaces.assign_monitors(&ordered_ids);
+
+        tracing::info!(
+            monitors = self.monitors.len(),
+            focused = self.focused_monitor,
+            "displays configured"
+        );
 
         let windows = discover_all_windows();
         for w in &windows {
@@ -171,88 +217,37 @@ impl WmState {
 
     /// Apply layout for ALL visible workspaces on their respective monitors.
     pub fn apply_layout(&self) {
-        for (monitor_id, ws_id) in self.workspaces.monitor_assignments() {
-            let screen_rect = self
-                .monitors
-                .get(*monitor_id)
-                .map(|m| m.usable_frame)
-                .unwrap_or(self.screen_rect);
-
-            if let Some(ws) = self.workspaces.get_workspace(ws_id) {
-                let geometries = ws.tree.calculate_geometries_with_gaps(
-                    screen_rect,
-                    self.gap_inner,
-                    self.gap_outer,
-                    true,
-                );
-                tracing::debug!(
-                    monitor = monitor_id,
-                    workspace = %ws_id,
-                    windows = geometries.len(),
-                    sr_x = screen_rect.x,
-                    sr_y = screen_rect.y,
-                    sr_w = screen_rect.width,
-                    sr_h = screen_rect.height,
-                    "apply_layout"
-                );
-                // Two-pass layout: resize all first (shrink to fit), then
-                // position all. Prevents macOS from pushing windows around
-                // during intermediate overlap states.
-                for (wid, rect) in &geometries {
-                    tracing::debug!(
-                        wid,
-                        x = rect.x,
-                        y = rect.y,
-                        w = rect.width,
-                        h = rect.height,
-                        "layout position"
-                    );
-                    if let Some(ax_ref) = self.ax_refs.get(wid) {
-                        if let Err(e) = ax_set_size(ax_ref, rect.width, rect.height) {
-                            tracing::warn!(wid, ?e, "ax_set_size failed");
-                        }
-                    }
+        for (mi, monitor) in self.monitors.iter().enumerate() {
+            let ws = self.workspaces.get(monitor.active_workspace);
+            let screen_rect = self.monitor_rect(mi);
+            let geometries = ws.tree.calculate_geometries_with_gaps(
+                screen_rect, self.gap_inner, self.gap_outer, true,
+            );
+            tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
+                sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
+                sr_h = screen_rect.height, "apply_layout");
+            for (wid, rect) in &geometries {
+                if let Some(ax_ref) = self.ax_refs.get(wid) {
+                    let _ = ax_set_size(ax_ref, rect.width, rect.height);
                 }
-                for (wid, rect) in &geometries {
-                    if let Some(ax_ref) = self.ax_refs.get(wid) {
-                        if let Err(e) = ax_set_position(ax_ref, rect.x, rect.y) {
-                            tracing::warn!(wid, ?e, "ax_set_position failed");
-                        }
-                    }
+            }
+            for (wid, rect) in &geometries {
+                if let Some(ax_ref) = self.ax_refs.get(wid) {
+                    let _ = ax_set_position(ax_ref, rect.x, rect.y);
                 }
             }
         }
-    }
-
-    /// Get the screen rect for the focused monitor.
-    pub fn focused_screen_rect(&self) -> Rect {
-        self.monitors
-            .focused_monitor()
-            .map(|m| m.usable_frame)
-            .unwrap_or(self.screen_rect)
-    }
-
-    /// Get the screen rect for a specific workspace based on its monitor assignment.
-    fn screen_rect_for_workspace(&self, ws_id: &super::workspace::WorkspaceId) -> Rect {
-        for (mid, wid) in self.workspaces.monitor_assignments() {
-            if wid == ws_id
-                && let Some(m) = self.monitors.get(*mid)
-            {
-                return m.usable_frame;
-            }
-        }
-        self.focused_screen_rect()
     }
 
     // --- Window operations ---
 
     pub fn focus_direction(&mut self, direction: super::tree::Direction) {
-        let ws = self.workspaces.active();
+        let ws = self.active_workspace();
         let focused = match ws.focused {
             Some(f) => f,
             None => return,
         };
-        let sr = self.focused_screen_rect();
+        let sr = self.focused_rect();
         let geoms = ws.tree.calculate_geometries(sr);
         if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
             self.focus_window(target);
@@ -264,31 +259,30 @@ impl WmState {
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
                 self.ffm_last_window = Some(target);
             }
-        } else if self.monitors.count() > 1 {
-            // No window found in direction on current monitor —
+        } else if self.monitors.len() > 1 {
+            // No window found in direction on current monitor --
             // try crossing to adjacent monitor
             use super::tree::Direction;
-            let next_monitor = match direction {
-                Direction::Right => self.monitors.next_monitor(self.monitors.focused),
-                Direction::Left => self.monitors.prev_monitor(self.monitors.focused),
+            let new_mi = match direction {
+                Direction::Right => {
+                    let next = super::monitor::next_index(&self.monitors, self.focused_monitor);
+                    if next != self.focused_monitor { Some(next) } else { None }
+                }
+                Direction::Left => {
+                    let prev = super::monitor::prev_index(&self.monitors, self.focused_monitor);
+                    if prev != self.focused_monitor { Some(prev) } else { None }
+                }
                 _ => None, // Up/Down stays on current monitor
             };
-            if let Some(mid) = next_monitor
-                && mid != self.monitors.focused
-            {
-                self.monitors.focused = mid;
-                self.workspaces.set_focused_monitor(mid);
-                if let Some(m) = self.monitors.get(mid) {
-                    self.screen_rect = m.usable_frame;
-                }
-                if let Some(wid) = self.workspaces.active().focused {
+            if let Some(new_mi) = new_mi {
+                self.focused_monitor = new_mi;
+                if let Some(wid) = self.active_workspace().focused {
                     self.focus_window(wid);
                     if self.mouse_follows_focus {
                         let geoms = self
-                            .workspaces
-                            .active()
+                            .active_workspace()
                             .tree
-                            .calculate_geometries(self.focused_screen_rect());
+                            .calculate_geometries(self.focused_rect());
                         if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                             warp_mouse_to_center(rect);
                             self.ffm_cooldown_until = Some(
@@ -298,18 +292,18 @@ impl WmState {
                         }
                     }
                 }
-                tracing::debug!(monitor = mid, "crossed to adjacent monitor");
+                tracing::debug!(monitor = new_mi, "crossed to adjacent monitor");
             }
         }
     }
 
     pub fn swap_direction(&mut self, direction: super::tree::Direction) {
-        let ws = self.workspaces.active();
+        let ws = self.active_workspace();
         let focused = match ws.focused {
             Some(f) => f,
             None => return,
         };
-        let sr = self.focused_screen_rect();
+        let sr = self.focused_rect();
         let geoms = ws.tree.calculate_geometries(sr);
         if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
             tracing::debug!(
@@ -318,7 +312,7 @@ impl WmState {
                 ?direction,
                 "swap_direction"
             );
-            if self.workspaces.active_mut().tree.swap(focused, target) {
+            if self.active_workspace_mut().tree.swap(focused, target) {
                 self.apply_layout();
             }
         } else {
@@ -327,13 +321,12 @@ impl WmState {
     }
 
     pub fn resize_direction(&mut self, direction: super::tree::Direction) {
-        let focused = match self.workspaces.active().focused {
+        let focused = match self.active_workspace().focused {
             Some(f) => f,
             None => return,
         };
         if self
-            .workspaces
-            .active_mut()
+            .active_workspace_mut()
             .tree
             .resize(focused, direction, 0.05)
         {
@@ -342,7 +335,7 @@ impl WmState {
     }
 
     pub fn equalize(&mut self) {
-        self.workspaces.active_mut().tree.equalize();
+        self.active_workspace_mut().tree.equalize();
         self.apply_layout();
     }
 
@@ -359,7 +352,7 @@ impl WmState {
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
-                // Full activation — raise window and bring app forward
+                // Full activation -- raise window and bring app forward
                 let _ = ax_perform_action(ax_ref, "AXRaise");
                 if let Some(w) = self.registry.get(id) {
                     let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
@@ -367,13 +360,10 @@ impl WmState {
                     let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
                 }
             } else {
-                // Soft focus — update internal tracking only, don't touch macOS.
-                // Any AX attribute change (AXRaise, AXMain, AXFocused) on a same-app
-                // window reorders it above the floating window. So we do nothing
-                // to macOS and rely on our internal focus tracking for keybind dispatch.
+                // Soft focus -- update internal tracking only, don't touch macOS.
             }
         }
-        self.workspaces.active_mut().record_focus(id);
+        self.active_workspace_mut().record_focus(id);
         self.enforce_floating_levels();
         tracing::debug!(id, activate_app, "focused window");
     }
@@ -382,40 +372,40 @@ impl WmState {
 
     /// Start a move drag on a floating window (Cmd+LeftClick).
     pub fn begin_move_drag(&mut self, x: f64, y: f64) {
-        let ws = self.workspaces.active();
         // Find which floating window is under the cursor
-        if let Some(fw) = ws
+        let hit = self.active_workspace()
             .floating
             .iter()
             .rev()
             .find(|fw| fw.geometry.contains_point(x, y))
-        {
+            .map(|fw| (fw.id, fw.geometry));
+        if let Some((id, geometry)) = hit {
             self.drag = Some(DragState {
-                window_id: fw.id,
+                window_id: id,
                 mode: DragMode::Move,
                 start_mouse: (x, y),
-                start_geometry: fw.geometry,
+                start_geometry: geometry,
             });
-            tracing::debug!(id = fw.id, "move drag started");
+            tracing::debug!(id, "move drag started");
         }
     }
 
     /// Start a resize drag on a floating window (Cmd+RightClick).
     pub fn begin_resize_drag(&mut self, x: f64, y: f64) {
-        let ws = self.workspaces.active();
-        if let Some(fw) = ws
+        let hit = self.active_workspace()
             .floating
             .iter()
             .rev()
             .find(|fw| fw.geometry.contains_point(x, y))
-        {
+            .map(|fw| (fw.id, fw.geometry));
+        if let Some((id, geometry)) = hit {
             self.drag = Some(DragState {
-                window_id: fw.id,
+                window_id: id,
                 mode: DragMode::Resize,
                 start_mouse: (x, y),
-                start_geometry: fw.geometry,
+                start_geometry: geometry,
             });
-            tracing::debug!(id = fw.id, "resize drag started");
+            tracing::debug!(id, "resize drag started");
         }
     }
 
@@ -433,8 +423,7 @@ impl WmState {
 
                 // Update floating geometry
                 if let Some(fw) = self
-                    .workspaces
-                    .active_mut()
+                    .active_workspace_mut()
                     .floating
                     .iter_mut()
                     .find(|f| f.id == drag.window_id)
@@ -453,8 +442,7 @@ impl WmState {
                 let new_h = (drag.start_geometry.height + dy).max(100.0);
 
                 if let Some(fw) = self
-                    .workspaces
-                    .active_mut()
+                    .active_workspace_mut()
                     .floating
                     .iter_mut()
                     .find(|f| f.id == drag.window_id)
@@ -486,13 +474,13 @@ impl WmState {
     /// Called after every focus change since app activation can reset ordering.
     fn enforce_floating_levels(&self) {
         use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-        for fw in &self.workspaces.active().floating {
+        for fw in &self.active_workspace().floating {
             set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
         }
     }
 
     pub fn close_focused(&mut self) {
-        let focused = match self.workspaces.active().focused {
+        let focused = match self.active_workspace().focused {
             Some(f) => f,
             None => return,
         };
@@ -522,9 +510,9 @@ impl WmState {
             self.ffm_cooldown_until = None;
         }
 
-        let ws = self.workspaces.active();
+        let ws = self.active_workspace();
 
-        // Check floating windows first — they're visually on top
+        // Check floating windows first -- they're visually on top
         let floating_under = ws
             .floating
             .iter()
@@ -537,7 +525,7 @@ impl WmState {
         } else {
             // Check tiled windows using gap-aware geometry matching actual layout
             let geoms = ws.tree.calculate_geometries_with_gaps(
-                self.focused_screen_rect(),
+                self.focused_rect(),
                 self.gap_inner,
                 self.gap_outer,
                 true,
@@ -552,11 +540,11 @@ impl WmState {
         if window_under != self.ffm_last_window {
             self.ffm_last_window = window_under;
             if let Some(id) = window_under
-                && self.workspaces.active().focused != Some(id)
+                && self.active_workspace().focused != Some(id)
             {
                 // Use soft focus only when floating windows exist to preserve z-order.
                 // Otherwise use full activation for proper title bar highlighting.
-                if self.workspaces.active().floating.is_empty() {
+                if self.active_workspace().floating.is_empty() {
                     self.focus_window(id);
                 } else {
                     self.focus_window_soft(id);
@@ -566,18 +554,17 @@ impl WmState {
     }
 
     pub fn toggle_float(&mut self) {
-        let focused = match self.workspaces.active().focused {
+        let focused = match self.active_workspace().focused {
             Some(f) => f,
             None => return,
         };
-        let sr = self.focused_screen_rect();
-        if self.workspaces.active_mut().toggle_float(focused, sr) {
+        let sr = self.focused_rect();
+        if self.active_workspace_mut().toggle_float(focused, sr) {
             self.apply_layout();
-            if self.workspaces.active().is_floating(focused) {
+            if self.active_workspace().is_floating(focused) {
                 // Position at stored geometry
                 if let Some(fw) = self
-                    .workspaces
-                    .active()
+                    .active_workspace()
                     .floating
                     .iter()
                     .find(|f| f.id == focused)
@@ -601,7 +588,7 @@ impl WmState {
     }
 
     pub fn click_to_focus(&mut self, x: f64, y: f64) {
-        let ws = self.workspaces.active();
+        let ws = self.active_workspace();
 
         // Check floating first
         let floating_hit = ws
@@ -615,7 +602,7 @@ impl WmState {
             Some(fid)
         } else {
             let geoms = ws.tree.calculate_geometries_with_gaps(
-                self.focused_screen_rect(),
+                self.focused_rect(),
                 self.gap_inner,
                 self.gap_outer,
                 true,
@@ -627,7 +614,7 @@ impl WmState {
         };
 
         if let Some(id) = id
-            && self.workspaces.active().focused != Some(id)
+            && self.active_workspace().focused != Some(id)
         {
             self.focus_window(id);
         }
@@ -636,41 +623,53 @@ impl WmState {
     // --- Workspace operations ---
 
     pub fn switch_workspace(&mut self, num: u8) {
-        let target = WorkspaceId::Numbered(num);
-        tracing::info!(from = %self.workspaces.active_id(), to = %target, "switching workspace");
-        let transition = self
-            .workspaces
-            .switch_to(target, self.focused_screen_rect());
+        let target_idx = (num as usize).saturating_sub(1);
+        let current_idx = self.monitors[self.focused_monitor].active_workspace;
 
-        tracing::debug!(
-            hide = transition.hide.len(),
-            show = transition.show.len(),
-            "workspace transition"
-        );
+        if target_idx == current_idx { return; }
 
-        // Hide windows off ALL monitors
-        for wid in &transition.hide {
-            if let Some(ax_ref) = self.ax_refs.get(wid) {
-                let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let (hide_x, hide_y) = compute_hide_position(&self.monitors, w);
-                let _ = ax_set_position(ax_ref, hide_x, hide_y);
-                tracing::debug!(wid, hide_x, hide_y, "hidden");
+        tracing::info!(from = current_idx + 1, to = num, "switching workspace");
+
+        // Is target workspace already visible on some monitor?
+        if let Some(other_mi) = self.monitor_showing_workspace(target_idx) {
+            // Just move focus to that monitor (gar-style: no swap)
+            self.focused_monitor = other_mi;
+            if let Some(wid) = self.workspaces.get(target_idx).focused {
+                self.focus_window(wid);
+            }
+            if self.mouse_follows_focus {
+                let rect = self.focused_rect();
+                warp_mouse_to_center(&rect);
+                self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+            }
+        } else {
+            // Hide current workspace windows
+            let current_ws = self.workspaces.get(current_idx);
+            for wid in current_ws.all_window_ids() {
+                if let Some(ax_ref) = self.ax_refs.get(&wid) {
+                    let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                    let (hx, hy) = compute_hide_position(&self.monitors, w);
+                    let _ = ax_set_position(ax_ref, hx, hy);
+                }
+            }
+            self.workspaces.get_mut(current_idx).visible = false;
+
+            // Show target workspace
+            self.monitors[self.focused_monitor].active_workspace = target_idx;
+            self.workspaces.get_mut(target_idx).visible = true;
+            self.workspaces.get_mut(target_idx).last_monitor = Some(self.focused_monitor);
+
+            self.apply_layout();
+            if let Some(wid) = self.workspaces.get(target_idx).focused {
+                self.focus_window(wid);
             }
         }
-
-        // Apply layout on all visible workspaces (uses per-monitor rects)
-        self.apply_layout();
-
-        // Focus
-        if let Some(focus_id) = transition.focus {
-            self.focus_window(focus_id);
-        }
-
-        tracing::info!(ws = %self.workspaces.active_id(), "switched workspace");
+        tracing::info!(ws = num, "switched workspace");
     }
 
     pub fn workspace_next(&mut self) {
-        let current = match self.workspaces.active_id() {
+        let current_ws = self.active_workspace();
+        let current = match &current_ws.id {
             super::workspace::WorkspaceId::Numbered(n) => *n,
             _ => return,
         };
@@ -679,7 +678,8 @@ impl WmState {
     }
 
     pub fn workspace_prev(&mut self) {
-        let current = match self.workspaces.active_id() {
+        let current_ws = self.active_workspace();
+        let current = match &current_ws.id {
             super::workspace::WorkspaceId::Numbered(n) => *n,
             _ => return,
         };
@@ -688,77 +688,58 @@ impl WmState {
     }
 
     pub fn focus_monitor_next(&mut self) {
-        let current = self.monitors.focused;
-        if let Some(next) = self.monitors.next_monitor(current) {
-            self.monitors.focused = next;
-            self.workspaces.set_focused_monitor(next);
-            if let Some(m) = self.monitors.get(next) {
-                self.screen_rect = m.usable_frame;
-            }
-            // Reapply layout for the new monitor's workspace
-            self.apply_layout();
-            if let Some(wid) = self.workspaces.active().focused {
-                self.focus_window(wid);
-            }
-            tracing::info!(monitor = next, ws = %self.workspaces.active_id(), "focused monitor");
+        if self.monitors.len() <= 1 { return; }
+        let next = super::monitor::next_index(&self.monitors, self.focused_monitor);
+        self.focused_monitor = next;
+        self.apply_layout();
+        if let Some(wid) = self.active_workspace().focused {
+            self.focus_window(wid);
         }
+        tracing::info!(monitor = next, ws = %self.active_workspace().id, "focused monitor");
     }
 
     pub fn focus_monitor_prev(&mut self) {
-        let current = self.monitors.focused;
-        if let Some(prev) = self.monitors.prev_monitor(current) {
-            self.monitors.focused = prev;
-            self.workspaces.set_focused_monitor(prev);
-            if let Some(m) = self.monitors.get(prev) {
-                self.screen_rect = m.usable_frame;
-            }
-            self.apply_layout();
-            if let Some(wid) = self.workspaces.active().focused {
-                self.focus_window(wid);
-            }
-            tracing::info!(monitor = prev, ws = %self.workspaces.active_id(), "focused monitor");
+        if self.monitors.len() <= 1 { return; }
+        let prev = super::monitor::prev_index(&self.monitors, self.focused_monitor);
+        self.focused_monitor = prev;
+        self.apply_layout();
+        if let Some(wid) = self.active_workspace().focused {
+            self.focus_window(wid);
         }
+        tracing::info!(monitor = prev, ws = %self.active_workspace().id, "focused monitor");
     }
 
     pub fn move_to_monitor_next(&mut self) {
-        let current = self.monitors.focused;
-        if let Some(next) = self.monitors.next_monitor(current)
-            && next != current
-        {
+        if self.monitors.len() <= 1 { return; }
+        let next = super::monitor::next_index(&self.monitors, self.focused_monitor);
+        if next != self.focused_monitor {
             self.move_window_to_monitor(next);
         }
     }
 
     pub fn move_to_monitor_prev(&mut self) {
-        let current = self.monitors.focused;
-        if let Some(prev) = self.monitors.prev_monitor(current)
-            && prev != current
-        {
+        if self.monitors.len() <= 1 { return; }
+        let prev = super::monitor::prev_index(&self.monitors, self.focused_monitor);
+        if prev != self.focused_monitor {
             self.move_window_to_monitor(prev);
         }
     }
 
     /// Move the focused window from the current monitor's workspace to the target monitor's workspace.
-    fn move_window_to_monitor(&mut self, target_monitor: super::monitor::MonitorId) {
-        let focused = match self.workspaces.active().focused {
+    fn move_window_to_monitor(&mut self, target_mi: usize) {
+        let focused = match self.active_workspace().focused {
             Some(f) => f,
             None => return,
         };
 
         // Get the target monitor's active workspace
-        let target_ws = match self.workspaces.active_id_for_monitor(target_monitor) {
-            Some(ws) => ws.clone(),
-            None => return,
-        };
+        let target_ws_idx = self.monitors[target_mi].active_workspace;
 
         // Get target monitor's screen rect for layout
-        let target_rect = match self.monitors.get(target_monitor) {
-            Some(m) => m.usable_frame,
-            None => return,
-        };
+        let target_rect = self.monitor_rect(target_mi);
 
         // Remove from current workspace
-        let current_ws = self.workspaces.active_mut();
+        let current_ws = self.active_workspace_mut();
         let was_floating = current_ws.is_floating(focused);
         if was_floating {
             current_ws.floating.retain(|f| f.id != focused);
@@ -778,7 +759,7 @@ impl WmState {
         self.apply_layout();
 
         // Insert into target workspace
-        let target = self.workspaces.get_or_create(target_ws);
+        let target = self.workspaces.get_or_create(target_ws_idx);
         if was_floating {
             target.floating.push(super::workspace::FloatingWindow {
                 id: focused,
@@ -813,72 +794,118 @@ impl WmState {
         }
 
         // Focus the target monitor
-        self.monitors.focused = target_monitor;
-        self.workspaces.set_focused_monitor(target_monitor);
-        self.screen_rect = target_rect;
+        self.focused_monitor = target_mi;
         self.focus_window(focused);
 
         tracing::info!(
             id = focused,
-            monitor = target_monitor,
+            monitor = target_mi,
             "moved window to monitor"
         );
     }
 
     /// Re-discover displays and reassign workspaces. Called on hotplug.
     pub fn refresh_monitors(&mut self) {
-        let displays = crate::platform::display::discover_displays();
-        let old_count = self.monitors.count();
-        self.monitors.set_monitors(displays);
-        let new_count = self.monitors.count();
+        let mut new_displays = crate::platform::display::discover_displays();
+        new_displays.sort_by(|a, b| {
+            a.usable_frame
+                .x
+                .partial_cmp(&b.usable_frame.x)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
-        let sorted_ids: Vec<u32> = self
-            .monitors
-            .sorted_by_position()
-            .iter()
-            .map(|m| m.id)
-            .collect();
-        self.workspaces.assign_monitors(&sorted_ids);
+        let old_count = self.monitors.len();
 
-        // Update screen rect for focused monitor
-        if let Some(m) = self.monitors.focused_monitor() {
-            self.screen_rect = m.usable_frame;
+        // Match new displays to old by CGDirectDisplayID to preserve workspace assignments
+        let mut new_monitors: Vec<super::monitor::Monitor> = Vec::with_capacity(new_displays.len());
+        let mut used_ws: Vec<bool> = vec![false; self.workspaces.count()];
+
+        for nd in &new_displays {
+            if let Some(old) = self.monitors.iter().find(|om| om.id == nd.id) {
+                let mut m = nd.clone();
+                m.active_workspace = old.active_workspace;
+                used_ws.resize(used_ws.len().max(m.active_workspace + 1), false);
+                used_ws[m.active_workspace] = true;
+                new_monitors.push(m);
+            } else {
+                // New monitor -- assign first non-visible workspace
+                let ws_idx = used_ws.iter().position(|&u| !u).unwrap_or(used_ws.len());
+                used_ws.resize(used_ws.len().max(ws_idx + 1), false);
+                used_ws[ws_idx] = true;
+                let mut m = nd.clone();
+                m.active_workspace = ws_idx;
+                self.workspaces.get_or_create(ws_idx).visible = true;
+                self.workspaces.get_or_create(ws_idx).last_monitor = Some(new_monitors.len());
+                new_monitors.push(m);
+            }
+        }
+
+        self.monitors = new_monitors;
+
+        // Clamp focused_monitor
+        if self.focused_monitor >= self.monitors.len() {
+            self.focused_monitor = 0;
         }
 
         // Reapply layout on all visible workspaces
         self.apply_layout();
 
-        tracing::info!(old_count, new_count, "monitors refreshed");
+        tracing::info!(old_count, new_count = self.monitors.len(), "monitors refreshed");
     }
 
     pub fn move_to_workspace(&mut self, num: u8) {
-        let focused = match self.workspaces.active().focused {
+        let target_idx = (num as usize).saturating_sub(1);
+        let current_idx = self.active_ws_idx();
+        if target_idx == current_idx { return; }
+
+        let focused = match self.active_workspace().focused {
             Some(f) => f,
             None => return,
         };
 
-        let target = WorkspaceId::Numbered(num);
-        if self
-            .workspaces
-            .move_window_to(focused, target.clone(), self.focused_screen_rect())
-        {
-            // Hide the moved window off all monitors
+        // Remove from current workspace
+        let current_ws = self.workspaces.get_mut(current_idx);
+        let was_floating = current_ws.is_floating(focused);
+        if was_floating {
+            current_ws.floating.retain(|f| f.id != focused);
+        } else {
+            current_ws.tree.remove(focused);
+        }
+        current_ws.focus_history.retain(|id| *id != focused);
+        if current_ws.focused == Some(focused) {
+            current_ws.focused = current_ws.focus_history.last().copied()
+                .or(current_ws.tree.first_window());
+        }
+
+        // Insert into target workspace
+        let target_rect = self.monitor_showing_workspace(target_idx)
+            .map(|mi| self.monitor_rect(mi))
+            .unwrap_or(self.focused_rect());
+        let target_ws = self.workspaces.get_or_create(target_idx);
+        if was_floating {
+            target_ws.floating.push(super::workspace::FloatingWindow {
+                id: focused,
+                geometry: Rect::new(target_rect.x + 50.0, target_rect.y + 50.0, 800.0, 600.0),
+            });
+        } else {
+            target_ws.tree.insert_with_rect(focused, target_ws.focused, target_rect);
+        }
+        target_ws.record_focus(focused);
+
+        // If target is not visible, hide the window
+        if !self.workspaces.get(target_idx).visible {
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
                 let (hx, hy) = compute_hide_position(&self.monitors, w);
                 let _ = ax_set_position(ax_ref, hx, hy);
             }
-
-            // Retile current workspace
-            self.apply_layout();
-
-            // Focus next window on current workspace
-            if let Some(next) = self.workspaces.active().focused {
-                self.focus_window(next);
-            }
-
-            tracing::info!(id = focused, target = %target, "moved window to workspace");
         }
+
+        self.apply_layout();
+        if let Some(next) = self.active_workspace().focused {
+            self.focus_window(next);
+        }
+        tracing::info!(id = focused, target = num, "moved window to workspace");
     }
 
     // --- App lifecycle ---
@@ -932,13 +959,18 @@ impl WmState {
         if !self.registry.contains(id) {
             return;
         }
-        tracing::info!(id, "window closed → retiling");
+        tracing::info!(id, "window closed -> retiling");
         self.registry.remove(id);
         self.ax_refs.remove(&id);
-        self.workspaces.active_mut().tree.remove(id);
-        let ws = self.workspaces.active_mut();
-        if ws.focused == Some(id) {
-            ws.pop_focus();
+
+        // Find the workspace containing this window and remove from it
+        if let Some(ws_idx) = self.workspaces.find_window(id) {
+            let ws = self.workspaces.get_mut(ws_idx);
+            ws.floating.retain(|f| f.id != id);
+            ws.tree.remove(id);
+            if ws.focused == Some(id) {
+                ws.pop_focus();
+            }
         }
         self.apply_layout();
     }
@@ -985,30 +1017,37 @@ impl WmState {
         self.observers.remove(&pid);
         for w in &removed {
             self.ax_refs.remove(&w.id);
-            self.workspaces.active_mut().tree.remove(w.id);
+            // Find the workspace containing this window and remove from it
+            if let Some(ws_idx) = self.workspaces.find_window(w.id) {
+                let ws = self.workspaces.get_mut(ws_idx);
+                ws.floating.retain(|f| f.id != w.id);
+                ws.tree.remove(w.id);
+            }
         }
         if !removed.is_empty() {
-            let ws = self.workspaces.active_mut();
-            if ws
-                .focused
-                .is_some_and(|f| removed.iter().any(|w| w.id == f))
-            {
-                ws.pop_focus();
+            // Fix focus on any affected workspace
+            for ws_idx in 0..self.workspaces.count() {
+                let ws = self.workspaces.get_mut(ws_idx);
+                if ws
+                    .focused
+                    .is_some_and(|f| removed.iter().any(|w| w.id == f))
+                {
+                    ws.pop_focus();
+                }
             }
             self.apply_layout();
-            tracing::info!(pid, removed = removed.len(), "app terminated → retiled");
+            tracing::info!(pid, removed = removed.len(), "app terminated -> retiled");
         }
     }
 
     /// Check if a window is on an inactive workspace (intentionally hidden).
     pub fn is_window_hidden(&self, wid: u32) -> bool {
         let id = wid as WindowId;
-        if !self.registry.contains(id) {
-            return false;
+        if let Some(ws_idx) = self.workspaces.find_window(id) {
+            !self.workspaces.get(ws_idx).visible
+        } else {
+            false
         }
-        let ws = self.workspaces.active();
-        // Window is hidden if it's not in the active workspace's tree OR floating list
-        !ws.tree.contains(id) && !ws.is_floating(id)
     }
 
     // --- Helpers ---
@@ -1099,11 +1138,13 @@ impl WmState {
 
         // Determine target workspace (rule override or active)
         if let Some(ws_num) = rule_workspace {
-            let target = super::workspace::WorkspaceId::Numbered(ws_num);
-            let is_active = *self.workspaces.active_id() == target;
-            let target_rect = self.screen_rect_for_workspace(&target);
+            let target_idx = (ws_num as usize).saturating_sub(1);
+            let is_active = target_idx == self.active_ws_idx();
+            let target_rect = self.monitor_showing_workspace(target_idx)
+                .map(|mi| self.monitor_rect(mi))
+                .unwrap_or(self.focused_rect());
 
-            let ws = self.workspaces.get_or_create(target);
+            let ws = self.workspaces.get_or_create(target_idx);
             if should_float {
                 let geom = rule_geometry
                     .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
@@ -1129,8 +1170,8 @@ impl WmState {
                 self.switch_workspace(ws_num);
             }
         } else {
-            let sr = self.focused_screen_rect();
-            let ws = self.workspaces.active_mut();
+            let sr = self.focused_rect();
+            let ws = self.active_workspace_mut();
             if should_float {
                 let geom = rule_geometry
                     .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
@@ -1163,7 +1204,7 @@ impl WmState {
                 let title = ax_get_string(element, "AXTitle").unwrap_or_default();
                 let (x, y) = ax_get_position(element).unwrap_or((0.0, 0.0));
                 let (w, h) = ax_get_size(element).unwrap_or((0.0, 0.0));
-                tracing::info!(id, app = app_name, title = %title, "window created → tiling");
+                tracing::info!(id, app = app_name, title = %title, "window created -> tiling");
                 self.add_window_to_active(
                     &id,
                     *pid,
@@ -1184,13 +1225,17 @@ impl WmState {
                 if let Ok(id) = ax_get_window_id(element)
                     && self.registry.contains(id)
                 {
-                    tracing::info!(id, app = app_name, "window destroyed → retiling");
+                    tracing::info!(id, app = app_name, "window destroyed -> retiling");
                     self.registry.remove(id);
                     self.ax_refs.remove(&id);
-                    self.workspaces.active_mut().tree.remove(id);
-                    let ws = self.workspaces.active_mut();
-                    if ws.focused == Some(id) {
-                        ws.pop_focus();
+                    // Find the workspace containing this window and remove from it
+                    if let Some(ws_idx) = self.workspaces.find_window(id) {
+                        let ws = self.workspaces.get_mut(ws_idx);
+                        ws.floating.retain(|f| f.id != id);
+                        ws.tree.remove(id);
+                        if ws.focused == Some(id) {
+                            ws.pop_focus();
+                        }
                     }
                     self.apply_layout();
                 }
@@ -1199,7 +1244,7 @@ impl WmState {
                 if let Ok(id) = ax_get_window_id(element)
                     && self.registry.contains(id)
                 {
-                    self.workspaces.active_mut().record_focus(id);
+                    self.active_workspace_mut().record_focus(id);
                 }
             }
             WindowEvent::Moved { element, .. } => {
@@ -1211,8 +1256,7 @@ impl WmState {
                     self.registry.update_geometry(id, x, y, width, height);
                     // Update floating window geometry so FFM uses correct bounds
                     if let Some(fw) = self
-                        .workspaces
-                        .active_mut()
+                        .active_workspace_mut()
                         .floating
                         .iter_mut()
                         .find(|f| f.id == id)
@@ -1229,8 +1273,7 @@ impl WmState {
                 {
                     self.registry.update_geometry(id, x, y, w, h);
                     if let Some(fw) = self
-                        .workspaces
-                        .active_mut()
+                        .active_workspace_mut()
                         .floating
                         .iter_mut()
                         .find(|f| f.id == id)
@@ -1329,20 +1372,18 @@ fn should_auto_float(subrole: &str, _width: f64, _height: f64) -> bool {
 /// Uses the bottom-left corner of the leftmost monitor minus the window width,
 /// plus the full height of all monitors below the lowest monitor.
 fn compute_hide_position(
-    monitors: &super::monitor::MonitorManager,
+    monitors: &[super::monitor::Monitor],
     window_width: f64,
 ) -> (f64, f64) {
-    if monitors.count() == 0 {
+    if monitors.is_empty() {
         return (1.0 - window_width, 10000.0);
     }
     // Find the leftmost x and the bottommost y across all monitors
     let min_x = monitors
-        .all()
         .iter()
         .map(|m| m.frame.x)
         .fold(f64::INFINITY, f64::min);
     let max_y = monitors
-        .all()
         .iter()
         .map(|m| m.frame.y + m.frame.height)
         .fold(f64::NEG_INFINITY, f64::max);
