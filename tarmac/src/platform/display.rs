@@ -21,6 +21,22 @@ pub fn get_usable_frame() -> Rect {
     }
 }
 
+/// Get the full display frame (including dock and menu bar).
+/// This is the physical screen bounds — used for hiding windows off-screen.
+pub fn get_full_display_frame() -> Rect {
+    unsafe {
+        let main_id = CGMainDisplayID();
+        let full = CGDisplayBounds(main_id);
+        // CGDisplayBounds returns origin at top-left for the main display
+        Rect::new(
+            full.origin.x,
+            full.origin.y,
+            full.size.width,
+            full.size.height,
+        )
+    }
+}
+
 struct NSRect {
     x: f64,
     y: f64,
