@@ -48,6 +48,8 @@ fn main() {
     let mut state = WmState::new();
     state.focus_follows_mouse = config.settings.focus_follows_mouse;
     state.mouse_follows_focus = config.settings.mouse_follows_focus;
+    state.gap_inner = config.settings.gap_inner;
+    state.gap_outer = config.settings.gap_outer;
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
@@ -198,9 +200,9 @@ fn generate_default_config_if_missing(path: &std::path::Path) {
 -- Modifier key: "command", "option", or "control"
 gar.set("mod_key", "command")
 
--- Gaps (pixels)
--- gar.set("gap_inner", 8)
--- gar.set("gap_outer", 8)
+-- Gaps (pixels between windows and at screen edges)
+gar.set("gap_inner", 8)
+gar.set("gap_outer", 8)
 
 -- Behavior
 gar.set("focus_follows_mouse", "true")
