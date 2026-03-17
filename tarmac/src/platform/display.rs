@@ -96,7 +96,19 @@ struct CGSize {
     height: f64,
 }
 
+/// Warp the mouse cursor to a specific screen position.
+pub fn warp_mouse(x: f64, y: f64) {
+    unsafe {
+        let point = CGPoint { x, y };
+        CGWarpMouseCursorPosition(point);
+        // Reassociate to prevent cursor drift after warp
+        CGAssociateMouseAndMouseCursorPosition(true);
+    }
+}
+
 unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
     fn CGDisplayBounds(display: u32) -> CGRect;
+    fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
+    fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
 }
