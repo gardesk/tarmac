@@ -130,6 +130,11 @@ impl WorkspaceManager {
         &self.active
     }
 
+    /// Iterate all workspaces that have been created (have or had windows).
+    pub fn all_workspaces(&self) -> impl Iterator<Item = (&WorkspaceId, &Workspace)> {
+        self.workspaces.iter()
+    }
+
     pub fn active(&self) -> &Workspace {
         &self.workspaces[&self.active]
     }
