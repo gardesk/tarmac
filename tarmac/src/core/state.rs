@@ -12,7 +12,7 @@ use crate::platform::accessibility::{
 use crate::platform::application::{
     discover_all_windows, discover_applications, enumerate_windows,
 };
-use crate::platform::display::get_usable_frame;
+use crate::platform::display::{get_usable_frame, warp_mouse};
 use crate::platform::observer::{AppObserver, WindowEvent};
 
 use super::tree::{Node, Rect};
@@ -131,6 +131,10 @@ impl WmState {
         let geoms = ws.tree.calculate_geometries(self.screen_rect);
         if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
             self.focus_window(target);
+            // Mouse follows focus: warp cursor to the center of the newly focused window
+            if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target) {
+                warp_mouse_to_center(rect);
+            }
         }
     }
 
@@ -603,4 +607,10 @@ impl WmState {
             }
         }
     }
+}
+
+/// Warp the mouse cursor to the center of a rect.
+fn warp_mouse_to_center(rect: &Rect) {
+    let (cx, cy) = rect.center();
+    warp_mouse(cx, cy);
 }
