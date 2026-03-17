@@ -226,9 +226,9 @@ impl KeybindManager {
     /// Create default keybindings (Option as mod key).
     pub fn with_defaults() -> Self {
         use Direction::*;
-        let m = Modifiers::OPTION;
-        let ms = Modifiers::OPTION | Modifiers::SHIFT;
-        let mc = Modifiers::OPTION | Modifiers::CONTROL;
+        let m = Modifiers::COMMAND;
+        let ms = Modifiers::COMMAND | Modifiers::SHIFT;
+        let mc = Modifiers::COMMAND | Modifiers::CONTROL;
 
         let mut mgr = Self::new();
 
@@ -313,7 +313,7 @@ mod tests {
         let mgr = KeybindManager::with_defaults();
         let event = KeyEvent {
             keycode: 0x24, // Return
-            modifiers: Modifiers::OPTION,
+            modifiers: Modifiers::COMMAND,
         };
         assert_eq!(mgr.dispatch(&event), Some(Action::SpawnTerminal));
     }
@@ -332,8 +332,8 @@ mod tests {
     fn dispatch_wrong_modifier() {
         let mgr = KeybindManager::with_defaults();
         let event = KeyEvent {
-            keycode: 0x24,                 // Return
-            modifiers: Modifiers::COMMAND, // Wrong mod
+            keycode: 0x24,                // Return
+            modifiers: Modifiers::OPTION, // Wrong mod
         };
         assert_eq!(mgr.dispatch(&event), None);
     }
@@ -343,7 +343,7 @@ mod tests {
         let mgr = KeybindManager::with_defaults();
         let event = KeyEvent {
             keycode: 0x0C, // Q
-            modifiers: Modifiers::OPTION | Modifiers::SHIFT,
+            modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
         };
         assert_eq!(mgr.dispatch(&event), Some(Action::CloseWindow));
     }
