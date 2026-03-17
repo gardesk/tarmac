@@ -5,4 +5,5 @@ pub mod event_tap;
 pub mod hotkey;
 pub mod observer;
 pub mod permissions;
+pub mod skylight;
 pub mod workspace_observer;
