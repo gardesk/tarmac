@@ -55,6 +55,7 @@ pub struct WmState {
     pub mouse_follows_focus: bool,
     pub gap_inner: f64,
     pub gap_outer: f64,
+    pub rules: Vec<crate::config::lua::WindowRule>,
 }
 
 impl Default for WmState {
@@ -79,6 +80,7 @@ impl WmState {
             mouse_follows_focus: true,
             gap_inner: 0.0,
             gap_outer: 0.0,
+            rules: Vec::new(),
         }
     }
 
@@ -711,6 +713,7 @@ impl WmState {
     // --- Helpers ---
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn add_window_to_active(
         &mut self,
         id: &WindowId,
@@ -726,7 +729,36 @@ impl WmState {
         height: f64,
         ax_ref: CFRetained<AXUIElement>,
     ) {
-        let should_float = should_auto_float(subrole, width, height);
+        // Phantom window guard: skip windows with zero size
+        if width <= 0.0 || height <= 0.0 {
+            tracing::trace!(id, app_name, "skipping zero-size phantom window");
+            return;
+        }
+
+        // Check window rules for matching
+        let mut rule_float: Option<bool> = None;
+        let mut rule_workspace: Option<u8> = None;
+        for rule in &self.rules {
+            let name_matches = rule
+                .app_name
+                .as_ref()
+                .is_none_or(|n| app_name.contains(n.as_str()));
+            let title_matches = rule
+                .title
+                .as_ref()
+                .is_none_or(|t| title.contains(t.as_str()));
+            if name_matches && title_matches {
+                if let Some(f) = rule.floating {
+                    rule_float = Some(f);
+                }
+                if let Some(w) = rule.workspace {
+                    rule_workspace = Some(w);
+                }
+            }
+        }
+
+        let should_float = rule_float.unwrap_or_else(|| should_auto_float(subrole, width, height));
+
         self.registry.add(WindowState {
             id: *id,
             app_pid,
@@ -743,17 +775,34 @@ impl WmState {
             minimized: false,
         });
         self.ax_refs.insert(*id, ax_ref);
-        let ws = self.workspaces.active_mut();
-        if should_float {
-            ws.floating.push(super::workspace::FloatingWindow {
-                id: *id,
-                geometry: Rect::new(x, y, width, height),
-            });
-            tracing::info!(id, subrole, "auto-floated window");
+
+        // Determine target workspace (rule override or active)
+        if let Some(ws_num) = rule_workspace {
+            let target = super::workspace::WorkspaceId::Numbered(ws_num);
+            let ws = self.workspaces.get_or_create(target);
+            if should_float {
+                ws.floating.push(super::workspace::FloatingWindow {
+                    id: *id,
+                    geometry: Rect::new(x, y, width, height),
+                });
+            } else {
+                ws.tree.insert_with_rect(*id, ws.focused, self.screen_rect);
+            }
+            ws.record_focus(*id);
+            tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
         } else {
-            ws.tree.insert_with_rect(*id, ws.focused, self.screen_rect);
+            let ws = self.workspaces.active_mut();
+            if should_float {
+                ws.floating.push(super::workspace::FloatingWindow {
+                    id: *id,
+                    geometry: Rect::new(x, y, width, height),
+                });
+                tracing::info!(id, subrole, "auto-floated window");
+            } else {
+                ws.tree.insert_with_rect(*id, ws.focused, self.screen_rect);
+            }
+            ws.record_focus(*id);
         }
-        ws.record_focus(*id);
     }
 
     fn handle_event(&mut self, event: &WindowEvent, app_name: &str, app_bundle: &str) {
