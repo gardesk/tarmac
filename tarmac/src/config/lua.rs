@@ -11,9 +11,11 @@ use crate::core::tree::Direction;
 #[derive(Debug, Clone)]
 pub struct WindowRule {
     pub app_name: Option<String>,
+    pub app_bundle: Option<String>,
     pub title: Option<String>,
     pub floating: Option<bool>,
     pub workspace: Option<u8>,
+    pub geometry: Option<(f64, f64, f64, f64)>, // x, y, width, height
 }
 
 /// A keybind parsed from Lua config.
@@ -24,11 +26,19 @@ pub struct LuaKeybind {
     pub action: Action,
 }
 
-/// Result of loading a Lua config.
+/// A registered event callback (holds a Lua registry key for the function).
+pub struct EventCallback {
+    pub event: String,
+    pub func_key: mlua::RegistryKey,
+}
+
+/// Result of loading a Lua config. Holds the Lua state for event callbacks.
 pub struct LuaConfig {
     pub settings: Settings,
     pub keybinds: Vec<LuaKeybind>,
     pub rules: Vec<WindowRule>,
+    pub lua: Option<Lua>,
+    pub callbacks: Vec<EventCallback>,
 }
 
 /// Load and execute a Lua config file, returning settings, keybinds, and rules.
@@ -36,6 +46,7 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
     let settings = Rc::new(RefCell::new(Settings::default()));
     let keybinds: Rc<RefCell<Vec<LuaKeybind>>> = Rc::new(RefCell::new(Vec::new()));
     let rules: Rc<RefCell<Vec<WindowRule>>> = Rc::new(RefCell::new(Vec::new()));
+    let callbacks: Rc<RefCell<Vec<EventCallback>>> = Rc::new(RefCell::new(Vec::new()));
 
     if !path.exists() {
         tracing::warn!(?path, "no config file found, using defaults");
@@ -44,6 +55,8 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
             settings: s,
             keybinds: default_keybinds(&Settings::default()),
             rules: Vec::new(),
+            lua: None,
+            callbacks: Vec::new(),
         };
     }
 
@@ -55,6 +68,7 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
         Rc::clone(&settings),
         Rc::clone(&keybinds),
         Rc::clone(&rules),
+        Rc::clone(&callbacks),
     ) {
         tracing::error!(err = %e, "failed to register gar API");
         let s = settings.borrow().clone();
@@ -62,6 +76,8 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
             settings: s,
             keybinds: default_keybinds(&Settings::default()),
             rules: Vec::new(),
+            lua: None,
+            callbacks: Vec::new(),
         };
     }
 
@@ -88,12 +104,15 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
     }
 
     let r = rules.borrow().clone();
-    tracing::info!(rules = r.len(), "window rules loaded");
+    let cbs = callbacks.borrow_mut().drain(..).collect::<Vec<_>>();
+    tracing::info!(rules = r.len(), callbacks = cbs.len(), "config loaded");
 
     LuaConfig {
         settings: s,
         keybinds: binds,
         rules: r,
+        lua: Some(lua),
+        callbacks: cbs,
     }
 }
 
@@ -102,6 +121,7 @@ fn register_gar_api(
     settings: Rc<RefCell<Settings>>,
     keybinds: Rc<RefCell<Vec<LuaKeybind>>>,
     rules: Rc<RefCell<Vec<WindowRule>>>,
+    callbacks: Rc<RefCell<Vec<EventCallback>>>,
 ) -> LuaResult<()> {
     let gar = lua.create_table()?;
 
@@ -190,6 +210,7 @@ fn register_gar_api(
         lua.create_function(
             move |_, (match_table, actions_table): (mlua::Table, mlua::Table)| {
                 let app_name: Option<String> = match_table.get("app_name").ok();
+                let app_bundle: Option<String> = match_table.get("app_bundle").ok();
                 let title: Option<String> = match_table.get("title").ok();
                 // Also accept "class" as alias for "app_name" (gar Linux compat)
                 let app_name = app_name.or_else(|| match_table.get("class").ok());
@@ -197,11 +218,24 @@ fn register_gar_api(
                 let floating: Option<bool> = actions_table.get("floating").ok();
                 let workspace: Option<u8> = actions_table.get("workspace").ok();
 
+                // Parse geometry table if present
+                let geometry: Option<(f64, f64, f64, f64)> =
+                    actions_table.get::<mlua::Table>("geometry").ok().map(|g| {
+                        (
+                            g.get("x").unwrap_or(100.0),
+                            g.get("y").unwrap_or(100.0),
+                            g.get("width").unwrap_or(800.0),
+                            g.get("height").unwrap_or(600.0),
+                        )
+                    });
+
                 let rule = WindowRule {
                     app_name,
+                    app_bundle,
                     title,
                     floating,
                     workspace,
+                    geometry,
                 };
                 tracing::debug!(?rule, "gar.rule");
                 rules_clone.borrow_mut().push(rule);
@@ -210,8 +244,50 @@ fn register_gar_api(
         )?,
     )?;
 
+    // gar.on("event_name", function(...) end)
+    // Stores the Lua function in the registry for later invocation.
+    let callbacks_clone = Rc::clone(&callbacks);
+    gar.set(
+        "on",
+        lua.create_function(move |lua_ctx, (event, func): (String, mlua::Function)| {
+            let key = lua_ctx.create_registry_value(func)?;
+            tracing::debug!(event, "gar.on callback registered");
+            callbacks_clone.borrow_mut().push(EventCallback {
+                event,
+                func_key: key,
+            });
+            Ok(())
+        })?,
+    )?;
+
     lua.globals().set("gar", gar)?;
     Ok(())
+}
+
+impl LuaConfig {
+    /// Fire all callbacks registered for a given event.
+    pub fn fire_event(&self, event: &str, args: &[&str]) {
+        let Some(lua) = &self.lua else { return };
+        for cb in &self.callbacks {
+            if cb.event == event {
+                match lua.registry_value::<mlua::Function>(&cb.func_key) {
+                    Ok(func) => {
+                        // Build args as Lua strings
+                        let lua_args: Vec<mlua::Value> = args
+                            .iter()
+                            .filter_map(|a| lua.create_string(a).ok().map(mlua::Value::String))
+                            .collect();
+                        if let Err(e) = func.call::<()>(mlua::MultiValue::from_iter(lua_args)) {
+                            tracing::warn!(event, err = %e, "callback error");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(event, err = %e, "failed to retrieve callback");
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn parse_keybind_and_action(
