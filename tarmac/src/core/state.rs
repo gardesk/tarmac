@@ -923,11 +923,11 @@ impl WmState {
 }
 
 /// Check if a window should automatically float based on its subrole and size.
-fn should_auto_float(subrole: &str, width: f64, height: f64) -> bool {
+fn should_auto_float(subrole: &str, _width: f64, _height: f64) -> bool {
     matches!(
         subrole,
         "AXDialog" | "AXSheet" | "AXFloatingWindow" | "AXSystemFloatingWindow"
-    ) || (width > 0.0 && height > 0.0 && width < 400.0 && height < 300.0)
+    )
 }
 
 /// Warp the mouse cursor to the center of a rect.
