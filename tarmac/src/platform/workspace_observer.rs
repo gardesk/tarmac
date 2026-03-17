@@ -10,6 +10,8 @@ pub type NewWindowCallback = Box<dyn Fn(i32, String, u32)>;
 pub type WindowClosedCallback = Box<dyn Fn(u32, i32)>;
 /// Callback for app termination. Args: pid
 pub type AppTerminateCallback = Box<dyn Fn(i32)>;
+/// Callback to check if a window is intentionally hidden (on inactive workspace).
+pub type IsHiddenCallback = Box<dyn Fn(u32) -> bool>;
 
 /// Polls CGWindowList to detect new windows appearing and apps terminating.
 /// This is the ground truth — if a window is on screen, CGWindowList sees it.
@@ -21,6 +23,7 @@ pub struct WorkspacePollingObserver {
     on_new_window: NewWindowCallback,
     on_window_closed: WindowClosedCallback,
     on_terminate: AppTerminateCallback,
+    is_hidden: IsHiddenCallback,
 }
 
 impl WorkspacePollingObserver {
@@ -28,6 +31,7 @@ impl WorkspacePollingObserver {
         on_new_window: NewWindowCallback,
         on_window_closed: WindowClosedCallback,
         on_terminate: AppTerminateCallback,
+        is_hidden: IsHiddenCallback,
     ) -> Self {
         let mut known_windows = HashMap::new();
         let mut known_pids = HashSet::new();
@@ -60,6 +64,7 @@ impl WorkspacePollingObserver {
             on_new_window,
             on_window_closed,
             on_terminate,
+            is_hidden,
         }
     }
 
@@ -81,9 +86,9 @@ impl WorkspacePollingObserver {
             }
         }
 
-        // Detect windows that disappeared
+        // Detect windows that disappeared (but not ones we intentionally hid)
         for (wid, pid) in &self.known_windows {
-            if !current_windows.contains_key(wid) {
+            if !current_windows.contains_key(wid) && !(self.is_hidden)(*wid) {
                 tracing::info!(wid, pid, "window disappeared");
                 (self.on_window_closed)(*wid, *pid);
             }
