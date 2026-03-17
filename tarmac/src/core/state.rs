@@ -19,8 +19,6 @@ use super::tree::{Node, Rect};
 use super::window::{WindowId, WindowRegistry, WindowState};
 use super::workspace::{WorkspaceId, WorkspaceManager};
 
-const OFF_SCREEN: (f64, f64) = (-32000.0, -32000.0);
-
 struct QueuedEvent {
     event: WindowEvent,
     app_name: String,
@@ -229,12 +227,13 @@ impl WmState {
             "workspace transition"
         );
 
-        // Hide old windows — position off-screen first, then shrink
+        // Hide old windows — position beyond the bottom-right corner of the screen.
+        // Don't change size (macOS enforces minimums that cause visible artifacts).
+        let hide_x = self.screen_rect.x + self.screen_rect.width + 1.0;
+        let hide_y = self.screen_rect.y + self.screen_rect.height + 1.0;
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
-                // Position first so even if resize is slow, the window is off-screen
-                let _ = ax_set_position(ax_ref, OFF_SCREEN.0, OFF_SCREEN.1);
-                let _ = ax_set_size(ax_ref, 1.0, 1.0);
+                let _ = ax_set_position(ax_ref, hide_x, hide_y);
                 tracing::debug!(wid, "hidden");
             }
         }
@@ -266,10 +265,11 @@ impl WmState {
             .workspaces
             .move_window_to(focused, target.clone(), self.screen_rect)
         {
-            // Hide the moved window
+            // Hide the moved window beyond the bottom-right corner
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let _ = ax_set_size(ax_ref, 1.0, 1.0);
-                let _ = ax_set_position(ax_ref, OFF_SCREEN.0, OFF_SCREEN.1);
+                let hide_x = self.screen_rect.x + self.screen_rect.width + 1.0;
+                let hide_y = self.screen_rect.y + self.screen_rect.height + 1.0;
+                let _ = ax_set_position(ax_ref, hide_x, hide_y);
             }
 
             // Retile current workspace
