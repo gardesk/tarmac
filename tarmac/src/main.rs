@@ -29,17 +29,36 @@ fn main() {
     init_config_dir();
     install_signal_handlers();
 
+    // Load Lua config
+    let config_path = dirs::config_dir()
+        .unwrap_or_default()
+        .join("tarmac")
+        .join("init.lua");
+    generate_default_config_if_missing(&config_path);
+    let config = tarmac::config::lua::load_config(&config_path);
+    tracing::info!(
+        keybinds = config.keybinds.len(),
+        mod_key = ?config.settings.mod_key,
+        "config loaded"
+    );
+
     // Initialize window manager state
     let mut state = WmState::new();
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
-    // Register global hotkeys via Carbon (works even when Firefox has focus)
+    // Register hotkeys from config
     let mut _hotkey_mgr = HotkeyManager::new(Box::new(|action| {
         handle_action(action);
     }));
     if let Some(ref mut mgr) = _hotkey_mgr {
-        mgr.register_defaults();
+        for kb in &config.keybinds {
+            mgr.register(kb.modifiers, kb.key, kb.action);
+        }
+        tracing::info!(
+            registered = config.keybinds.len(),
+            "hotkeys registered from config"
+        );
     } else {
         tracing::error!("failed to create hotkey manager");
     }
@@ -148,6 +167,83 @@ fn spawn_terminal() {
         .arg("WezTerm")
         .spawn()
         .ok();
+}
+
+fn generate_default_config_if_missing(path: &std::path::Path) {
+    if path.exists() {
+        return;
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let default_config = r#"-- tarmac configuration
+-- ~/.config/tarmac/init.lua
+
+-- Modifier key: "command", "option", or "control"
+gar.set("mod_key", "command")
+
+-- Gaps (pixels)
+-- gar.set("gap_inner", 8)
+-- gar.set("gap_outer", 8)
+
+-- Behavior
+gar.set("focus_follows_mouse", "true")
+gar.set("mouse_follows_focus", "true")
+
+-- Terminal command
+gar.set("terminal", "open -na WezTerm")
+
+-- Keybindings
+-- Format: gar.bind("modifiers+key", "action [args]")
+-- "mod" resolves to the configured mod_key
+
+gar.bind("mod+return", "spawn_terminal")
+gar.bind("mod+shift+q", "close")
+gar.bind("mod+e", "equalize")
+gar.bind("mod+shift+space", "toggle_float")
+
+-- Focus
+gar.bind("mod+h", "focus left")
+gar.bind("mod+j", "focus down")
+gar.bind("mod+k", "focus up")
+gar.bind("mod+l", "focus right")
+gar.bind("mod+left", "focus left")
+gar.bind("mod+down", "focus down")
+gar.bind("mod+up", "focus up")
+gar.bind("mod+right", "focus right")
+
+-- Swap
+gar.bind("mod+shift+h", "swap left")
+gar.bind("mod+shift+j", "swap down")
+gar.bind("mod+shift+k", "swap up")
+gar.bind("mod+shift+l", "swap right")
+gar.bind("mod+shift+left", "swap left")
+gar.bind("mod+shift+down", "swap down")
+gar.bind("mod+shift+up", "swap up")
+gar.bind("mod+shift+right", "swap right")
+
+-- Resize
+gar.bind("mod+ctrl+h", "resize left")
+gar.bind("mod+ctrl+j", "resize down")
+gar.bind("mod+ctrl+k", "resize up")
+gar.bind("mod+ctrl+l", "resize right")
+
+-- Workspaces
+for i = 1, 9 do
+    gar.bind("mod+" .. i, "workspace " .. i)
+    gar.bind("mod+shift+" .. i, "move_to_workspace " .. i)
+end
+gar.bind("mod+0", "workspace 10")
+gar.bind("mod+shift+0", "move_to_workspace 10")
+
+-- Autostart (uncomment as needed)
+-- gar.exec_once("sketchybar")
+"#;
+
+    match std::fs::write(path, default_config) {
+        Ok(()) => tracing::info!(?path, "generated default config"),
+        Err(e) => tracing::warn!(?path, err = %e, "failed to write default config"),
+    }
 }
 
 fn install_polling_timer() {
