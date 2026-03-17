@@ -183,6 +183,10 @@ pub enum Action {
     WorkspaceNext,       // Cycle to next workspace
     WorkspacePrev,       // Cycle to previous workspace
     ToggleFloat,         // Toggle focused window between tiled and floating
+    FocusMonitorNext,    // Focus next monitor
+    FocusMonitorPrev,    // Focus previous monitor
+    MoveToMonitorNext,   // Move window to next monitor
+    MoveToMonitorPrev,   // Move window to previous monitor
     Reload,              // Hot reload config
     Exit,                // Clean exit
 }
