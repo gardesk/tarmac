@@ -203,12 +203,10 @@ impl WmState {
                     let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
                 }
             } else {
-                // Soft focus — set focus attributes WITHOUT AXRaise or app activation.
-                // AXRaise would reorder same-app windows and cover same-app floaters.
-                let key = objc2_core_foundation::CFString::from_static_str("AXMain");
-                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &key, true);
-                let key2 = objc2_core_foundation::CFString::from_static_str("AXFocused");
-                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &key2, true);
+                // Soft focus — update internal tracking only, don't touch macOS.
+                // Any AX attribute change (AXRaise, AXMain, AXFocused) on a same-app
+                // window reorders it above the floating window. So we do nothing
+                // to macOS and rely on our internal focus tracking for keybind dispatch.
             }
         }
         self.workspaces.active_mut().record_focus(id);
