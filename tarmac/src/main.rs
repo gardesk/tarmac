@@ -169,6 +169,10 @@ fn handle_action(action: Action) {
                 Action::WorkspaceNext => state.workspace_next(),
                 Action::WorkspacePrev => state.workspace_prev(),
                 Action::ToggleFloat => state.toggle_float(),
+                Action::FocusMonitorNext => state.focus_monitor_next(),
+                Action::FocusMonitorPrev => state.focus_monitor_prev(),
+                Action::MoveToMonitorNext => state.move_to_monitor_next(),
+                Action::MoveToMonitorPrev => state.move_to_monitor_prev(),
                 Action::Reload => {
                     tracing::info!("config reload requested (restart tarmac to apply)");
                     // TODO: Full hot-reload requires re-registering Carbon hotkeys
@@ -264,6 +268,12 @@ gar.bind("mod+shift+0", "move_to_workspace 10")
 -- Workspace cycling
 -- gar.bind("mod+tab", "workspace_next")
 -- gar.bind("mod+shift+tab", "workspace_prev")
+
+-- Monitor navigation
+gar.bind("mod+comma", "focus_monitor_prev")
+gar.bind("mod+period", "focus_monitor_next")
+-- gar.bind("mod+shift+comma", "move_to_monitor_prev")
+-- gar.bind("mod+shift+period", "move_to_monitor_next")
 
 -- System
 gar.bind("mod+shift+r", "reload")
