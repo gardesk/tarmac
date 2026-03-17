@@ -30,8 +30,10 @@ fn main() {
     install_signal_handlers();
 
     // Load Lua config
-    let config_path = dirs::config_dir()
+    // Use ~/.config/tarmac/init.lua (XDG-style, matching gar)
+    let config_path = dirs::home_dir()
         .unwrap_or_default()
+        .join(".config")
         .join("tarmac")
         .join("init.lua");
     generate_default_config_if_missing(&config_path);
@@ -331,8 +333,8 @@ fn init_logging() {
 }
 
 fn init_config_dir() {
-    if let Some(config) = dirs::config_dir() {
-        let tarmac_config = config.join("tarmac");
+    if let Some(home) = dirs::home_dir() {
+        let tarmac_config = home.join(".config").join("tarmac");
         if !tarmac_config.exists() {
             if let Err(e) = std::fs::create_dir_all(&tarmac_config) {
                 tracing::warn!("failed to create config dir: {}", e);
