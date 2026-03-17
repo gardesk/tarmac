@@ -587,12 +587,14 @@ impl WmState {
             return;
         }
 
-        tracing::info!(pid, owner, "new window detected, enumerating");
+        // Resolve actual app name from NSRunningApplication (CGWindowList owner is often empty)
+        let resolved_name = resolve_app_name(pid).unwrap_or_else(|| owner.to_string());
+        tracing::info!(pid, app = %resolved_name, "new window detected, enumerating");
         let ax_app = unsafe { AXUIElement::new_application(pid) };
         let app_info = crate::platform::application::AppInfo {
             pid,
             bundle_id: String::new(),
-            name: owner.to_string(),
+            name: resolved_name,
             ax_ref: ax_app.clone(),
         };
         let windows = enumerate_windows(&app_info);
@@ -996,4 +998,11 @@ fn should_auto_float(subrole: &str, _width: f64, _height: f64) -> bool {
 fn warp_mouse_to_center(rect: &Rect) {
     let (cx, cy) = rect.center();
     warp_mouse(cx, cy);
+}
+
+/// Resolve app name from PID using NSRunningApplication.
+fn resolve_app_name(pid: i32) -> Option<String> {
+    use objc2_app_kit::NSRunningApplication;
+    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    app.localizedName().map(|n| n.to_string())
 }
