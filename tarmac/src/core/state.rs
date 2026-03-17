@@ -182,18 +182,29 @@ impl WmState {
         self.apply_layout();
     }
 
-    pub fn focus_window(&mut self, id: WindowId) {
-        let focused_pid = self.registry.get(id).map(|w| w.app_pid);
+    /// Focus a window. If `activate_app` is true, fully activates the app
+    /// (brings all its windows forward). Use false for FFM to avoid covering floaters.
+    fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             let _ = ax_perform_action(ax_ref, "AXRaise");
-            if let Some(pid) = focused_pid {
-                let ax_app = unsafe { AXUIElement::new_application(pid) };
+            if activate_app && let Some(w) = self.registry.get(id) {
+                let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
                 let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
                 let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
             }
         }
         self.workspaces.active_mut().record_focus(id);
-        tracing::debug!(id, "focused window");
+        tracing::debug!(id, activate_app, "focused window");
+    }
+
+    /// Focus with full app activation (keybinds, click, workspace switch).
+    pub fn focus_window(&mut self, id: WindowId) {
+        self.focus_window_impl(id, true);
+    }
+
+    /// Focus without app activation (FFM hover — avoids bringing all app windows forward).
+    pub fn focus_window_soft(&mut self, id: WindowId) {
+        self.focus_window_impl(id, false);
     }
 
     /// Raise all floating windows via AXRaise.
@@ -260,7 +271,9 @@ impl WmState {
             if let Some(id) = window_under
                 && self.workspaces.active().focused != Some(id)
             {
-                self.focus_window(id);
+                // Use soft focus for FFM — don't activate the app to avoid
+                // bringing all its windows forward and covering floaters
+                self.focus_window_soft(id);
             }
         }
     }
