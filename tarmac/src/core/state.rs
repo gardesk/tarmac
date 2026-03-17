@@ -281,7 +281,13 @@ impl WmState {
             if let Some(id) = window_under
                 && self.workspaces.active().focused != Some(id)
             {
-                self.focus_window_soft(id);
+                // Use soft focus only when floating windows exist to preserve z-order.
+                // Otherwise use full activation for proper title bar highlighting.
+                if self.workspaces.active().floating.is_empty() {
+                    self.focus_window(id);
+                } else {
+                    self.focus_window_soft(id);
+                }
             }
         }
     }
