@@ -523,12 +523,9 @@ impl WmState {
             }
         }
 
-        // Show windows: position and size
-        for (wid, rect) in &transition.show {
-            if let Some(ax_ref) = self.ax_refs.get(wid) {
-                let _ = ax_set_position(ax_ref, rect.x, rect.y);
-                let _ = ax_set_size(ax_ref, rect.width, rect.height);
-            }
+        // Show windows with proper gap-aware layout
+        if !transition.show.is_empty() {
+            self.apply_layout();
         }
 
         // Focus
