@@ -96,25 +96,20 @@ impl WmState {
 
         let windows = discover_all_windows();
         for w in &windows {
-            self.registry.add(WindowState {
-                id: w.id,
-                app_pid: w.app_pid,
-                app_name: w.app_name.clone(),
-                app_bundle_id: w.app_bundle_id.clone(),
-                title: w.title.clone(),
-                role: w.role.clone(),
-                subrole: w.subrole.clone(),
-                x: w.x,
-                y: w.y,
-                width: w.width,
-                height: w.height,
-                floating: false,
-                minimized: false,
-            });
-            self.ax_refs.insert(w.id, w.ax_ref.clone());
-            let ws = self.workspaces.active_mut();
-            ws.tree.insert_with_rect(w.id, ws.focused, self.screen_rect);
-            ws.record_focus(w.id);
+            self.add_window_to_active(
+                &w.id,
+                w.app_pid,
+                &w.app_name,
+                &w.app_bundle_id,
+                &w.title,
+                &w.role,
+                &w.subrole,
+                w.x,
+                w.y,
+                w.width,
+                w.height,
+                w.ax_ref.clone(),
+            );
         }
 
         tracing::info!(
@@ -737,19 +732,22 @@ impl WmState {
             return;
         }
 
-        // Check window rules for matching
+        // Check window rules for matching (case-insensitive substring)
         let mut rule_float: Option<bool> = None;
         let mut rule_workspace: Option<u8> = None;
+        let app_lower = app_name.to_lowercase();
+        let title_lower = title.to_lowercase();
         for rule in &self.rules {
             let name_matches = rule
                 .app_name
                 .as_ref()
-                .is_none_or(|n| app_name.contains(n.as_str()));
+                .is_none_or(|n| app_lower.contains(&n.to_lowercase()));
             let title_matches = rule
                 .title
                 .as_ref()
-                .is_none_or(|t| title.contains(t.as_str()));
+                .is_none_or(|t| title_lower.contains(&t.to_lowercase()));
             if name_matches && title_matches {
+                tracing::debug!(app_name, title, ?rule, "window rule matched");
                 if let Some(f) = rule.floating {
                     rule_float = Some(f);
                 }
