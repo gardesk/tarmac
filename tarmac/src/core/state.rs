@@ -790,6 +790,8 @@ impl WmState {
         // Determine target workspace (rule override or active)
         if let Some(ws_num) = rule_workspace {
             let target = super::workspace::WorkspaceId::Numbered(ws_num);
+            let is_active = *self.workspaces.active_id() == target;
+
             let ws = self.workspaces.get_or_create(target);
             if should_float {
                 ws.floating.push(super::workspace::FloatingWindow {
@@ -801,6 +803,17 @@ impl WmState {
             }
             ws.record_focus(*id);
             tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
+
+            if !is_active {
+                // Hide the window since it's on an inactive workspace
+                let vis_max_y = self.screen_rect.y + self.screen_rect.height;
+                if let Some(ax_ref) = self.ax_refs.get(id) {
+                    let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                    let _ = ax_set_position(ax_ref, 1.0 - w, vis_max_y - 1.0);
+                }
+                // Switch to the target workspace to follow the window
+                self.switch_workspace(ws_num);
+            }
         } else {
             let ws = self.workspaces.active_mut();
             if should_float {
