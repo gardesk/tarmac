@@ -13,6 +13,7 @@ use tracing_subscriber::EnvFilter;
 thread_local! {
     static WORKSPACE_POLLER: RefCell<Option<WorkspacePollingObserver>> = const { RefCell::new(None) };
     static WM_STATE: RefCell<Option<WmState>> = const { RefCell::new(None) };
+    static IPC_RX: RefCell<Option<std::sync::mpsc::Receiver<tarmac::ipc::server::IpcCommand>>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -144,6 +145,10 @@ fn main() {
         }),
     );
     WORKSPACE_POLLER.with(|p| *p.borrow_mut() = Some(poller));
+
+    // Start IPC server
+    let ipc_rx = tarmac::ipc::server::start_server();
+    IPC_RX.with(|r| *r.borrow_mut() = Some(ipc_rx));
 
     install_polling_timer();
     run_app();
@@ -306,6 +311,149 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             poller.poll();
         }
     });
+
+    // Process IPC commands
+    IPC_RX.with(|r| {
+        if let Some(rx) = r.borrow().as_ref() {
+            while let Ok(cmd) = rx.try_recv() {
+                let response = process_ipc_command(&cmd.request);
+                let _ = cmd.response_tx.send(response);
+            }
+        }
+    });
+}
+
+fn process_ipc_command(
+    request: &tarmac::ipc::protocol::Request,
+) -> tarmac::ipc::protocol::Response {
+    use tarmac::ipc::protocol::Response;
+
+    WM_STATE.with(|s| {
+        let mut state_ref = s.borrow_mut();
+        let Some(state) = state_ref.as_mut() else {
+            return Response::err("no state");
+        };
+
+        match request.command.as_str() {
+            "focus" => {
+                if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
+                    state.focus_direction(dir);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: focus left|right|up|down")
+                }
+            }
+            "swap" => {
+                if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
+                    state.swap_direction(dir);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: swap left|right|up|down")
+                }
+            }
+            "resize" => {
+                if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
+                    state.resize_direction(dir);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: resize left|right|up|down")
+                }
+            }
+            "close" => {
+                state.close_focused();
+                Response::ok_empty()
+            }
+            "equalize" => {
+                state.equalize();
+                Response::ok_empty()
+            }
+            "workspace" => {
+                if let Some(n) = request.args.first().and_then(|a| a.parse::<u8>().ok()) {
+                    state.switch_workspace(n);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: workspace <1-10>")
+                }
+            }
+            "move-to-workspace" => {
+                if let Some(n) = request.args.first().and_then(|a| a.parse::<u8>().ok()) {
+                    state.move_to_workspace(n);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: move-to-workspace <1-10>")
+                }
+            }
+            "toggle-floating" => {
+                state.toggle_float();
+                Response::ok_empty()
+            }
+            "get-workspaces" => {
+                let active_id = state.workspaces.active_id().to_string();
+                let ws_count = state.workspaces.active().all_window_ids().len();
+                let focused = state.workspaces.active().focused;
+                Response::ok(serde_json::json!({
+                    "active": active_id,
+                    "windows": ws_count,
+                    "focused": focused,
+                }))
+            }
+            "get-focused" => {
+                if let Some(focused_id) = state.workspaces.active().focused {
+                    if let Some(w) = state.registry.get(focused_id) {
+                        Response::ok(serde_json::json!({
+                            "id": w.id,
+                            "app_name": w.app_name,
+                            "title": w.title,
+                            "x": w.x, "y": w.y,
+                            "width": w.width, "height": w.height,
+                            "floating": w.floating,
+                        }))
+                    } else {
+                        Response::ok(serde_json::json!({ "id": focused_id }))
+                    }
+                } else {
+                    Response::ok(serde_json::json!({ "focused": null }))
+                }
+            }
+            "get-windows" => {
+                let windows: Vec<serde_json::Value> = state
+                    .registry
+                    .all()
+                    .map(|w| {
+                        serde_json::json!({
+                            "id": w.id,
+                            "app_name": w.app_name,
+                            "title": w.title,
+                            "floating": w.floating,
+                        })
+                    })
+                    .collect();
+                Response::ok(serde_json::json!({ "windows": windows }))
+            }
+            "exec" => {
+                if let Some(cmd) = request.args.first() {
+                    std::process::Command::new("/bin/sh")
+                        .args(["-c", cmd])
+                        .spawn()
+                        .ok();
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: exec <command>")
+                }
+            }
+            other => Response::err(format!("unknown command: {}", other)),
+        }
+    })
+}
+
+fn parse_dir(s: &str) -> Option<tarmac::core::tree::Direction> {
+    match s {
+        "left" => Some(tarmac::core::tree::Direction::Left),
+        "right" => Some(tarmac::core::tree::Direction::Right),
+        "up" => Some(tarmac::core::tree::Direction::Up),
+        "down" => Some(tarmac::core::tree::Direction::Down),
+        _ => None,
+    }
 }
 
 #[allow(non_upper_case_globals)]
