@@ -216,8 +216,33 @@ impl Node {
 
     /// Calculate geometries for all windows given a root rect.
     pub fn calculate_geometries(&self, rect: Rect) -> Vec<(WindowId, Rect)> {
+        self.calculate_geometries_with_gaps(rect, 0.0, 0.0, true)
+    }
+
+    /// Calculate geometries with inner and outer gaps.
+    /// `gap_outer` is applied to the root rect edges.
+    /// `gap_inner` is the space between adjacent windows (half applied to each side).
+    pub fn calculate_geometries_with_gaps(
+        &self,
+        rect: Rect,
+        gap_inner: f64,
+        gap_outer: f64,
+        is_root: bool,
+    ) -> Vec<(WindowId, Rect)> {
+        // Apply outer gap to root rect
+        let padded = if is_root && gap_outer > 0.0 {
+            Rect::new(
+                rect.x + gap_outer,
+                rect.y + gap_outer,
+                (rect.width - 2.0 * gap_outer).max(0.0),
+                (rect.height - 2.0 * gap_outer).max(0.0),
+            )
+        } else {
+            rect
+        };
+
         match self {
-            Node::Leaf { window: Some(w) } => vec![(*w, rect)],
+            Node::Leaf { window: Some(w) } => vec![(*w, padded)],
             Node::Leaf { window: None } => vec![],
             Node::Internal {
                 split,
@@ -225,9 +250,30 @@ impl Node {
                 left,
                 right,
             } => {
-                let (left_rect, right_rect) = rect.split(*split, *ratio);
-                let mut geoms = left.calculate_geometries(left_rect);
-                geoms.extend(right.calculate_geometries(right_rect));
+                let half_gap = gap_inner / 2.0;
+                let (mut left_rect, mut right_rect) = padded.split(*split, *ratio);
+
+                // Apply inner gap between the two halves
+                if gap_inner > 0.0 {
+                    match split {
+                        SplitDirection::Vertical => {
+                            left_rect.width = (left_rect.width - half_gap).max(0.0);
+                            right_rect.x += half_gap;
+                            right_rect.width = (right_rect.width - half_gap).max(0.0);
+                        }
+                        SplitDirection::Horizontal => {
+                            left_rect.height = (left_rect.height - half_gap).max(0.0);
+                            right_rect.y += half_gap;
+                            right_rect.height = (right_rect.height - half_gap).max(0.0);
+                        }
+                    }
+                }
+
+                let mut geoms =
+                    left.calculate_geometries_with_gaps(left_rect, gap_inner, gap_outer, false);
+                geoms.extend(
+                    right.calculate_geometries_with_gaps(right_rect, gap_inner, gap_outer, false),
+                );
                 geoms
             }
         }
@@ -845,5 +891,65 @@ mod tests {
         assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Up), Some(2));
         assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Right), Some(4));
         assert_eq!(Node::find_adjacent(&geoms, 4, Direction::Left), Some(3));
+    }
+
+    // --- Gap tests ---
+
+    #[test]
+    fn gaps_reduce_window_sizes() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+
+        let geoms_no_gap = tree.calculate_geometries(SCREEN);
+        let geoms_with_gap = tree.calculate_geometries_with_gaps(SCREEN, 10.0, 20.0, true);
+
+        // With outer gap, windows should be smaller
+        let g1_no = geoms_no_gap.iter().find(|(w, _)| *w == 1).unwrap();
+        let g1_gap = geoms_with_gap.iter().find(|(w, _)| *w == 1).unwrap();
+        assert!(g1_gap.1.width < g1_no.1.width);
+        assert!(g1_gap.1.x > g1_no.1.x); // shifted by outer gap
+    }
+
+    #[test]
+    fn gaps_preserve_no_overlap() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+
+        let geoms = tree.calculate_geometries_with_gaps(SCREEN, 10.0, 20.0, true);
+        let g1 = geoms.iter().find(|(w, _)| *w == 1).unwrap();
+        let g2 = geoms.iter().find(|(w, _)| *w == 2).unwrap();
+
+        // Windows should not overlap — g1's right edge should be left of g2's left edge
+        let g1_right = g1.1.x + g1.1.width;
+        assert!(
+            g1_right <= g2.1.x,
+            "windows overlap: g1 right {} > g2 left {}",
+            g1_right,
+            g2.1.x
+        );
+    }
+
+    #[test]
+    fn zero_gaps_same_as_no_gaps() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+
+        let geoms_default = tree.calculate_geometries(SCREEN);
+        let geoms_zero = tree.calculate_geometries_with_gaps(SCREEN, 0.0, 0.0, true);
+
+        assert_eq!(geoms_default.len(), geoms_zero.len());
+        for i in 0..geoms_default.len() {
+            assert_eq!(geoms_default[i].0, geoms_zero[i].0);
+            assert_rect_approx(
+                &geoms_zero[i].1,
+                geoms_default[i].1.x,
+                geoms_default[i].1.y,
+                geoms_default[i].1.width,
+                geoms_default[i].1.height,
+            );
+        }
     }
 }
