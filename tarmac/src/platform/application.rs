@@ -125,51 +125,6 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
     result
 }
 
-/// Dump all on-screen windows via CGWindowList for diagnostic purposes.
-/// This sees ALL windows regardless of AX accessibility, including window IDs, PIDs, and names.
-pub fn dump_cg_window_list() {
-    unsafe {
-        let info = CGWindowListCopyWindowInfo(
-            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
-            kCGNullWindowID,
-        );
-        if info.is_null() {
-            tracing::warn!("CGWindowListCopyWindowInfo returned null");
-            return;
-        }
-
-        let count = CFArrayGetCount(info);
-        tracing::debug!(count, "CGWindowList on-screen windows");
-
-        for i in 0..count {
-            let dict = CFArrayGetValueAtIndex(info, i);
-            if dict.is_null() {
-                continue;
-            }
-
-            let pid = cg_dict_get_i32(dict, kCGWindowOwnerPID);
-            let wid = cg_dict_get_i32(dict, kCGWindowNumber);
-            let layer = cg_dict_get_i32(dict, kCGWindowLayer);
-            let name = cg_dict_get_string(dict, kCGWindowOwnerName);
-            let title = cg_dict_get_string(dict, kCGWindowName);
-
-            // Only log normal layer (0) windows — skip menu bar, dock, etc.
-            if layer == 0 {
-                tracing::trace!(
-                    wid,
-                    pid,
-                    layer,
-                    owner = %name,
-                    title = %title,
-                    "CGWindowList entry"
-                );
-            }
-        }
-
-        CFRelease(info);
-    }
-}
-
 /// Discover all on-screen windows using CGWindowList as ground truth,
 /// then enrich with AX attributes. This catches apps that don't appear
 /// in NSWorkspace.runningApplications (e.g., wezterm-gui, non-bundled apps).
@@ -180,6 +135,9 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
     // Phase 1: CGWindowList — ground truth for all on-screen windows
     let cg_windows = get_cg_window_list();
     tracing::debug!(count = cg_windows.len(), "CGWindowList on-screen windows");
+    for cg in &cg_windows {
+        tracing::trace!(wid = cg.wid, pid = cg.pid, owner = %cg.owner, title = %cg.title, "CGWindowList entry");
+    }
 
     // Group by PID
     for cg in &cg_windows {
@@ -300,8 +258,6 @@ pub fn get_cg_window_list() -> Vec<CgWindowInfo> {
             let wid = cg_dict_get_i32(dict, kCGWindowNumber) as u32;
             let owner = cg_dict_get_string(dict, kCGWindowOwnerName);
             let title = cg_dict_get_string(dict, kCGWindowName);
-
-            tracing::trace!(wid, pid, owner = %owner, title = %title, "CGWindowList entry");
 
             result.push(CgWindowInfo {
                 wid,
