@@ -185,6 +185,8 @@ pub enum Action {
     Swap(Direction),
     Resize(Direction),
     Equalize,
+    Workspace(u8),       // Switch to workspace 1-10
+    MoveToWorkspace(u8), // Move focused window to workspace 1-10
 }
 
 /// A keybinding: modifier+key → action.
@@ -258,6 +260,30 @@ impl KeybindManager {
 
         // Equalize
         mgr.add(m, Key::E, Action::Equalize);
+
+        // Workspaces: Option+1-9, Option+0 for ws 10
+        mgr.add(m, Key::Num1, Action::Workspace(1));
+        mgr.add(m, Key::Num2, Action::Workspace(2));
+        mgr.add(m, Key::Num3, Action::Workspace(3));
+        mgr.add(m, Key::Num4, Action::Workspace(4));
+        mgr.add(m, Key::Num5, Action::Workspace(5));
+        mgr.add(m, Key::Num6, Action::Workspace(6));
+        mgr.add(m, Key::Num7, Action::Workspace(7));
+        mgr.add(m, Key::Num8, Action::Workspace(8));
+        mgr.add(m, Key::Num9, Action::Workspace(9));
+        mgr.add(m, Key::Num0, Action::Workspace(10));
+
+        // Move to workspace: Option+Shift+1-9, Option+Shift+0
+        mgr.add(ms, Key::Num1, Action::MoveToWorkspace(1));
+        mgr.add(ms, Key::Num2, Action::MoveToWorkspace(2));
+        mgr.add(ms, Key::Num3, Action::MoveToWorkspace(3));
+        mgr.add(ms, Key::Num4, Action::MoveToWorkspace(4));
+        mgr.add(ms, Key::Num5, Action::MoveToWorkspace(5));
+        mgr.add(ms, Key::Num6, Action::MoveToWorkspace(6));
+        mgr.add(ms, Key::Num7, Action::MoveToWorkspace(7));
+        mgr.add(ms, Key::Num8, Action::MoveToWorkspace(8));
+        mgr.add(ms, Key::Num9, Action::MoveToWorkspace(9));
+        mgr.add(ms, Key::Num0, Action::MoveToWorkspace(10));
 
         mgr
     }
