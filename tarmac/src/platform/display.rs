@@ -106,9 +106,106 @@ pub fn warp_mouse(x: f64, y: f64) {
     }
 }
 
+/// Discover all connected displays and return Monitor structs.
+pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
+    use crate::core::monitor::Monitor;
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::NSScreen;
+
+    let mtm = unsafe { MainThreadMarker::new_unchecked() };
+    let main_id = unsafe { CGMainDisplayID() };
+
+    // Get all display IDs
+    let mut display_ids = [0u32; 16];
+    let mut count: u32 = 0;
+    unsafe {
+        CGGetActiveDisplayList(16, display_ids.as_mut_ptr(), &mut count);
+    }
+
+    // Get NSScreen list for visible frames
+    let ns_screens = NSScreen::screens(mtm);
+    let ns_count = ns_screens.len();
+
+    let main_height = unsafe { CGDisplayBounds(main_id).size.height };
+
+    let mut monitors = Vec::new();
+    for &did in display_ids.iter().take(count as usize) {
+        let cg_bounds = unsafe { CGDisplayBounds(did) };
+        let frame = Rect::new(
+            cg_bounds.origin.x,
+            cg_bounds.origin.y,
+            cg_bounds.size.width,
+            cg_bounds.size.height,
+        );
+
+        // Find matching NSScreen for visible frame
+        // NSScreen uses bottom-left origin; CG uses top-left
+        let usable_frame = find_nsscreen_for_display(
+            &ns_screens,
+            ns_count,
+            cg_bounds.origin.x,
+            cg_bounds.size.width,
+            main_height,
+        )
+        .unwrap_or(frame);
+
+        monitors.push(Monitor {
+            id: did,
+            frame,
+            usable_frame,
+            is_primary: did == main_id,
+        });
+    }
+
+    tracing::info!(count = monitors.len(), "displays discovered");
+    for m in &monitors {
+        tracing::debug!(
+            id = m.id,
+            primary = m.is_primary,
+            x = m.usable_frame.x,
+            y = m.usable_frame.y,
+            w = m.usable_frame.width,
+            h = m.usable_frame.height,
+            "display"
+        );
+    }
+
+    monitors
+}
+
+/// Find the NSScreen matching a CGDisplay by x position and width,
+/// and return its visible frame converted to top-left origin.
+fn find_nsscreen_for_display(
+    screens: &objc2_foundation::NSArray<objc2_app_kit::NSScreen>,
+    count: usize,
+    cg_x: f64,
+    cg_width: f64,
+    main_height: f64,
+) -> Option<Rect> {
+    for i in 0..count {
+        let screen = screens.objectAtIndex(i);
+        let frame = screen.frame();
+        let visible = screen.visibleFrame();
+
+        // Match by x position and width (NSScreen frame origin is bottom-left)
+        if (frame.origin.x - cg_x).abs() < 1.0 && (frame.size.width - cg_width).abs() < 1.0 {
+            // Convert visible frame from bottom-left to top-left origin
+            let top_y = main_height - visible.origin.y - visible.size.height;
+            return Some(Rect::new(
+                visible.origin.x,
+                top_y,
+                visible.size.width,
+                visible.size.height,
+            ));
+        }
+    }
+    None
+}
+
 unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
     fn CGDisplayBounds(display: u32) -> CGRect;
+    fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
     fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
 }
