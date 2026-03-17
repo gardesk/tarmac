@@ -181,7 +181,14 @@ impl HotkeyManager {
         };
 
         if status != NO_ERR {
-            tracing::warn!(?key, ?modifiers, status, "failed to register hotkey");
+            tracing::warn!(
+                ?key,
+                ?modifiers,
+                status,
+                carbon_key,
+                carbon_mods,
+                "failed to register hotkey"
+            );
             return false;
         }
 
