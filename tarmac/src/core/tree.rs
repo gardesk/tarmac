@@ -746,4 +746,104 @@ mod tests {
         tree.insert(2, Some(1));
         assert_eq!(tree.first_window(), Some(1));
     }
+
+    // --- Edge cases ---
+
+    #[test]
+    fn rect_zero_size() {
+        let r = Rect::new(100.0, 200.0, 0.0, 0.0);
+        let (left, right) = r.split(SplitDirection::Vertical, 0.5);
+        assert_eq!(left.width, 0.0);
+        assert_eq!(right.width, 0.0);
+    }
+
+    #[test]
+    fn insert_remove_all_then_reinsert() {
+        let mut tree = Node::empty();
+        tree.insert(1, None);
+        tree.insert(2, Some(1));
+        tree.remove(1);
+        tree.remove(2);
+        assert!(tree.is_empty());
+        tree.insert(3, None);
+        assert_eq!(tree.window_count(), 1);
+        assert!(tree.contains(3));
+    }
+
+    #[test]
+    fn remove_same_window_twice() {
+        let mut tree = Node::empty();
+        tree.insert(1, None);
+        assert!(tree.remove(1));
+        assert!(!tree.remove(1)); // second remove returns false
+    }
+
+    #[test]
+    fn swap_nonexistent_windows() {
+        let mut tree = Node::empty();
+        tree.insert(1, None);
+        tree.insert(2, Some(1));
+        assert!(!tree.swap(1, 99)); // 99 doesn't exist
+    }
+
+    #[test]
+    fn resize_single_window_noop() {
+        let mut tree = Node::empty();
+        tree.insert(1, None);
+        assert!(!tree.resize(1, Direction::Right, 0.1));
+    }
+
+    #[test]
+    fn find_adjacent_single_window() {
+        let mut tree = Node::empty();
+        tree.insert(1, None);
+        let geoms = tree.calculate_geometries(SCREEN);
+        assert_eq!(Node::find_adjacent(&geoms, 1, Direction::Right), None);
+        assert_eq!(Node::find_adjacent(&geoms, 1, Direction::Left), None);
+    }
+
+    #[test]
+    fn geometry_preserves_total_area() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+
+        let geoms = tree.calculate_geometries(SCREEN);
+        let total_area: f64 = geoms.iter().map(|(_, r)| r.width * r.height).sum();
+        let screen_area = SCREEN.width * SCREEN.height;
+        assert!(
+            (total_area - screen_area).abs() < 0.01,
+            "total area {} != screen area {}",
+            total_area,
+            screen_area
+        );
+    }
+
+    #[test]
+    fn find_adjacent_four_windows() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+        let geoms = tree.calculate_geometries(SCREEN);
+
+        // In the 4-window smart-split layout:
+        // ┌──────┬──────┐
+        // │      │  2   │
+        // │  1   ├──┬───┤
+        // │      │ 3│ 4 │
+        // └──────┴──┴───┘
+        // Win1 center=(480,540), Win2 center=(1440,270),
+        // Win3 center=(1200,810), Win4 center=(1680,810)
+        // From 1 going right: 3 is more aligned vertically (closer y) than 2
+        assert_eq!(Node::find_adjacent(&geoms, 1, Direction::Right), Some(3));
+        assert_eq!(Node::find_adjacent(&geoms, 2, Direction::Left), Some(1));
+        assert_eq!(Node::find_adjacent(&geoms, 2, Direction::Down), Some(3));
+        assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Up), Some(2));
+        assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Right), Some(4));
+        assert_eq!(Node::find_adjacent(&geoms, 4, Direction::Left), Some(3));
+    }
 }
