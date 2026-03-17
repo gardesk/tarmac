@@ -126,8 +126,17 @@ impl Node {
         }
     }
 
-    /// Insert a window next to `target` (or at the end if target is None).
-    /// Uses vertical split for now; Sprint 3 adds smart split.
+    /// Determine split direction based on container aspect ratio.
+    /// Wider than tall → vertical (side-by-side). Taller → horizontal (stacked).
+    pub fn smart_split_direction(rect: &Rect) -> SplitDirection {
+        if rect.width > rect.height {
+            SplitDirection::Vertical
+        } else {
+            SplitDirection::Horizontal
+        }
+    }
+
+    /// Insert a window next to `target` using smart split.
     pub fn insert(&mut self, new_window: WindowId, target: Option<WindowId>) {
         self.insert_with_rect(new_window, target, Rect::new(0.0, 0.0, 1920.0, 1080.0));
     }
@@ -143,8 +152,7 @@ impl Node {
             Node::Leaf {
                 window: Some(existing),
             } => {
-                // Default to vertical split; Sprint 3 will use smart_split_direction
-                let direction = SplitDirection::Vertical;
+                let direction = Self::smart_split_direction(&rect);
                 let existing_window = *existing;
                 *self = Node::Internal {
                     split: direction,
@@ -542,11 +550,11 @@ mod tests {
     }
 
     #[test]
-    fn geometry_three_windows() {
+    fn geometry_three_windows_smart_split() {
         let mut tree = Node::empty();
-        tree.insert(1, None);
-        tree.insert(2, Some(1));
-        tree.insert(3, Some(2));
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
         let geoms = tree.calculate_geometries(SCREEN);
         assert_eq!(geoms.len(), 3);
 
@@ -554,12 +562,65 @@ mod tests {
         let g2 = geoms.iter().find(|(w, _)| *w == 2).unwrap();
         let g3 = geoms.iter().find(|(w, _)| *w == 3).unwrap();
 
-        // Window 1: left half
+        // Window 1: left half (1920 > 1080, so first split is vertical)
         assert_rect_approx(&g1.1, 0.0, 0.0, 960.0, 1080.0);
-        // Window 2: top-right quarter
-        assert_rect_approx(&g2.1, 960.0, 0.0, 480.0, 1080.0);
-        // Window 3: bottom-right quarter
-        assert_rect_approx(&g3.1, 1440.0, 0.0, 480.0, 1080.0);
+        // Window 2: right half is 960x1080 (taller than wide), so split horizontal
+        // Window 2: top-right
+        assert_rect_approx(&g2.1, 960.0, 0.0, 960.0, 540.0);
+        // Window 3: bottom-right
+        assert_rect_approx(&g3.1, 960.0, 540.0, 960.0, 540.0);
+    }
+
+    #[test]
+    fn smart_split_four_windows() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+        let geoms = tree.calculate_geometries(SCREEN);
+        assert_eq!(geoms.len(), 4);
+
+        let g1 = geoms.iter().find(|(w, _)| *w == 1).unwrap();
+        let g2 = geoms.iter().find(|(w, _)| *w == 2).unwrap();
+        let g3 = geoms.iter().find(|(w, _)| *w == 3).unwrap();
+        let g4 = geoms.iter().find(|(w, _)| *w == 4).unwrap();
+
+        // ┌──────────────┬──────────────┐
+        // │              │    Win 2     │
+        // │   Win 1      ├──────┬───────┤
+        // │              │ W 3  │  W 4  │
+        // └──────────────┴──────┴───────┘
+        assert_rect_approx(&g1.1, 0.0, 0.0, 960.0, 1080.0);
+        assert_rect_approx(&g2.1, 960.0, 0.0, 960.0, 540.0);
+        // Bottom-right 960x540 is wider than tall → vertical split
+        assert_rect_approx(&g3.1, 960.0, 540.0, 480.0, 540.0);
+        assert_rect_approx(&g4.1, 1440.0, 540.0, 480.0, 540.0);
+    }
+
+    #[test]
+    fn smart_split_direction_wide() {
+        assert_eq!(
+            Node::smart_split_direction(&Rect::new(0.0, 0.0, 1920.0, 1080.0)),
+            SplitDirection::Vertical
+        );
+    }
+
+    #[test]
+    fn smart_split_direction_tall() {
+        assert_eq!(
+            Node::smart_split_direction(&Rect::new(0.0, 0.0, 960.0, 1080.0)),
+            SplitDirection::Horizontal
+        );
+    }
+
+    #[test]
+    fn smart_split_direction_square() {
+        // Equal → horizontal (height >= width)
+        assert_eq!(
+            Node::smart_split_direction(&Rect::new(0.0, 0.0, 500.0, 500.0)),
+            SplitDirection::Horizontal
+        );
     }
 
     #[test]
