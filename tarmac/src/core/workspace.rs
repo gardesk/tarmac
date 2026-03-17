@@ -202,6 +202,10 @@ impl WorkspaceManager {
         self.workspaces.get_mut(&id).unwrap()
     }
 
+    pub fn get_workspace(&self, id: &WorkspaceId) -> Option<&Workspace> {
+        self.workspaces.get(id)
+    }
+
     pub fn get_or_create(&mut self, id: WorkspaceId) -> &mut Workspace {
         self.workspaces
             .entry(id.clone())
