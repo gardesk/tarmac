@@ -103,6 +103,8 @@ fn handle_action(action: Action) {
                 Action::Swap(dir) => state.swap_direction(dir),
                 Action::Resize(dir) => state.resize_direction(dir),
                 Action::Equalize => state.equalize(),
+                Action::Workspace(num) => state.switch_workspace(num),
+                Action::MoveToWorkspace(num) => state.move_to_workspace(num),
             }
         }
     });
