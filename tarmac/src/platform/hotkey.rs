@@ -416,3 +416,40 @@ fn key_to_carbon(key: Key) -> Option<u32> {
     };
     Some(keycode as u32)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::input::keycode_to_key;
+
+    #[test]
+    fn carbon_keycode_roundtrip() {
+        // Every keycode that maps to a Key via keycode_to_key should
+        // produce the same keycode back via key_to_carbon
+        for code in 0x00..=0xFF_u16 {
+            if let Some(key) = keycode_to_key(code) {
+                let carbon = key_to_carbon(key);
+                assert_eq!(
+                    carbon,
+                    Some(code as u32),
+                    "key {:?} from keycode 0x{:02X} produced carbon keycode {:?}",
+                    key,
+                    code,
+                    carbon
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn modifier_conversion() {
+        assert_eq!(modifiers_to_carbon(Modifiers::COMMAND), CMD_KEY);
+        assert_eq!(modifiers_to_carbon(Modifiers::SHIFT), SHIFT_KEY);
+        assert_eq!(modifiers_to_carbon(Modifiers::OPTION), OPTION_KEY);
+        assert_eq!(modifiers_to_carbon(Modifiers::CONTROL), CONTROL_KEY);
+        assert_eq!(
+            modifiers_to_carbon(Modifiers::COMMAND | Modifiers::SHIFT),
+            CMD_KEY | SHIFT_KEY
+        );
+    }
+}
