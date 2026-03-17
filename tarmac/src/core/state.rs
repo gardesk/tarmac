@@ -33,6 +33,10 @@ pub struct WmState {
     observers: HashMap<i32, AppObserver>,
     screen_rect: Rect,
     event_queue: Rc<RefCell<Vec<QueuedEvent>>>,
+    /// Suppress focus-follows-mouse briefly after mouse warp to prevent feedback loops
+    ffm_cooldown_until: Option<std::time::Instant>,
+    /// Last window that had focus-follows-mouse focus (to avoid redundant focus calls)
+    ffm_last_window: Option<WindowId>,
 }
 
 impl Default for WmState {
@@ -50,6 +54,8 @@ impl WmState {
             observers: HashMap::new(),
             screen_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
             event_queue: Rc::new(RefCell::new(Vec::new())),
+            ffm_cooldown_until: None,
+            ffm_last_window: None,
         }
     }
 
@@ -134,6 +140,10 @@ impl WmState {
             // Mouse follows focus: warp cursor to the center of the newly focused window
             if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target) {
                 warp_mouse_to_center(rect);
+                // Suppress focus-follows-mouse for 200ms to prevent feedback loop
+                self.ffm_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.ffm_last_window = Some(target);
             }
         }
     }
@@ -198,6 +208,38 @@ impl WmState {
                 let btn_ref = unsafe { &*btn_ptr };
                 let _ = ax_perform_action(btn_ref, "AXPress");
                 tracing::info!(id = focused, "close button pressed");
+            }
+        }
+    }
+
+    /// Focus-follows-mouse: focus the window under the cursor.
+    pub fn mouse_moved(&mut self, x: f64, y: f64) {
+        // Check cooldown (suppress after mouse warp to prevent feedback loops)
+        if let Some(until) = self.ffm_cooldown_until {
+            if std::time::Instant::now() < until {
+                return;
+            }
+            self.ffm_cooldown_until = None;
+        }
+
+        let geoms = self
+            .workspaces
+            .active()
+            .tree
+            .calculate_geometries(self.screen_rect);
+
+        let window_under = geoms
+            .iter()
+            .find(|(_, rect)| rect.contains_point(x, y))
+            .map(|(id, _)| *id);
+
+        // Only refocus if the window changed
+        if window_under != self.ffm_last_window {
+            self.ffm_last_window = window_under;
+            if let Some(id) = window_under
+                && self.workspaces.active().focused != Some(id)
+            {
+                self.focus_window(id);
             }
         }
     }
