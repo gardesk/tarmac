@@ -336,6 +336,10 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
         "close" => Ok(Action::CloseWindow),
         "equalize" => Ok(Action::Equalize),
         "toggle_float" => Ok(Action::ToggleFloat),
+        "workspace_next" => Ok(Action::WorkspaceNext),
+        "workspace_prev" => Ok(Action::WorkspacePrev),
+        "reload" => Ok(Action::Reload),
+        "exit" => Ok(Action::Exit),
         _ => Err("unknown action"),
     }
 }
