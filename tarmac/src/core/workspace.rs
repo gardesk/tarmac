@@ -1,6 +1,6 @@
 use std::fmt;
 
-use super::tree::{Node, Rect};
+use super::tree::Node;
 use super::window::WindowId;
 
 /// Workspace identifier — numbered (1-10), lettered (A-Z), or special (scratchpads).
@@ -162,6 +162,7 @@ impl Default for WorkspaceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tree::Rect;
 
     const SCREEN: Rect = Rect {
         x: 0.0,
