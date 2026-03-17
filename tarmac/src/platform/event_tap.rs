@@ -9,29 +9,37 @@ use objc2_core_graphics::{
     CGEventTapProxy, CGEventType,
 };
 
-/// Callback for mouse click events. Args: (x, y).
-pub type ClickHandler = Box<dyn Fn(f64, f64)>;
+/// Mouse events delivered by the event tap.
+#[derive(Debug, Clone, Copy)]
+pub enum MouseEvent {
+    Click { x: f64, y: f64 },
+    Moved { x: f64, y: f64 },
+}
+
+/// Callback for mouse events.
+pub type MouseHandler = Box<dyn Fn(MouseEvent)>;
 
 /// Holds the event tap resources. Drop to disable.
 pub struct EventTap {
     _port: CFRetained<CFMachPort>,
     _source: CFRetained<objc2_core_foundation::CFRunLoopSource>,
-    _handler: *mut ClickHandler,
+    _handler: *mut MouseHandler,
 }
 
 impl EventTap {
-    /// Create an event tap that intercepts mouse clicks for click-to-focus.
-    /// Keyboard hotkeys are handled by Carbon RegisterEventHotKey instead.
-    pub fn install(handler: ClickHandler) -> Option<Self> {
+    /// Create an event tap for mouse click and move events.
+    pub fn install(handler: MouseHandler) -> Option<Self> {
         let handler_ptr = Box::into_raw(Box::new(handler));
 
-        let mask: CGEventMask = 1 << CGEventType::LeftMouseDown.0 as u64;
+        let mask: CGEventMask =
+            (1 << CGEventType::LeftMouseDown.0 as u64) | (1 << CGEventType::MouseMoved.0 as u64);
 
         let port = unsafe {
             CGEvent::tap_create(
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
-                CGEventTapOptions(0),
+                // ListenOnly for mouse moves — we don't suppress them
+                CGEventTapOptions(1), // kCGEventTapOptionListenOnly
                 mask,
                 Some(event_tap_callback),
                 handler_ptr as *mut c_void,
@@ -71,22 +79,25 @@ unsafe extern "C-unwind" fn event_tap_callback(
     event: NonNull<CGEvent>,
     user_info: *mut c_void,
 ) -> *mut CGEvent {
-    // Handle tap disabled events
     let ety = event_type.0 as i32;
     if ety == -1 || ety == -2 {
-        tracing::warn!("mouse event tap disabled, re-enabling");
         return event.as_ptr();
     }
 
-    if user_info.is_null() || event_type != CGEventType::LeftMouseDown {
+    if user_info.is_null() {
         return event.as_ptr();
     }
 
     let event_ref = unsafe { event.as_ref() };
-    let location = CGEvent::location(Some(event_ref));
-    let handler = unsafe { &*(user_info as *const ClickHandler) };
-    handler(location.x, location.y);
+    let handler = unsafe { &*(user_info as *const MouseHandler) };
 
-    // Always pass click through — never suppress
+    if event_type == CGEventType::LeftMouseDown {
+        let loc = CGEvent::location(Some(event_ref));
+        handler(MouseEvent::Click { x: loc.x, y: loc.y });
+    } else if event_type == CGEventType::MouseMoved {
+        let loc = CGEvent::location(Some(event_ref));
+        handler(MouseEvent::Moved { x: loc.x, y: loc.y });
+    }
+
     event.as_ptr()
 }
