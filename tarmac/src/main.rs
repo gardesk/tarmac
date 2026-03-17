@@ -51,7 +51,36 @@ fn main() {
             if let Some(state) = s.borrow_mut().as_mut() {
                 match event {
                     MouseEvent::Click { x, y } => state.click_to_focus(x, y),
-                    MouseEvent::Moved { x, y } => state.mouse_moved(x, y),
+                    MouseEvent::Moved { x, y } => {
+                        if state.is_dragging() {
+                            state.update_drag(x, y);
+                        } else {
+                            state.mouse_moved(x, y);
+                        }
+                    }
+                    MouseEvent::LeftDown {
+                        x,
+                        y,
+                        cmd_held: true,
+                    } => state.begin_move_drag(x, y),
+                    MouseEvent::LeftDragged { x, y } => {
+                        if state.is_dragging() {
+                            state.update_drag(x, y);
+                        }
+                    }
+                    MouseEvent::LeftUp { .. } => state.end_drag(),
+                    MouseEvent::RightDown {
+                        x,
+                        y,
+                        cmd_held: true,
+                    } => state.begin_resize_drag(x, y),
+                    MouseEvent::RightDragged { x, y } => {
+                        if state.is_dragging() {
+                            state.update_drag(x, y);
+                        }
+                    }
+                    MouseEvent::RightUp { .. } => state.end_drag(),
+                    _ => {}
                 }
             }
         });
