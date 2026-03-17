@@ -180,7 +180,11 @@ pub enum Action {
     Equalize,
     Workspace(u8),       // Switch to workspace 1-10
     MoveToWorkspace(u8), // Move focused window to workspace 1-10
+    WorkspaceNext,       // Cycle to next workspace
+    WorkspacePrev,       // Cycle to previous workspace
     ToggleFloat,         // Toggle focused window between tiled and floating
+    Reload,              // Hot reload config
+    Exit,                // Clean exit
 }
 
 /// A keybinding: modifier+key → action.
