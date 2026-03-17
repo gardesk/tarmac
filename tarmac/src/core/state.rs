@@ -205,11 +205,13 @@ impl WmState {
                         "layout position"
                     );
                     if let Some(ax_ref) = self.ax_refs.get(wid) {
-                        if let Err(e) = ax_set_position(ax_ref, rect.x, rect.y) {
-                            tracing::warn!(wid, ?e, "ax_set_position failed");
-                        }
+                        // Size first, then position — prevents macOS from
+                        // pushing windows around when moving to smaller tiles
                         if let Err(e) = ax_set_size(ax_ref, rect.width, rect.height) {
                             tracing::warn!(wid, ?e, "ax_set_size failed");
+                        }
+                        if let Err(e) = ax_set_position(ax_ref, rect.x, rect.y) {
+                            tracing::warn!(wid, ?e, "ax_set_position failed");
                         }
                     }
                 }
@@ -302,11 +304,20 @@ impl WmState {
             Some(f) => f,
             None => return,
         };
-        let geoms = ws.tree.calculate_geometries(self.focused_screen_rect());
-        if let Some(target) = Node::find_adjacent(&geoms, focused, direction)
-            && self.workspaces.active_mut().tree.swap(focused, target)
-        {
-            self.apply_layout();
+        let sr = self.focused_screen_rect();
+        let geoms = ws.tree.calculate_geometries(sr);
+        if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
+            tracing::debug!(
+                focused,
+                target,
+                ?direction,
+                "swap_direction"
+            );
+            if self.workspaces.active_mut().tree.swap(focused, target) {
+                self.apply_layout();
+            }
+        } else {
+            tracing::debug!(focused, ?direction, "swap: no adjacent window");
         }
     }
 
