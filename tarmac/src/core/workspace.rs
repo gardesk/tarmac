@@ -22,10 +22,18 @@ impl fmt::Display for WorkspaceId {
     }
 }
 
-/// A single workspace with its own BSP tree and focus state.
+/// A floating window with its own geometry, not managed by the BSP tree.
+#[derive(Debug, Clone)]
+pub struct FloatingWindow {
+    pub id: WindowId,
+    pub geometry: super::tree::Rect,
+}
+
+/// A single workspace with its own BSP tree, floating windows, and focus state.
 pub struct Workspace {
     pub id: WorkspaceId,
     pub tree: Node,
+    pub floating: Vec<FloatingWindow>,
     pub focused: Option<WindowId>,
     pub focus_history: Vec<WindowId>,
 }
@@ -35,17 +43,48 @@ impl Workspace {
         Self {
             id,
             tree: Node::empty(),
+            floating: Vec::new(),
             focused: None,
             focus_history: Vec::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tree.is_empty()
+        self.tree.is_empty() && self.floating.is_empty()
     }
 
     pub fn all_window_ids(&self) -> Vec<WindowId> {
-        self.tree.windows()
+        let mut ids = self.tree.windows();
+        ids.extend(self.floating.iter().map(|f| f.id));
+        ids
+    }
+
+    pub fn is_floating(&self, id: WindowId) -> bool {
+        self.floating.iter().any(|f| f.id == id)
+    }
+
+    /// Toggle a window between tiled and floating.
+    /// Returns true if the window was toggled.
+    pub fn toggle_float(&mut self, id: WindowId, screen_rect: super::tree::Rect) -> bool {
+        if let Some(idx) = self.floating.iter().position(|f| f.id == id) {
+            // Floating → tiled: remove from floating, insert into tree
+            self.floating.remove(idx);
+            self.tree.insert_with_rect(id, self.focused, screen_rect);
+            true
+        } else if self.tree.contains(id) {
+            // Tiled → floating: get current geometry, remove from tree, add to floating
+            let geoms = self.tree.calculate_geometries(screen_rect);
+            let geometry = geoms
+                .iter()
+                .find(|(w, _)| *w == id)
+                .map(|(_, r)| *r)
+                .unwrap_or(super::tree::Rect::new(100.0, 100.0, 800.0, 600.0));
+            self.tree.remove(id);
+            self.floating.push(FloatingWindow { id, geometry });
+            true
+        } else {
+            false
+        }
     }
 
     pub fn record_focus(&mut self, window_id: WindowId) {
@@ -268,6 +307,49 @@ mod tests {
         mgr.active_mut().tree.insert(1, None);
         assert_eq!(mgr.workspace_for_window(1), Some(&WorkspaceId::Numbered(1)));
         assert_eq!(mgr.workspace_for_window(99), None);
+    }
+
+    #[test]
+    fn toggle_float_tiled_to_floating() {
+        let mut ws = Workspace::new(WorkspaceId::Numbered(1));
+        ws.tree.insert_with_rect(1, None, SCREEN);
+        ws.tree.insert_with_rect(2, Some(1), SCREEN);
+        ws.focused = Some(2);
+
+        assert!(ws.toggle_float(2, SCREEN));
+        assert!(!ws.tree.contains(2));
+        assert!(ws.is_floating(2));
+        assert_eq!(ws.floating.len(), 1);
+        assert_eq!(ws.tree.window_count(), 1);
+    }
+
+    #[test]
+    fn toggle_float_floating_to_tiled() {
+        let mut ws = Workspace::new(WorkspaceId::Numbered(1));
+        ws.tree.insert_with_rect(1, None, SCREEN);
+        ws.tree.insert_with_rect(2, Some(1), SCREEN);
+        ws.focused = Some(2);
+
+        // Float then unfloat
+        ws.toggle_float(2, SCREEN);
+        assert!(ws.is_floating(2));
+
+        ws.toggle_float(2, SCREEN);
+        assert!(!ws.is_floating(2));
+        assert!(ws.tree.contains(2));
+        assert_eq!(ws.tree.window_count(), 2);
+    }
+
+    #[test]
+    fn all_window_ids_includes_floating() {
+        let mut ws = Workspace::new(WorkspaceId::Numbered(1));
+        ws.tree.insert_with_rect(1, None, SCREEN);
+        ws.tree.insert_with_rect(2, Some(1), SCREEN);
+        ws.toggle_float(2, SCREEN);
+
+        let mut ids = ws.all_window_ids();
+        ids.sort();
+        assert_eq!(ids, vec![1, 2]);
     }
 
     #[test]
