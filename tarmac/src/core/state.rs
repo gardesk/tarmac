@@ -971,27 +971,35 @@ impl WmState {
             "add_window_to_active"
         );
 
-        // Check window rules for matching (case-insensitive substring)
+        // Check window rules for matching (case-insensitive, supports regex via /pattern/)
         let mut rule_float: Option<bool> = None;
         let mut rule_workspace: Option<u8> = None;
+        let mut rule_geometry: Option<(f64, f64, f64, f64)> = None;
         let app_lower = app_name.to_lowercase();
         let title_lower = title.to_lowercase();
         for rule in &self.rules {
             let name_matches = rule
                 .app_name
                 .as_ref()
-                .is_none_or(|n| app_lower.contains(&n.to_lowercase()));
+                .is_none_or(|n| match_string_or_regex(n, &app_lower));
+            let bundle_matches = rule
+                .app_bundle
+                .as_ref()
+                .is_none_or(|b| app_bundle_id.to_lowercase().contains(&b.to_lowercase()));
             let title_matches = rule
                 .title
                 .as_ref()
-                .is_none_or(|t| title_lower.contains(&t.to_lowercase()));
-            if name_matches && title_matches {
+                .is_none_or(|t| match_string_or_regex(t, &title_lower));
+            if name_matches && bundle_matches && title_matches {
                 tracing::debug!(app_name, title, ?rule, "window rule matched");
                 if let Some(f) = rule.floating {
                     rule_float = Some(f);
                 }
                 if let Some(w) = rule.workspace {
                     rule_workspace = Some(w);
+                }
+                if let Some(g) = rule.geometry {
+                    rule_geometry = Some(g);
                 }
             }
         }
@@ -1022,9 +1030,12 @@ impl WmState {
 
             let ws = self.workspaces.get_or_create(target);
             if should_float {
+                let geom = rule_geometry
+                    .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
+                    .unwrap_or_else(|| Rect::new(x, y, width, height));
                 ws.floating.push(super::workspace::FloatingWindow {
                     id: *id,
-                    geometry: Rect::new(x, y, width, height),
+                    geometry: geom,
                 });
             } else {
                 ws.tree.insert_with_rect(*id, ws.focused, self.screen_rect);
@@ -1045,9 +1056,12 @@ impl WmState {
         } else {
             let ws = self.workspaces.active_mut();
             if should_float {
+                let geom = rule_geometry
+                    .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
+                    .unwrap_or_else(|| Rect::new(x, y, width, height));
                 ws.floating.push(super::workspace::FloatingWindow {
                     id: *id,
-                    geometry: Rect::new(x, y, width, height),
+                    geometry: geom,
                 });
                 tracing::info!(id, subrole, "auto-floated window");
             } else {
@@ -1246,4 +1260,23 @@ fn resolve_app_name(pid: i32) -> Option<String> {
     use objc2_app_kit::NSRunningApplication;
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     app.localizedName().map(|n| n.to_string())
+}
+
+/// Match a string against a pattern. If pattern starts and ends with /,
+/// treat it as a regex. Otherwise, case-insensitive substring match.
+fn match_string_or_regex(pattern: &str, haystack: &str) -> bool {
+    if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() > 2 {
+        // Regex pattern: /pattern/
+        let regex_str = &pattern[1..pattern.len() - 1];
+        match regex::Regex::new(regex_str) {
+            Ok(re) => re.is_match(haystack),
+            Err(e) => {
+                tracing::warn!(pattern, err = %e, "invalid regex in window rule");
+                false
+            }
+        }
+    } else {
+        // Simple case-insensitive substring
+        haystack.contains(&pattern.to_lowercase())
+    }
 }
