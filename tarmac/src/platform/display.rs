@@ -96,6 +96,19 @@ struct CGSize {
     height: f64,
 }
 
+/// Get the current mouse cursor position in CG screen coordinates (top-left origin).
+pub fn get_cursor_position() -> (f64, f64) {
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return (0.0, 0.0);
+        }
+        let loc = CGEventGetLocation(event);
+        CFRelease(event as *const std::ffi::c_void);
+        (loc.x, loc.y)
+    }
+}
+
 /// Warp the mouse cursor to a specific screen position.
 pub fn warp_mouse(x: f64, y: f64) {
     unsafe {
@@ -187,10 +200,34 @@ fn find_nsscreen_for_display(
         let frame = screen.frame();
         let visible = screen.visibleFrame();
 
+        tracing::debug!(
+            ns_idx = i,
+            ns_frame_x = frame.origin.x,
+            ns_frame_y = frame.origin.y,
+            ns_frame_w = frame.size.width,
+            ns_frame_h = frame.size.height,
+            ns_vis_x = visible.origin.x,
+            ns_vis_y = visible.origin.y,
+            ns_vis_w = visible.size.width,
+            ns_vis_h = visible.size.height,
+            cg_x,
+            cg_width,
+            "NSScreen candidate"
+        );
+
         // Match by x position and width (NSScreen frame origin is bottom-left)
         if (frame.origin.x - cg_x).abs() < 1.0 && (frame.size.width - cg_width).abs() < 1.0 {
             // Convert visible frame from bottom-left to top-left origin
             let top_y = main_height - visible.origin.y - visible.size.height;
+            tracing::debug!(
+                ns_idx = i,
+                converted_x = visible.origin.x,
+                converted_y = top_y,
+                converted_w = visible.size.width,
+                converted_h = visible.size.height,
+                main_height,
+                "NSScreen matched → usable_frame"
+            );
             return Some(Rect::new(
                 visible.origin.x,
                 top_y,
@@ -199,6 +236,7 @@ fn find_nsscreen_for_display(
             ));
         }
     }
+    tracing::warn!(cg_x, cg_width, "no NSScreen match found — falling back to CG bounds");
     None
 }
 
@@ -253,4 +291,7 @@ unsafe extern "C" {
         >,
         user_info: *mut std::ffi::c_void,
     ) -> i32;
+    fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+    fn CFRelease(cf: *const std::ffi::c_void);
 }

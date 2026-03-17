@@ -91,6 +91,14 @@ impl WmState {
         let displays = crate::platform::display::discover_displays();
         self.monitors.set_monitors(displays);
 
+        // Detect which monitor the cursor is on — that becomes the focused monitor
+        let (cx, cy) = crate::platform::display::get_cursor_position();
+        tracing::info!(cursor_x = cx, cursor_y = cy, "cursor position at startup");
+        if let Some(cursor_monitor) = self.monitors.monitor_at_point(cx, cy) {
+            self.monitors.focused = cursor_monitor;
+            tracing::info!(monitor = cursor_monitor, "focused monitor set to cursor location");
+        }
+
         // Use focused monitor's usable frame for layout
         self.screen_rect = self
             .monitors
@@ -106,14 +114,17 @@ impl WmState {
             "usable screen frame"
         );
 
-        // Assign workspace N to monitor N (sorted by position)
-        let sorted_ids: Vec<u32> = self
-            .monitors
-            .sorted_by_position()
-            .iter()
-            .map(|m| m.id)
-            .collect();
-        self.workspaces.assign_monitors(&sorted_ids);
+        // Assign workspace 1 to the focused (cursor) monitor, then remaining
+        // monitors get workspace 2, 3, etc. in left-to-right order.
+        let focused_id = self.monitors.focused;
+        let mut ordered_ids: Vec<u32> = Vec::new();
+        ordered_ids.push(focused_id);
+        for m in self.monitors.sorted_by_position() {
+            if m.id != focused_id {
+                ordered_ids.push(m.id);
+            }
+        }
+        self.workspaces.assign_monitors(&ordered_ids);
 
         let windows = discover_all_windows();
         for w in &windows {
@@ -174,10 +185,32 @@ impl WmState {
                     self.gap_outer,
                     true,
                 );
+                tracing::debug!(
+                    monitor = monitor_id,
+                    workspace = %ws_id,
+                    windows = geometries.len(),
+                    sr_x = screen_rect.x,
+                    sr_y = screen_rect.y,
+                    sr_w = screen_rect.width,
+                    sr_h = screen_rect.height,
+                    "apply_layout"
+                );
                 for (wid, rect) in &geometries {
+                    tracing::debug!(
+                        wid,
+                        x = rect.x,
+                        y = rect.y,
+                        w = rect.width,
+                        h = rect.height,
+                        "layout position"
+                    );
                     if let Some(ax_ref) = self.ax_refs.get(wid) {
-                        let _ = ax_set_position(ax_ref, rect.x, rect.y);
-                        let _ = ax_set_size(ax_ref, rect.width, rect.height);
+                        if let Err(e) = ax_set_position(ax_ref, rect.x, rect.y) {
+                            tracing::warn!(wid, ?e, "ax_set_position failed");
+                        }
+                        if let Err(e) = ax_set_size(ax_ref, rect.width, rect.height) {
+                            tracing::warn!(wid, ?e, "ax_set_size failed");
+                        }
                     }
                 }
             }
