@@ -229,11 +229,12 @@ impl WmState {
             "workspace transition"
         );
 
-        // Hide old windows (move off-screen and shrink to avoid any visible stripe)
+        // Hide old windows — position off-screen first, then shrink
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
-                let _ = ax_set_size(ax_ref, 1.0, 1.0);
+                // Position first so even if resize is slow, the window is off-screen
                 let _ = ax_set_position(ax_ref, OFF_SCREEN.0, OFF_SCREEN.1);
+                let _ = ax_set_size(ax_ref, 1.0, 1.0);
                 tracing::debug!(wid, "hidden");
             }
         }
