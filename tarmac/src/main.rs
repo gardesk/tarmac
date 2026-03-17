@@ -14,6 +14,7 @@ thread_local! {
     static WORKSPACE_POLLER: RefCell<Option<WorkspacePollingObserver>> = const { RefCell::new(None) };
     static WM_STATE: RefCell<Option<WmState>> = const { RefCell::new(None) };
     static IPC_RX: RefCell<Option<std::sync::mpsc::Receiver<tarmac::ipc::server::IpcCommand>>> = const { RefCell::new(None) };
+    static LUA_CONFIG: RefCell<Option<tarmac::config::lua::LuaConfig>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -51,25 +52,29 @@ fn main() {
     state.mouse_follows_focus = config.settings.mouse_follows_focus;
     state.gap_inner = config.settings.gap_inner;
     state.gap_outer = config.settings.gap_outer;
-    state.rules = config.rules;
+    state.rules = config.rules.clone();
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
-    // Register hotkeys from config
+    // Register hotkeys from config (extract keybinds before moving config)
+    let keybinds = config.keybinds.clone();
     let mut _hotkey_mgr = HotkeyManager::new(Box::new(|action| {
         handle_action(action);
     }));
     if let Some(ref mut mgr) = _hotkey_mgr {
-        for kb in &config.keybinds {
+        for kb in &keybinds {
             mgr.register(kb.modifiers, kb.key, kb.action);
         }
         tracing::info!(
-            registered = config.keybinds.len(),
+            registered = keybinds.len(),
             "hotkeys registered from config"
         );
     } else {
         tracing::error!("failed to create hotkey manager");
     }
+
+    // Store Lua config for event callbacks (must be after keybind extraction)
+    LUA_CONFIG.with(|c| *c.borrow_mut() = Some(config));
 
     // CGEventTap for mouse events: click-to-focus and focus-follows-mouse
     let _event_tap = EventTap::install(Box::new(move |event| {
@@ -170,17 +175,46 @@ fn handle_action(action: Action) {
             match action {
                 Action::SpawnTerminal => spawn_terminal(),
                 Action::CloseWindow => state.close_focused(),
-                Action::Focus(dir) => state.focus_direction(dir),
+                Action::Focus(dir) => {
+                    state.focus_direction(dir);
+                    if let Some(id) = state.workspaces.active().focused {
+                        let id_str = id.to_string();
+                        fire_lua_event("window_focused", &[&id_str]);
+                    }
+                }
                 Action::Swap(dir) => state.swap_direction(dir),
                 Action::Resize(dir) => state.resize_direction(dir),
                 Action::Equalize => state.equalize(),
-                Action::Workspace(num) => state.switch_workspace(num),
+                Action::Workspace(num) => {
+                    let old = state.workspaces.active_id().to_string();
+                    state.switch_workspace(num);
+                    let new = state.workspaces.active_id().to_string();
+                    fire_lua_event("workspace_changed", &[&old, &new]);
+                }
                 Action::MoveToWorkspace(num) => state.move_to_workspace(num),
-                Action::WorkspaceNext => state.workspace_next(),
-                Action::WorkspacePrev => state.workspace_prev(),
+                Action::WorkspaceNext => {
+                    let old = state.workspaces.active_id().to_string();
+                    state.workspace_next();
+                    let new = state.workspaces.active_id().to_string();
+                    fire_lua_event("workspace_changed", &[&old, &new]);
+                }
+                Action::WorkspacePrev => {
+                    let old = state.workspaces.active_id().to_string();
+                    state.workspace_prev();
+                    let new = state.workspaces.active_id().to_string();
+                    fire_lua_event("workspace_changed", &[&old, &new]);
+                }
                 Action::ToggleFloat => state.toggle_float(),
-                Action::FocusMonitorNext => state.focus_monitor_next(),
-                Action::FocusMonitorPrev => state.focus_monitor_prev(),
+                Action::FocusMonitorNext => {
+                    state.focus_monitor_next();
+                    let mid = state.monitors.focused.to_string();
+                    fire_lua_event("monitor_focused", &[&mid]);
+                }
+                Action::FocusMonitorPrev => {
+                    state.focus_monitor_prev();
+                    let mid = state.monitors.focused.to_string();
+                    fire_lua_event("monitor_focused", &[&mid]);
+                }
                 Action::MoveToMonitorNext => state.move_to_monitor_next(),
                 Action::MoveToMonitorPrev => state.move_to_monitor_prev(),
                 Action::Reload => {
@@ -552,6 +586,14 @@ fn install_signal_handlers() {
     }) {
         tracing::warn!("failed to set ctrl-c handler: {}", e);
     }
+}
+
+fn fire_lua_event(event: &str, args: &[&str]) {
+    LUA_CONFIG.with(|c| {
+        if let Some(config) = c.borrow().as_ref() {
+            config.fire_event(event, args);
+        }
+    });
 }
 
 fn cleanup_socket() {
