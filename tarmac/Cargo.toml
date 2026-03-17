@@ -1,0 +1,59 @@
+[package]
+name = "tarmac"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# macOS interop
+objc2 = { version = "0.6", default-features = false, features = ["exception"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "NSApplication",
+    "NSResponder",
+    "NSRunningApplication",
+    "NSWorkspace",
+    "NSScreen",
+    "NSEvent",
+    "libc",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+] }
+objc2-application-services = { version = "0.3", default-features = false, features = [
+    "AXError",
+    "AXUIElement",
+    "AXValue",
+    "HIServices",
+    "libc",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "CFArray",
+    "CFDictionary",
+    "CFMachPort",
+    "CFNumber",
+    "CFRunLoop",
+    "CFString",
+] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "CGDirectDisplay",
+    "CGEvent",
+    "CGEventTypes",
+    "CGWindow",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "NSArray",
+    "NSString",
+    "NSNotification",
+    "NSProcessInfo",
+] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Utilities
+bitflags = "2"
+ctrlc = "3"
+dirs = "6"
