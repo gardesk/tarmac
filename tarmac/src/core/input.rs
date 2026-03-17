@@ -167,12 +167,17 @@ pub fn keycode_to_key(keycode: u16) -> Option<Key> {
     }
 }
 
+use crate::core::tree::Direction;
+
 /// An action bound to a key combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
     SpawnTerminal,
     CloseWindow,
-    // Sprint 4 adds navigation, swap, resize
+    Focus(Direction),
+    Swap(Direction),
+    Resize(Direction),
+    Equalize,
 }
 
 /// A keybinding: modifier+key → action.
@@ -211,15 +216,42 @@ impl KeybindManager {
 
     /// Create default keybindings (Option as mod key).
     pub fn with_defaults() -> Self {
+        use Direction::*;
+        let m = Modifiers::OPTION;
+        let ms = Modifiers::OPTION | Modifiers::SHIFT;
+        let mc = Modifiers::OPTION | Modifiers::CONTROL;
+
         let mut mgr = Self::new();
-        // Option+Return → spawn terminal
-        mgr.add(Modifiers::OPTION, Key::Return, Action::SpawnTerminal);
-        // Option+Shift+Q → close window
-        mgr.add(
-            Modifiers::OPTION | Modifiers::SHIFT,
-            Key::Q,
-            Action::CloseWindow,
-        );
+
+        // Spawn / close
+        mgr.add(m, Key::Return, Action::SpawnTerminal);
+        mgr.add(ms, Key::Q, Action::CloseWindow);
+
+        // Focus: Option+hjkl and Option+Arrows
+        mgr.add(m, Key::H, Action::Focus(Left));
+        mgr.add(m, Key::J, Action::Focus(Down));
+        mgr.add(m, Key::K, Action::Focus(Up));
+        mgr.add(m, Key::L, Action::Focus(Right));
+        mgr.add(m, Key::Left, Action::Focus(Left));
+        mgr.add(m, Key::Down, Action::Focus(Down));
+        mgr.add(m, Key::Up, Action::Focus(Up));
+        mgr.add(m, Key::Right, Action::Focus(Right));
+
+        // Swap: Option+Shift+hjkl
+        mgr.add(ms, Key::H, Action::Swap(Left));
+        mgr.add(ms, Key::J, Action::Swap(Down));
+        mgr.add(ms, Key::K, Action::Swap(Up));
+        mgr.add(ms, Key::L, Action::Swap(Right));
+
+        // Resize: Option+Ctrl+hjkl
+        mgr.add(mc, Key::H, Action::Resize(Left));
+        mgr.add(mc, Key::J, Action::Resize(Down));
+        mgr.add(mc, Key::K, Action::Resize(Up));
+        mgr.add(mc, Key::L, Action::Resize(Right));
+
+        // Equalize
+        mgr.add(m, Key::E, Action::Equalize);
+
         mgr
     }
 }

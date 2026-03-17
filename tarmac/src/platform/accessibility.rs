@@ -179,6 +179,19 @@ pub fn ax_set_size(element: &AXUIElement, w: f64, h: f64) -> AxResult<()> {
     check(err)
 }
 
+/// Set a boolean attribute (used for AXFrontmost to activate apps).
+pub fn ax_set_bool(element: &AXUIElement, attr: &CFString, value: bool) -> AxResult<()> {
+    let cf_bool: *const c_void = if value {
+        unsafe { kCFBooleanTrue }
+    } else {
+        unsafe { kCFBooleanFalse }
+    };
+    let err = unsafe {
+        AXUIElementSetAttributeValue(element, attr, &*(cf_bool as *const _ as *const CFType))
+    };
+    check(err)
+}
+
 /// Perform an action on an AXUIElement (e.g., AXRaise, AXPress).
 pub fn ax_perform_action(element: &AXUIElement, action: &'static str) -> AxResult<()> {
     let action_str = CFString::from_static_str(action);
@@ -268,4 +281,7 @@ unsafe extern "C" {
     fn CFArrayGetValueAtIndex(array: &CFArray, idx: isize) -> *const c_void;
 
     fn CFRelease(cf: *const c_void);
+
+    static kCFBooleanTrue: *const c_void;
+    static kCFBooleanFalse: *const c_void;
 }
