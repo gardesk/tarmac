@@ -1,3 +1,4 @@
+pub mod input;
 pub mod monitor;
 pub mod state;
 pub mod tree;
