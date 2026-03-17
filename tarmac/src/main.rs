@@ -42,8 +42,10 @@ fn main() {
         "config loaded"
     );
 
-    // Initialize window manager state
+    // Initialize window manager state with config settings
     let mut state = WmState::new();
+    state.focus_follows_mouse = config.settings.focus_follows_mouse;
+    state.mouse_follows_focus = config.settings.mouse_follows_focus;
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
@@ -154,7 +156,19 @@ fn handle_action(action: Action) {
                 Action::Equalize => state.equalize(),
                 Action::Workspace(num) => state.switch_workspace(num),
                 Action::MoveToWorkspace(num) => state.move_to_workspace(num),
+                Action::WorkspaceNext => state.workspace_next(),
+                Action::WorkspacePrev => state.workspace_prev(),
                 Action::ToggleFloat => state.toggle_float(),
+                Action::Reload => {
+                    tracing::info!("config reload requested (restart tarmac to apply)");
+                    // TODO: Full hot-reload requires re-registering Carbon hotkeys
+                    // which needs dropping and recreating the HotkeyManager.
+                    // For now, log the request.
+                }
+                Action::Exit => {
+                    tracing::info!("exit requested");
+                    std::process::exit(0);
+                }
             }
         }
     });
@@ -235,6 +249,19 @@ for i = 1, 9 do
 end
 gar.bind("mod+0", "workspace 10")
 gar.bind("mod+shift+0", "move_to_workspace 10")
+
+-- Workspace cycling
+-- gar.bind("mod+tab", "workspace_next")
+-- gar.bind("mod+shift+tab", "workspace_prev")
+
+-- System
+gar.bind("mod+shift+r", "reload")
+-- gar.bind("mod+shift+e", "exit")
+
+-- Window rules
+-- gar.rule({ app_name = "Calculator" }, { floating = true })
+-- gar.rule({ app_name = "System Settings" }, { floating = true })
+-- gar.rule({ app_name = "Safari" }, { workspace = 2 })
 
 -- Autostart (uncomment as needed)
 -- gar.exec_once("sketchybar")
