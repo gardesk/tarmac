@@ -354,4 +354,98 @@ mod tests {
         };
         assert_eq!(mgr.dispatch(&event), Some(Action::CloseWindow));
     }
+
+    #[test]
+    fn keycode_roundtrip_all_keys() {
+        // Every key that has a keycode mapping should survive the roundtrip
+        let test_cases: &[(u16, Key)] = &[
+            (0x00, Key::A),
+            (0x01, Key::S),
+            (0x02, Key::D),
+            (0x04, Key::H),
+            (0x26, Key::J),
+            (0x28, Key::K),
+            (0x25, Key::L),
+            (0x24, Key::Return),
+            (0x31, Key::Space),
+            (0x35, Key::Escape),
+            (0x7B, Key::Left),
+            (0x7C, Key::Right),
+            (0x7D, Key::Down),
+            (0x7E, Key::Up),
+            (0x12, Key::Num1),
+            (0x13, Key::Num2),
+            (0x1D, Key::Num0),
+            (0x32, Key::Grave),
+        ];
+        for (keycode, expected_key) in test_cases {
+            assert_eq!(
+                keycode_to_key(*keycode),
+                Some(*expected_key),
+                "keycode 0x{:02X} should map to {:?}",
+                keycode,
+                expected_key
+            );
+        }
+    }
+
+    #[test]
+    fn fn_flag_stripped_in_dispatch() {
+        let mgr = KeybindManager::with_defaults();
+        // Arrow keys have Fn flag set by macOS — should still match
+        let event = KeyEvent {
+            keycode: 0x7C, // Right arrow
+            modifiers: Modifiers::COMMAND | Modifiers::FN,
+        };
+        assert_eq!(
+            mgr.dispatch(&event),
+            Some(Action::Focus(crate::core::tree::Direction::Right))
+        );
+    }
+
+    #[test]
+    fn dispatch_workspace() {
+        let mgr = KeybindManager::with_defaults();
+        let event = KeyEvent {
+            keycode: 0x13, // 2
+            modifiers: Modifiers::COMMAND,
+        };
+        assert_eq!(mgr.dispatch(&event), Some(Action::Workspace(2)));
+    }
+
+    #[test]
+    fn dispatch_move_to_workspace() {
+        let mgr = KeybindManager::with_defaults();
+        let event = KeyEvent {
+            keycode: 0x14, // 3
+            modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
+        };
+        assert_eq!(mgr.dispatch(&event), Some(Action::MoveToWorkspace(3)));
+    }
+
+    #[test]
+    fn dispatch_swap_arrow() {
+        let mgr = KeybindManager::with_defaults();
+        let event = KeyEvent {
+            keycode: 0x7B, // Left arrow
+            modifiers: Modifiers::COMMAND | Modifiers::SHIFT | Modifiers::FN,
+        };
+        assert_eq!(
+            mgr.dispatch(&event),
+            Some(Action::Swap(crate::core::tree::Direction::Left))
+        );
+    }
+
+    #[test]
+    fn dispatch_resize() {
+        let mgr = KeybindManager::with_defaults();
+        let event = KeyEvent {
+            keycode: 0x25, // L
+            modifiers: Modifiers::COMMAND | Modifiers::CONTROL,
+        };
+        assert_eq!(
+            mgr.dispatch(&event),
+            Some(Action::Resize(crate::core::tree::Direction::Right))
+        );
+    }
 }
