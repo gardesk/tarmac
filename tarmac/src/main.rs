@@ -15,6 +15,8 @@ thread_local! {
     static WM_STATE: RefCell<Option<WmState>> = const { RefCell::new(None) };
     static IPC_RX: RefCell<Option<std::sync::mpsc::Receiver<tarmac::ipc::server::IpcCommand>>> = const { RefCell::new(None) };
     static LUA_CONFIG: RefCell<Option<tarmac::config::lua::LuaConfig>> = const { RefCell::new(None) };
+    static HOTKEY_MGR: RefCell<Option<HotkeyManager>> = const { RefCell::new(None) };
+    static CONFIG_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -56,24 +58,11 @@ fn main() {
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
-    // Register hotkeys from config (extract keybinds before moving config)
-    let keybinds = config.keybinds.clone();
-    let mut _hotkey_mgr = HotkeyManager::new(Box::new(|action| {
-        handle_action(action);
-    }));
-    if let Some(ref mut mgr) = _hotkey_mgr {
-        for kb in &keybinds {
-            mgr.register(kb.modifiers, kb.key, kb.action);
-        }
-        tracing::info!(
-            registered = keybinds.len(),
-            "hotkeys registered from config"
-        );
-    } else {
-        tracing::error!("failed to create hotkey manager");
-    }
+    // Register hotkeys and store in thread-local for hot reload
+    register_hotkeys_from_config(&config);
 
-    // Store Lua config for event callbacks (must be after keybind extraction)
+    // Store config path and Lua config for hot reload and event callbacks
+    CONFIG_PATH.with(|p| *p.borrow_mut() = Some(config_path));
     LUA_CONFIG.with(|c| *c.borrow_mut() = Some(config));
 
     // CGEventTap for mouse events: click-to-focus and focus-follows-mouse
@@ -218,10 +207,7 @@ fn handle_action(action: Action) {
                 Action::MoveToMonitorNext => state.move_to_monitor_next(),
                 Action::MoveToMonitorPrev => state.move_to_monitor_prev(),
                 Action::Reload => {
-                    tracing::info!("config reload requested (restart tarmac to apply)");
-                    // TODO: Full hot-reload requires re-registering Carbon hotkeys
-                    // which needs dropping and recreating the HotkeyManager.
-                    // For now, log the request.
+                    reload_config();
                 }
                 Action::Exit => {
                     tracing::info!("exit requested");
@@ -586,6 +572,60 @@ fn install_signal_handlers() {
     }) {
         tracing::warn!("failed to set ctrl-c handler: {}", e);
     }
+}
+
+fn register_hotkeys_from_config(config: &tarmac::config::lua::LuaConfig) {
+    // Drop old hotkey manager (unregisters all Carbon hotkeys)
+    HOTKEY_MGR.with(|h| *h.borrow_mut() = None);
+
+    let mut mgr = match HotkeyManager::new(Box::new(|action| {
+        handle_action(action);
+    })) {
+        Some(m) => m,
+        None => {
+            tracing::error!("failed to create hotkey manager");
+            return;
+        }
+    };
+
+    for kb in &config.keybinds {
+        mgr.register(kb.modifiers, kb.key, kb.action);
+    }
+    tracing::info!(registered = config.keybinds.len(), "hotkeys registered");
+
+    HOTKEY_MGR.with(|h| *h.borrow_mut() = Some(mgr));
+}
+
+fn reload_config() {
+    let path = CONFIG_PATH.with(|p| p.borrow().clone());
+    let Some(path) = path else {
+        tracing::error!("no config path stored, cannot reload");
+        return;
+    };
+
+    tracing::info!("reloading config...");
+    let config = tarmac::config::lua::load_config(&path);
+
+    // Update WmState settings
+    WM_STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.focus_follows_mouse = config.settings.focus_follows_mouse;
+            state.mouse_follows_focus = config.settings.mouse_follows_focus;
+            state.gap_inner = config.settings.gap_inner;
+            state.gap_outer = config.settings.gap_outer;
+            state.rules = config.rules.clone();
+            // Reapply layout with potentially new gap values
+            state.apply_layout();
+        }
+    });
+
+    // Re-register hotkeys (drops old ones, registers new)
+    register_hotkeys_from_config(&config);
+
+    // Update Lua config for event callbacks
+    LUA_CONFIG.with(|c| *c.borrow_mut() = Some(config));
+
+    tracing::info!("config reloaded successfully");
 }
 
 fn fire_lua_event(event: &str, args: &[&str]) {
