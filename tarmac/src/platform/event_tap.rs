@@ -93,6 +93,20 @@ unsafe extern "C-unwind" fn event_tap_callback(
 
     let handler = unsafe { &*(user_info as *const KeyHandler) };
 
+    // Log all key-related events at trace level for debugging
+    if event_type == CGEventType::KeyDown || event_type == CGEventType::KeyUp {
+        let keycode =
+            CGEvent::integer_value_field(Some(event_ref), CGEventField::KeyboardEventKeycode)
+                as u16;
+        let flags = CGEvent::flags(Some(event_ref));
+        tracing::trace!(
+            event_type = event_type.0,
+            keycode = format!("0x{:02X}", keycode),
+            flags = format!("0x{:08X}", flags.0),
+            "raw key event"
+        );
+    }
+
     let input = if event_type == CGEventType::KeyDown {
         let keycode =
             CGEvent::integer_value_field(Some(event_ref), CGEventField::KeyboardEventKeycode)
