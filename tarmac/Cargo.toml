@@ -14,6 +14,7 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "NSScreen",
     "NSEvent",
     "libc",
+    "block2",
     "objc2-core-foundation",
     "objc2-core-graphics",
 ] }
@@ -39,12 +40,15 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGWindow",
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
+    "NSDictionary",
     "NSArray",
     "NSEnumerator",
     "NSString",
     "NSNotification",
     "NSProcessInfo",
+    "block2",
 ] }
+block2 = "0.6"
 
 # Logging
 tracing = "0.1"

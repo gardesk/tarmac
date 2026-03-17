@@ -4,3 +4,4 @@ pub mod display;
 pub mod event_tap;
 pub mod observer;
 pub mod permissions;
+pub mod workspace_observer;
