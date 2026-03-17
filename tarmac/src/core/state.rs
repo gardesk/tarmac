@@ -226,15 +226,40 @@ impl WmState {
             tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
+            // Pass 1: resize all
             for (wid, rect) in &geometries {
                 tracing::debug!(wid, x = rect.x, y = rect.y, w = rect.width, h = rect.height, "tile");
                 if let Some(ax_ref) = self.ax_refs.get(wid) {
                     let _ = ax_set_size(ax_ref, rect.width, rect.height);
                 }
             }
+            // Pass 2: position all
             for (wid, rect) in &geometries {
                 if let Some(ax_ref) = self.ax_refs.get(wid) {
                     let _ = ax_set_position(ax_ref, rect.x, rect.y);
+                }
+            }
+            // Pass 3: verify — read back actual sizes to diagnose gaps
+            for (wid, rect) in &geometries {
+                if let Some(ax_ref) = self.ax_refs.get(wid) {
+                    if let (Ok((aw, ah)), Ok((ax, ay))) =
+                        (ax_get_size(ax_ref), ax_get_position(ax_ref))
+                    {
+                        let dw = (aw - rect.width).abs();
+                        let dh = (ah - rect.height).abs();
+                        let dx = (ax - rect.x).abs();
+                        let dy = (ay - rect.y).abs();
+                        if dw > 1.0 || dh > 1.0 || dx > 1.0 || dy > 1.0 {
+                            tracing::warn!(
+                                wid,
+                                req_x = rect.x, req_y = rect.y,
+                                req_w = rect.width, req_h = rect.height,
+                                actual_x = ax, actual_y = ay,
+                                actual_w = aw, actual_h = ah,
+                                "window rejected geometry"
+                            );
+                        }
+                    }
                 }
             }
         }
