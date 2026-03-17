@@ -106,6 +106,7 @@ fn handle_action(action: Action) {
                 Action::Equalize => state.equalize(),
                 Action::Workspace(num) => state.switch_workspace(num),
                 Action::MoveToWorkspace(num) => state.move_to_workspace(num),
+                Action::ToggleFloat => state.toggle_float(),
             }
         }
     });
