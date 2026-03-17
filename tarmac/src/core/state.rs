@@ -183,15 +183,49 @@ impl WmState {
         let geoms = ws.tree.calculate_geometries(self.screen_rect);
         if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
             self.focus_window(target);
-            // Mouse follows focus: warp cursor to the center of the newly focused window
             if self.mouse_follows_focus
                 && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
             {
                 warp_mouse_to_center(rect);
-                // Suppress focus-follows-mouse for 200ms to prevent feedback loop
                 self.ffm_cooldown_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
                 self.ffm_last_window = Some(target);
+            }
+        } else if self.monitors.count() > 1 {
+            // No window found in direction on current monitor —
+            // try crossing to adjacent monitor
+            use super::tree::Direction;
+            let next_monitor = match direction {
+                Direction::Right => self.monitors.next_monitor(self.monitors.focused),
+                Direction::Left => self.monitors.prev_monitor(self.monitors.focused),
+                _ => None, // Up/Down stays on current monitor
+            };
+            if let Some(mid) = next_monitor
+                && mid != self.monitors.focused
+            {
+                self.monitors.focused = mid;
+                self.workspaces.set_focused_monitor(mid);
+                if let Some(m) = self.monitors.get(mid) {
+                    self.screen_rect = m.usable_frame;
+                }
+                if let Some(wid) = self.workspaces.active().focused {
+                    self.focus_window(wid);
+                    if self.mouse_follows_focus {
+                        let geoms = self
+                            .workspaces
+                            .active()
+                            .tree
+                            .calculate_geometries(self.screen_rect);
+                        if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
+                            warp_mouse_to_center(rect);
+                            self.ffm_cooldown_until = Some(
+                                std::time::Instant::now() + std::time::Duration::from_millis(200),
+                            );
+                            self.ffm_last_window = Some(wid);
+                        }
+                    }
+                }
+                tracing::debug!(monitor = mid, "crossed to adjacent monitor");
             }
         }
     }
@@ -613,12 +647,134 @@ impl WmState {
     }
 
     pub fn move_to_monitor_next(&mut self) {
-        // TODO: Move focused window from current monitor's workspace to next monitor's workspace
-        tracing::info!("move to monitor next (not yet implemented)");
+        let current = self.monitors.focused;
+        if let Some(next) = self.monitors.next_monitor(current)
+            && next != current
+        {
+            self.move_window_to_monitor(next);
+        }
     }
 
     pub fn move_to_monitor_prev(&mut self) {
-        tracing::info!("move to monitor prev (not yet implemented)");
+        let current = self.monitors.focused;
+        if let Some(prev) = self.monitors.prev_monitor(current)
+            && prev != current
+        {
+            self.move_window_to_monitor(prev);
+        }
+    }
+
+    /// Move the focused window from the current monitor's workspace to the target monitor's workspace.
+    fn move_window_to_monitor(&mut self, target_monitor: super::monitor::MonitorId) {
+        let focused = match self.workspaces.active().focused {
+            Some(f) => f,
+            None => return,
+        };
+
+        // Get the target monitor's active workspace
+        let target_ws = match self.workspaces.active_id_for_monitor(target_monitor) {
+            Some(ws) => ws.clone(),
+            None => return,
+        };
+
+        // Get target monitor's screen rect for layout
+        let target_rect = match self.monitors.get(target_monitor) {
+            Some(m) => m.usable_frame,
+            None => return,
+        };
+
+        // Remove from current workspace
+        let current_ws = self.workspaces.active_mut();
+        let was_floating = current_ws.is_floating(focused);
+        if was_floating {
+            current_ws.floating.retain(|f| f.id != focused);
+        } else {
+            current_ws.tree.remove(focused);
+        }
+        current_ws.focus_history.retain(|id| *id != focused);
+        if current_ws.focused == Some(focused) {
+            current_ws.focused = current_ws
+                .focus_history
+                .last()
+                .copied()
+                .or(current_ws.tree.first_window());
+        }
+
+        // Relayout current monitor
+        self.apply_layout();
+
+        // Insert into target workspace
+        let target = self.workspaces.get_or_create(target_ws);
+        if was_floating {
+            target.floating.push(super::workspace::FloatingWindow {
+                id: focused,
+                geometry: super::tree::Rect::new(
+                    target_rect.x + 50.0,
+                    target_rect.y + 50.0,
+                    800.0,
+                    600.0,
+                ),
+            });
+        } else {
+            target
+                .tree
+                .insert_with_rect(focused, target.focused, target_rect);
+        }
+        target.record_focus(focused);
+
+        // Apply layout on target monitor using its screen rect
+        let geoms = target.tree.calculate_geometries_with_gaps(
+            target_rect,
+            self.gap_inner,
+            self.gap_outer,
+            true,
+        );
+        for (wid, rect) in &geoms {
+            if let Some(ax_ref) = self.ax_refs.get(wid) {
+                // Multi-display AX move: size first, then position, then size again
+                let _ = ax_set_size(ax_ref, rect.width, rect.height);
+                let _ = ax_set_position(ax_ref, rect.x, rect.y);
+                let _ = ax_set_size(ax_ref, rect.width, rect.height);
+            }
+        }
+
+        // Focus the target monitor
+        self.monitors.focused = target_monitor;
+        self.workspaces.set_focused_monitor(target_monitor);
+        self.screen_rect = target_rect;
+        self.focus_window(focused);
+
+        tracing::info!(
+            id = focused,
+            monitor = target_monitor,
+            "moved window to monitor"
+        );
+    }
+
+    /// Re-discover displays and reassign workspaces. Called on hotplug.
+    pub fn refresh_monitors(&mut self) {
+        let displays = crate::platform::display::discover_displays();
+        let old_count = self.monitors.count();
+        self.monitors.set_monitors(displays);
+        let new_count = self.monitors.count();
+
+        let sorted_ids: Vec<u32> = self
+            .monitors
+            .sorted_by_position()
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        self.workspaces.assign_monitors(&sorted_ids);
+
+        // Update screen rect for focused monitor
+        if let Some(m) = self.monitors.focused_monitor() {
+            self.screen_rect = m.usable_frame;
+        }
+
+        // Reapply layout on all visible workspaces
+        self.apply_layout();
+
+        tracing::info!(old_count, new_count, "monitors refreshed");
     }
 
     pub fn move_to_workspace(&mut self, num: u8) {
