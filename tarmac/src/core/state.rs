@@ -192,6 +192,18 @@ impl WmState {
             .unwrap_or(self.screen_rect)
     }
 
+    /// Get the screen rect for a specific workspace based on its monitor assignment.
+    fn screen_rect_for_workspace(&self, ws_id: &super::workspace::WorkspaceId) -> Rect {
+        for (mid, wid) in self.workspaces.monitor_assignments() {
+            if wid == ws_id
+                && let Some(m) = self.monitors.get(*mid)
+            {
+                return m.usable_frame;
+            }
+        }
+        self.focused_screen_rect()
+    }
+
     // --- Window operations ---
 
     pub fn focus_direction(&mut self, direction: super::tree::Direction) {
@@ -236,7 +248,7 @@ impl WmState {
                             .workspaces
                             .active()
                             .tree
-                            .calculate_geometries(self.screen_rect);
+                            .calculate_geometries(self.focused_screen_rect());
                         if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                             warp_mouse_to_center(rect);
                             self.ffm_cooldown_until = Some(
@@ -257,7 +269,7 @@ impl WmState {
             Some(f) => f,
             None => return,
         };
-        let geoms = ws.tree.calculate_geometries(self.screen_rect);
+        let geoms = ws.tree.calculate_geometries(self.focused_screen_rect());
         if let Some(target) = Node::find_adjacent(&geoms, focused, direction)
             && self.workspaces.active_mut().tree.swap(focused, target)
         {
@@ -476,7 +488,7 @@ impl WmState {
         } else {
             // Check tiled windows using gap-aware geometry matching actual layout
             let geoms = ws.tree.calculate_geometries_with_gaps(
-                self.screen_rect,
+                self.focused_screen_rect(),
                 self.gap_inner,
                 self.gap_outer,
                 true,
@@ -509,11 +521,8 @@ impl WmState {
             Some(f) => f,
             None => return,
         };
-        if self
-            .workspaces
-            .active_mut()
-            .toggle_float(focused, self.screen_rect)
-        {
+        let sr = self.focused_screen_rect();
+        if self.workspaces.active_mut().toggle_float(focused, sr) {
             self.apply_layout();
             if self.workspaces.active().is_floating(focused) {
                 // Position at stored geometry
@@ -557,7 +566,7 @@ impl WmState {
             Some(fid)
         } else {
             let geoms = ws.tree.calculate_geometries_with_gaps(
-                self.screen_rect,
+                self.focused_screen_rect(),
                 self.gap_inner,
                 self.gap_outer,
                 true,
@@ -580,7 +589,9 @@ impl WmState {
     pub fn switch_workspace(&mut self, num: u8) {
         let target = WorkspaceId::Numbered(num);
         tracing::info!(from = %self.workspaces.active_id(), to = %target, "switching workspace");
-        let transition = self.workspaces.switch_to(target, self.screen_rect);
+        let transition = self
+            .workspaces
+            .switch_to(target, self.focused_screen_rect());
 
         tracing::debug!(
             hide = transition.hide.len(),
@@ -598,10 +609,8 @@ impl WmState {
             }
         }
 
-        // Show windows with proper gap-aware layout
-        if !transition.show.is_empty() {
-            self.apply_layout();
-        }
+        // Apply layout on all visible workspaces (uses per-monitor rects)
+        self.apply_layout();
 
         // Focus
         if let Some(focus_id) = transition.focus {
@@ -634,11 +643,11 @@ impl WmState {
         if let Some(next) = self.monitors.next_monitor(current) {
             self.monitors.focused = next;
             self.workspaces.set_focused_monitor(next);
-            // Update screen_rect for the new monitor
             if let Some(m) = self.monitors.get(next) {
                 self.screen_rect = m.usable_frame;
             }
-            // Focus the workspace's focused window
+            // Reapply layout for the new monitor's workspace
+            self.apply_layout();
             if let Some(wid) = self.workspaces.active().focused {
                 self.focus_window(wid);
             }
@@ -654,6 +663,7 @@ impl WmState {
             if let Some(m) = self.monitors.get(prev) {
                 self.screen_rect = m.usable_frame;
             }
+            self.apply_layout();
             if let Some(wid) = self.workspaces.active().focused {
                 self.focus_window(wid);
             }
@@ -801,7 +811,7 @@ impl WmState {
         let target = WorkspaceId::Numbered(num);
         if self
             .workspaces
-            .move_window_to(focused, target.clone(), self.screen_rect)
+            .move_window_to(focused, target.clone(), self.focused_screen_rect())
         {
             // Hide the moved window off all monitors
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
@@ -1042,6 +1052,7 @@ impl WmState {
         if let Some(ws_num) = rule_workspace {
             let target = super::workspace::WorkspaceId::Numbered(ws_num);
             let is_active = *self.workspaces.active_id() == target;
+            let target_rect = self.screen_rect_for_workspace(&target);
 
             let ws = self.workspaces.get_or_create(target);
             if should_float {
@@ -1053,7 +1064,7 @@ impl WmState {
                     geometry: geom,
                 });
             } else {
-                ws.tree.insert_with_rect(*id, ws.focused, self.screen_rect);
+                ws.tree.insert_with_rect(*id, ws.focused, target_rect);
             }
             ws.record_focus(*id);
             tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
@@ -1069,6 +1080,7 @@ impl WmState {
                 self.switch_workspace(ws_num);
             }
         } else {
+            let sr = self.focused_screen_rect();
             let ws = self.workspaces.active_mut();
             if should_float {
                 let geom = rule_geometry
@@ -1080,7 +1092,7 @@ impl WmState {
                 });
                 tracing::info!(id, subrole, "auto-floated window");
             } else {
-                ws.tree.insert_with_rect(*id, ws.focused, self.screen_rect);
+                ws.tree.insert_with_rect(*id, ws.focused, sr);
             }
             ws.record_focus(*id);
         }
