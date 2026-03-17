@@ -182,29 +182,60 @@ impl WmState {
         self.apply_layout();
     }
 
-    /// Focus a window. If `activate_app` is true, fully activates the app
-    /// (brings all its windows forward). Use false for FFM to avoid covering floaters.
-    fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
+    pub fn focus_window(&mut self, id: WindowId) {
+        let focused_pid = self.registry.get(id).map(|w| w.app_pid);
+
+        // Raise and activate the target window's app
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             let _ = ax_perform_action(ax_ref, "AXRaise");
-            if activate_app && let Some(w) = self.registry.get(id) {
-                let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
-                let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+        }
+        if let Some(pid) = focused_pid {
+            let ax_app = unsafe { AXUIElement::new_application(pid) };
+            let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+            let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+        }
+
+        self.workspaces.active_mut().record_focus(id);
+
+        // If the focused window is tiled and there are cross-app floating windows,
+        // re-raise the floaters: activate floater app → raise → then set focused app
+        // as frontmost again (keyboard focus returns to focused window).
+        let ws = self.workspaces.active();
+        if !ws.is_floating(id) && !ws.floating.is_empty() {
+            let floater_pids: Vec<(WindowId, i32)> = ws
+                .floating
+                .iter()
+                .filter_map(|fw| self.registry.get(fw.id).map(|w| (fw.id, w.app_pid)))
+                .filter(|(_, fw_pid)| Some(*fw_pid) != focused_pid)
+                .collect();
+
+            if !floater_pids.is_empty() {
+                for (fw_id, fw_pid) in &floater_pids {
+                    // Activate floater's app and raise the specific window
+                    let ax_app = unsafe { AXUIElement::new_application(*fw_pid) };
+                    let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                    let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+                    if let Some(ax_ref) = self.ax_refs.get(fw_id) {
+                        let _ = ax_perform_action(ax_ref, "AXRaise");
+                    }
+                }
+
+                // Re-activate the focused window's app for keyboard input.
+                // The floater is now visually above because it was raised last.
+                if let Some(pid) = focused_pid {
+                    let ax_app = unsafe { AXUIElement::new_application(pid) };
+                    let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                    let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+                    // Re-raise the focused window so it's above other tiled windows
+                    // but still below the floater (which was raised after it)
+                    if let Some(ax_ref) = self.ax_refs.get(&id) {
+                        let _ = ax_perform_action(ax_ref, "AXRaise");
+                    }
+                }
             }
         }
-        self.workspaces.active_mut().record_focus(id);
-        tracing::debug!(id, activate_app, "focused window");
-    }
 
-    /// Focus with full app activation (keybinds, click, workspace switch).
-    pub fn focus_window(&mut self, id: WindowId) {
-        self.focus_window_impl(id, true);
-    }
-
-    /// Focus without app activation (FFM hover — avoids bringing all app windows forward).
-    pub fn focus_window_soft(&mut self, id: WindowId) {
-        self.focus_window_impl(id, false);
+        tracing::debug!(id, "focused window");
     }
 
     /// Raise all floating windows via AXRaise.
@@ -271,9 +302,7 @@ impl WmState {
             if let Some(id) = window_under
                 && self.workspaces.active().focused != Some(id)
             {
-                // Use soft focus for FFM — don't activate the app to avoid
-                // bringing all its windows forward and covering floaters
-                self.focus_window_soft(id);
+                self.focus_window(id);
             }
         }
     }
