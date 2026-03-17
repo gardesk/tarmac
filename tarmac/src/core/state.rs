@@ -220,12 +220,21 @@ impl WmState {
 
     pub fn switch_workspace(&mut self, num: u8) {
         let target = WorkspaceId::Numbered(num);
+        tracing::info!(from = %self.workspaces.active_id(), to = %target, "switching workspace");
         let transition = self.workspaces.switch_to(target, self.screen_rect);
 
-        // Hide old windows
+        tracing::debug!(
+            hide = transition.hide.len(),
+            show = transition.show.len(),
+            "workspace transition"
+        );
+
+        // Hide old windows (move off-screen and shrink to avoid any visible stripe)
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
+                let _ = ax_set_size(ax_ref, 1.0, 1.0);
                 let _ = ax_set_position(ax_ref, OFF_SCREEN.0, OFF_SCREEN.1);
+                tracing::debug!(wid, "hidden");
             }
         }
 
@@ -258,6 +267,7 @@ impl WmState {
         {
             // Hide the moved window
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
+                let _ = ax_set_size(ax_ref, 1.0, 1.0);
                 let _ = ax_set_position(ax_ref, OFF_SCREEN.0, OFF_SCREEN.1);
             }
 
@@ -388,6 +398,16 @@ impl WmState {
             self.apply_layout();
             tracing::info!(pid, removed = removed.len(), "app terminated → retiled");
         }
+    }
+
+    /// Check if a window is on an inactive workspace (intentionally hidden).
+    pub fn is_window_hidden(&self, wid: u32) -> bool {
+        let id = wid as WindowId;
+        // If the window is in our registry but NOT on the active workspace, it's hidden
+        if !self.registry.contains(id) {
+            return false;
+        }
+        !self.workspaces.active().tree.contains(id)
     }
 
     // --- Helpers ---
