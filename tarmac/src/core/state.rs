@@ -191,7 +191,18 @@ impl WmState {
                 let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
             }
             self.workspaces.active_mut().record_focus(id);
+            // Ensure all floating windows stay above tiled windows
+            self.raise_floating_windows();
             tracing::debug!(id, "focused window");
+        }
+    }
+
+    /// Raise all floating windows on the active workspace so they stay above tiled.
+    fn raise_floating_windows(&self) {
+        for fw in &self.workspaces.active().floating {
+            if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
+                let _ = ax_perform_action(ax_ref, "AXRaise");
+            }
         }
     }
 
