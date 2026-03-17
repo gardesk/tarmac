@@ -1,3 +1,5 @@
+use std::ffi::c_void;
+
 use objc2::rc::Retained;
 use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication, NSWorkspace};
 use objc2_application_services::AXUIElement;
@@ -123,8 +125,56 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
     result
 }
 
+/// Dump all on-screen windows via CGWindowList for diagnostic purposes.
+/// This sees ALL windows regardless of AX accessibility, including window IDs, PIDs, and names.
+pub fn dump_cg_window_list() {
+    unsafe {
+        let info = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        );
+        if info.is_null() {
+            tracing::warn!("CGWindowListCopyWindowInfo returned null");
+            return;
+        }
+
+        let count = CFArrayGetCount(info);
+        tracing::debug!(count, "CGWindowList on-screen windows");
+
+        for i in 0..count {
+            let dict = CFArrayGetValueAtIndex(info, i);
+            if dict.is_null() {
+                continue;
+            }
+
+            let pid = cg_dict_get_i32(dict, kCGWindowOwnerPID);
+            let wid = cg_dict_get_i32(dict, kCGWindowNumber);
+            let layer = cg_dict_get_i32(dict, kCGWindowLayer);
+            let name = cg_dict_get_string(dict, kCGWindowOwnerName);
+            let title = cg_dict_get_string(dict, kCGWindowName);
+
+            // Only log normal layer (0) windows — skip menu bar, dock, etc.
+            if layer == 0 {
+                tracing::trace!(
+                    wid,
+                    pid,
+                    layer,
+                    owner = %name,
+                    title = %title,
+                    "CGWindowList entry"
+                );
+            }
+        }
+
+        CFRelease(info);
+    }
+}
+
 /// Discover all manageable windows across all running applications.
 pub fn discover_all_windows() -> Vec<WindowInfo> {
+    // First, dump the CG window list so we can see ground truth
+    dump_cg_window_list();
+
     let apps = discover_applications();
     let mut all_windows = Vec::new();
 
@@ -144,4 +194,63 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
         "window discovery complete"
     );
     all_windows
+}
+
+// CGWindowList FFI
+#[allow(non_upper_case_globals, clashing_extern_declarations)]
+mod cg_ffi {
+    use std::ffi::c_void;
+
+    pub const kCGWindowListOptionOnScreenOnly: u32 = 1 << 0;
+    pub const kCGWindowListExcludeDesktopElements: u32 = 1 << 4;
+    pub const kCGNullWindowID: u32 = 0;
+
+    unsafe extern "C" {
+        pub fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *const c_void;
+        pub fn CFArrayGetCount(array: *const c_void) -> isize;
+        pub fn CFArrayGetValueAtIndex(array: *const c_void, idx: isize) -> *const c_void;
+        pub fn CFRelease(cf: *const c_void);
+
+        pub static kCGWindowOwnerPID: *const c_void;
+        pub static kCGWindowNumber: *const c_void;
+        pub static kCGWindowLayer: *const c_void;
+        pub static kCGWindowOwnerName: *const c_void;
+        pub static kCGWindowName: *const c_void;
+
+        pub fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
+        pub fn CFNumberGetValue(number: *const c_void, r#type: i32, value_ptr: *mut c_void)
+        -> bool;
+        pub fn CFStringGetCStringPtr(string: *const c_void, encoding: u32) -> *const i8;
+    }
+}
+use cg_ffi::*;
+
+fn cg_dict_get_i32(dict: *const c_void, key: *const c_void) -> i32 {
+    unsafe {
+        let val = CFDictionaryGetValue(dict, key);
+        if val.is_null() {
+            return 0;
+        }
+        let mut result: i32 = 0;
+        CFNumberGetValue(
+            val,
+            3, // kCFNumberSInt32Type
+            (&mut result as *mut i32).cast::<c_void>(),
+        );
+        result
+    }
+}
+
+fn cg_dict_get_string(dict: *const c_void, key: *const c_void) -> String {
+    unsafe {
+        let val = CFDictionaryGetValue(dict, key);
+        if val.is_null() {
+            return String::new();
+        }
+        let cstr = CFStringGetCStringPtr(val, 0x08000100); // kCFStringEncodingUTF8
+        if cstr.is_null() {
+            return String::new();
+        }
+        std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string()
+    }
 }
