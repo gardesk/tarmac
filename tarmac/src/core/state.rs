@@ -193,38 +193,6 @@ impl WmState {
             }
         }
         self.workspaces.active_mut().record_focus(id);
-
-        // Re-raise floating windows above the newly focused tiled window.
-        // For cross-app floaters: activate floater app → raise → re-activate focused app.
-        let ws = self.workspaces.active();
-        if !ws.is_floating(id) && !ws.floating.is_empty() {
-            // Collect floater info to avoid borrow issues
-            let floaters: Vec<(WindowId, i32)> = ws
-                .floating
-                .iter()
-                .filter_map(|fw| self.registry.get(fw.id).map(|w| (fw.id, w.app_pid)))
-                .collect();
-
-            for (fw_id, fw_pid) in &floaters {
-                if let Some(ax_ref) = self.ax_refs.get(fw_id) {
-                    if Some(*fw_pid) != focused_pid {
-                        // Cross-app: activate floater's app to raise it
-                        let ax_app = unsafe { AXUIElement::new_application(*fw_pid) };
-                        let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                        let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
-                    }
-                    let _ = ax_perform_action(ax_ref, "AXRaise");
-                }
-            }
-
-            // Re-activate the focused window's app last so it keeps keyboard focus
-            if let Some(pid) = focused_pid {
-                let ax_app = unsafe { AXUIElement::new_application(pid) };
-                let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
-            }
-        }
-
         tracing::debug!(id, "focused window");
     }
 
@@ -308,8 +276,8 @@ impl WmState {
             .toggle_float(focused, self.screen_rect)
         {
             self.apply_layout();
-            // If now floating, position at its stored geometry
             if self.workspaces.active().is_floating(focused) {
+                // Position at stored geometry
                 if let Some(fw) = self
                     .workspaces
                     .active()
@@ -321,10 +289,16 @@ impl WmState {
                     let _ = ax_set_position(ax_ref, fw.geometry.x, fw.geometry.y);
                     let _ = ax_set_size(ax_ref, fw.geometry.width, fw.geometry.height);
                 }
+                // Set window level to floating so it stays above all normal windows
+                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+                set_window_level(focused, K_CG_FLOATING_WINDOW_LEVEL);
                 self.raise_floating_windows();
-                tracing::info!(id = focused, "window floated");
+                tracing::info!(id = focused, "window floated (level=floating)");
             } else {
-                tracing::info!(id = focused, "window tiled");
+                // Restore to normal window level
+                use crate::platform::skylight::{K_CG_NORMAL_WINDOW_LEVEL, set_window_level};
+                set_window_level(focused, K_CG_NORMAL_WINDOW_LEVEL);
+                tracing::info!(id = focused, "window tiled (level=normal)");
             }
         }
     }
