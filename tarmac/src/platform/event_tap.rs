@@ -5,7 +5,7 @@ use objc2_core_foundation::{
     CFMachPort, CFRetained, CFRunLoop, CFRunLoopMode, kCFRunLoopCommonModes,
 };
 use objc2_core_graphics::{
-    CGEvent, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
+    CGEvent, CGEventFlags, CGEventMask, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
     CGEventTapProxy, CGEventType,
 };
 
@@ -14,6 +14,12 @@ use objc2_core_graphics::{
 pub enum MouseEvent {
     Click { x: f64, y: f64 },
     Moved { x: f64, y: f64 },
+    LeftDown { x: f64, y: f64, cmd_held: bool },
+    LeftDragged { x: f64, y: f64 },
+    LeftUp { x: f64, y: f64 },
+    RightDown { x: f64, y: f64, cmd_held: bool },
+    RightDragged { x: f64, y: f64 },
+    RightUp { x: f64, y: f64 },
 }
 
 /// Callback for mouse events.
@@ -27,19 +33,22 @@ pub struct EventTap {
 }
 
 impl EventTap {
-    /// Create an event tap for mouse click and move events.
     pub fn install(handler: MouseHandler) -> Option<Self> {
         let handler_ptr = Box::into_raw(Box::new(handler));
 
-        let mask: CGEventMask =
-            (1 << CGEventType::LeftMouseDown.0 as u64) | (1 << CGEventType::MouseMoved.0 as u64);
+        let mask: CGEventMask = (1 << CGEventType::LeftMouseDown.0 as u64)
+            | (1 << CGEventType::LeftMouseUp.0 as u64)
+            | (1 << CGEventType::LeftMouseDragged.0 as u64)
+            | (1 << CGEventType::RightMouseDown.0 as u64)
+            | (1 << CGEventType::RightMouseUp.0 as u64)
+            | (1 << CGEventType::RightMouseDragged.0 as u64)
+            | (1 << CGEventType::MouseMoved.0 as u64);
 
         let port = unsafe {
             CGEvent::tap_create(
                 CGEventTapLocation::HIDEventTap,
                 CGEventTapPlacement::HeadInsertEventTap,
-                // ListenOnly for mouse moves — we don't suppress them
-                CGEventTapOptions(1), // kCGEventTapOptionListenOnly
+                CGEventTapOptions(1), // ListenOnly
                 mask,
                 Some(event_tap_callback),
                 handler_ptr as *mut c_void,
@@ -73,6 +82,10 @@ impl Drop for EventTap {
     }
 }
 
+fn has_cmd(flags: CGEventFlags) -> bool {
+    flags.0 & (1 << 20) != 0
+}
+
 unsafe extern "C-unwind" fn event_tap_callback(
     _proxy: CGEventTapProxy,
     event_type: CGEventType,
@@ -90,13 +103,40 @@ unsafe extern "C-unwind" fn event_tap_callback(
 
     let event_ref = unsafe { event.as_ref() };
     let handler = unsafe { &*(user_info as *const MouseHandler) };
+    let loc = CGEvent::location(Some(event_ref));
 
+    let mouse_event = match event_type {
+        CGEventType::LeftMouseDown => {
+            let flags = CGEvent::flags(Some(event_ref));
+            Some(MouseEvent::LeftDown {
+                x: loc.x,
+                y: loc.y,
+                cmd_held: has_cmd(flags),
+            })
+        }
+        CGEventType::LeftMouseUp => Some(MouseEvent::LeftUp { x: loc.x, y: loc.y }),
+        CGEventType::LeftMouseDragged => Some(MouseEvent::LeftDragged { x: loc.x, y: loc.y }),
+        CGEventType::RightMouseDown => {
+            let flags = CGEvent::flags(Some(event_ref));
+            Some(MouseEvent::RightDown {
+                x: loc.x,
+                y: loc.y,
+                cmd_held: has_cmd(flags),
+            })
+        }
+        CGEventType::RightMouseUp => Some(MouseEvent::RightUp { x: loc.x, y: loc.y }),
+        CGEventType::RightMouseDragged => Some(MouseEvent::RightDragged { x: loc.x, y: loc.y }),
+        CGEventType::MouseMoved => Some(MouseEvent::Moved { x: loc.x, y: loc.y }),
+        _ => None,
+    };
+
+    // Also send Click for click-to-focus
     if event_type == CGEventType::LeftMouseDown {
-        let loc = CGEvent::location(Some(event_ref));
         handler(MouseEvent::Click { x: loc.x, y: loc.y });
-    } else if event_type == CGEventType::MouseMoved {
-        let loc = CGEvent::location(Some(event_ref));
-        handler(MouseEvent::Moved { x: loc.x, y: loc.y });
+    }
+
+    if let Some(evt) = mouse_event {
+        handler(evt);
     }
 
     event.as_ptr()
