@@ -40,6 +40,7 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSArray",
+    "NSEnumerator",
     "NSString",
     "NSNotification",
     "NSProcessInfo",
