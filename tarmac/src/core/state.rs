@@ -227,6 +227,7 @@ impl WmState {
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
             for (wid, rect) in &geometries {
+                tracing::debug!(wid, x = rect.x, y = rect.y, w = rect.width, h = rect.height, "tile");
                 if let Some(ax_ref) = self.ax_refs.get(wid) {
                     let _ = ax_set_size(ax_ref, rect.width, rect.height);
                 }

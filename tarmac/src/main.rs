@@ -54,6 +54,7 @@ fn main() {
     state.mouse_follows_focus = config.settings.mouse_follows_focus;
     state.gap_inner = config.settings.gap_inner;
     state.gap_outer = config.settings.gap_outer;
+    state.bar_height = config.settings.bar_height;
     state.rules = config.rules.clone();
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
@@ -613,8 +614,9 @@ fn reload_config() {
             state.mouse_follows_focus = config.settings.mouse_follows_focus;
             state.gap_inner = config.settings.gap_inner;
             state.gap_outer = config.settings.gap_outer;
+            state.bar_height = config.settings.bar_height;
             state.rules = config.rules.clone();
-            // Reapply layout with potentially new gap values
+            // Reapply layout with potentially new gap/bar values
             state.apply_layout();
         }
     });
