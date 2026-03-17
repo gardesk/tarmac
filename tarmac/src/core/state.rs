@@ -60,6 +60,21 @@ impl WmState {
             "initial window registry populated"
         );
 
+        // Install observers for all unique PIDs we've seen
+        let pids: Vec<(i32, String, String)> = self
+            .registry
+            .all()
+            .map(|w| (w.app_pid, w.app_name.clone(), w.app_bundle_id.clone()))
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+
+        for (pid, name, bundle) in &pids {
+            let ax_app = unsafe { AXUIElement::new_application(*pid) };
+            self.install_observer_for_app(*pid, &ax_app, name, bundle);
+        }
+
+        // Also install for NSWorkspace apps that might have no windows yet
         let apps = discover_applications();
         for app in &apps {
             self.install_observer_for_app(app.pid, &app.ax_ref, &app.name, &app.bundle_id);

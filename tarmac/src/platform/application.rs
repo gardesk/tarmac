@@ -170,30 +170,159 @@ pub fn dump_cg_window_list() {
     }
 }
 
-/// Discover all manageable windows across all running applications.
+/// Discover all on-screen windows using CGWindowList as ground truth,
+/// then enrich with AX attributes. This catches apps that don't appear
+/// in NSWorkspace.runningApplications (e.g., wezterm-gui, non-bundled apps).
 pub fn discover_all_windows() -> Vec<WindowInfo> {
-    // First, dump the CG window list so we can see ground truth
-    dump_cg_window_list();
-
-    let apps = discover_applications();
     let mut all_windows = Vec::new();
+    let mut seen_pids = std::collections::HashSet::new();
 
-    for app in &apps {
+    // Phase 1: CGWindowList — ground truth for all on-screen windows
+    let cg_windows = get_cg_window_list();
+    tracing::debug!(count = cg_windows.len(), "CGWindowList on-screen windows");
+
+    // Group by PID
+    for cg in &cg_windows {
+        seen_pids.insert(cg.pid);
+    }
+
+    // Phase 2: For each unique PID, create an AX app ref and enumerate its windows
+    for pid in &seen_pids {
+        let ax_app = unsafe { AXUIElement::new_application(*pid) };
+        let ax_windows = match ax_get_windows(&ax_app) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::trace!(pid, err = %e, "failed to get AX windows for pid");
+                continue;
+            }
+        };
+
+        // Find app name from CG data
+        let app_name = cg_windows
+            .iter()
+            .find(|w| w.pid == *pid)
+            .map(|w| w.owner.clone())
+            .unwrap_or_default();
+
+        tracing::trace!(pid, app = %app_name, ax_count = ax_windows.len(), "AX windows for pid");
+
+        for ax_win in ax_windows {
+            if !is_manageable_window(&ax_win) {
+                continue;
+            }
+
+            let id = match ax_get_window_id(&ax_win) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+
+            let title = ax_get_string(&ax_win, "AXTitle").unwrap_or_default();
+            let role = ax_get_string(&ax_win, "AXRole").unwrap_or_default();
+            let subrole = ax_get_string(&ax_win, "AXSubrole").unwrap_or_default();
+            let (x, y) = ax_get_position(&ax_win).unwrap_or((0.0, 0.0));
+            let (width, height) = ax_get_size(&ax_win).unwrap_or((0.0, 0.0));
+
+            all_windows.push(WindowInfo {
+                id,
+                app_pid: *pid,
+                app_name: app_name.clone(),
+                app_bundle_id: String::new(), // CG doesn't give bundle IDs
+                title,
+                role,
+                subrole,
+                x,
+                y,
+                width,
+                height,
+                ax_ref: ax_win,
+            });
+        }
+    }
+
+    // Phase 3: Also check NSWorkspace apps (for bundle IDs and apps with no on-screen windows yet)
+    let ns_apps = discover_applications();
+    for app in &ns_apps {
+        if seen_pids.contains(&app.pid) {
+            // Already handled via CG path — update bundle IDs
+            for w in &mut all_windows {
+                if w.app_pid == app.pid && w.app_bundle_id.is_empty() {
+                    w.app_bundle_id = app.bundle_id.clone();
+                    if w.app_name.is_empty() || w.app_name == "wezterm-gui" {
+                        // Prefer NSWorkspace name if available
+                        w.app_name = app.name.clone();
+                    }
+                }
+            }
+            continue;
+        }
+
+        // App not in CG list (no on-screen windows) — try AX anyway
         let windows = enumerate_windows(app);
-        tracing::debug!(
-            app = %app.name,
-            count = windows.len(),
-            "discovered windows"
-        );
-        all_windows.extend(windows);
+        if !windows.is_empty() {
+            tracing::debug!(app = %app.name, count = windows.len(), "discovered windows (AX only)");
+            all_windows.extend(windows);
+        }
     }
 
     tracing::info!(
         total = all_windows.len(),
-        apps = apps.len(),
+        pids = seen_pids.len(),
         "window discovery complete"
     );
     all_windows
+}
+
+/// Get all on-screen layer-0 windows from CGWindowList.
+pub fn get_cg_window_list() -> Vec<CgWindowInfo> {
+    let mut result = Vec::new();
+    unsafe {
+        let info = CGWindowListCopyWindowInfo(
+            kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements,
+            kCGNullWindowID,
+        );
+        if info.is_null() {
+            return result;
+        }
+
+        let count = CFArrayGetCount(info);
+        for i in 0..count {
+            let dict = CFArrayGetValueAtIndex(info, i);
+            if dict.is_null() {
+                continue;
+            }
+
+            let layer = cg_dict_get_i32(dict, kCGWindowLayer);
+            if layer != 0 {
+                continue; // Skip menu bar, dock, overlays
+            }
+
+            let pid = cg_dict_get_i32(dict, kCGWindowOwnerPID);
+            let wid = cg_dict_get_i32(dict, kCGWindowNumber) as u32;
+            let owner = cg_dict_get_string(dict, kCGWindowOwnerName);
+            let title = cg_dict_get_string(dict, kCGWindowName);
+
+            tracing::trace!(wid, pid, owner = %owner, title = %title, "CGWindowList entry");
+
+            result.push(CgWindowInfo {
+                wid,
+                pid,
+                owner,
+                title,
+            });
+        }
+
+        CFRelease(info);
+    }
+    result
+}
+
+/// Raw window info from CGWindowList.
+#[derive(Debug, Clone)]
+pub struct CgWindowInfo {
+    pub wid: u32,
+    pub pid: i32,
+    pub owner: String,
+    pub title: String,
 }
 
 // CGWindowList FFI
