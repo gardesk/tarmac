@@ -183,21 +183,52 @@ impl WmState {
     }
 
     pub fn focus_window(&mut self, id: WindowId) {
+        let focused_pid = self.registry.get(id).map(|w| w.app_pid);
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             let _ = ax_perform_action(ax_ref, "AXRaise");
-            if let Some(w) = self.registry.get(id) {
-                let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
+            if let Some(pid) = focused_pid {
+                let ax_app = unsafe { AXUIElement::new_application(pid) };
                 let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
                 let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
             }
-            self.workspaces.active_mut().record_focus(id);
-            tracing::debug!(id, "focused window");
         }
+        self.workspaces.active_mut().record_focus(id);
+
+        // Re-raise floating windows above the newly focused tiled window.
+        // For cross-app floaters: activate floater app → raise → re-activate focused app.
+        let ws = self.workspaces.active();
+        if !ws.is_floating(id) && !ws.floating.is_empty() {
+            // Collect floater info to avoid borrow issues
+            let floaters: Vec<(WindowId, i32)> = ws
+                .floating
+                .iter()
+                .filter_map(|fw| self.registry.get(fw.id).map(|w| (fw.id, w.app_pid)))
+                .collect();
+
+            for (fw_id, fw_pid) in &floaters {
+                if let Some(ax_ref) = self.ax_refs.get(fw_id) {
+                    if Some(*fw_pid) != focused_pid {
+                        // Cross-app: activate floater's app to raise it
+                        let ax_app = unsafe { AXUIElement::new_application(*fw_pid) };
+                        let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                        let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+                    }
+                    let _ = ax_perform_action(ax_ref, "AXRaise");
+                }
+            }
+
+            // Re-activate the focused window's app last so it keeps keyboard focus
+            if let Some(pid) = focused_pid {
+                let ax_app = unsafe { AXUIElement::new_application(pid) };
+                let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+            }
+        }
+
+        tracing::debug!(id, "focused window");
     }
 
-    /// Raise all floating windows via AXRaise (same-app only).
-    /// Cross-app z-ordering requires AXFrontmost which steals focus.
-    /// For cross-app floaters, clicking the floater brings it back on top.
+    /// Raise all floating windows via AXRaise.
     fn raise_floating_windows(&self) {
         for fw in &self.workspaces.active().floating {
             if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
