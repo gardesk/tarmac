@@ -195,38 +195,13 @@ impl WmState {
         }
     }
 
-    /// Raise all floating windows on the active workspace so they stay above tiled.
-    /// Uses AXRaise which works within an app's window stack. For cross-app raising,
-    /// we briefly set the floating window's app as frontmost then restore.
+    /// Raise all floating windows via AXRaise (same-app only).
+    /// Cross-app z-ordering requires AXFrontmost which steals focus.
+    /// For cross-app floaters, clicking the floater brings it back on top.
     fn raise_floating_windows(&self) {
-        let ws = self.workspaces.active();
-        if ws.floating.is_empty() {
-            return;
-        }
-
-        let focused_id = ws.focused;
-        let focused_is_floating = focused_id.is_some_and(|f| ws.is_floating(f));
-
-        // Only do cross-app raising if the focused window is tiled
-        // (meaning a tiled window might be covering a floating window from another app)
-        if !focused_is_floating {
-            for fw in &ws.floating {
-                if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
-                    if let Some(w) = self.registry.get(fw.id) {
-                        // Activate floating window's app and raise
-                        let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
-                        let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                        let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
-                    }
-                    let _ = ax_perform_action(ax_ref, "AXRaise");
-                }
-            }
-        } else {
-            // Focused is floating — just AXRaise each floater (same-app raise)
-            for fw in &ws.floating {
-                if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
-                    let _ = ax_perform_action(ax_ref, "AXRaise");
-                }
+        for fw in &self.workspaces.active().floating {
+            if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
+                let _ = ax_perform_action(ax_ref, "AXRaise");
             }
         }
     }
@@ -315,6 +290,7 @@ impl WmState {
                     let _ = ax_set_position(ax_ref, fw.geometry.x, fw.geometry.y);
                     let _ = ax_set_size(ax_ref, fw.geometry.width, fw.geometry.height);
                 }
+                self.raise_floating_windows();
                 tracing::info!(id = focused, "window floated");
             } else {
                 tracing::info!(id = focused, "window tiled");
@@ -654,13 +630,6 @@ impl WmState {
                     && self.registry.contains(id)
                 {
                     self.workspaces.active_mut().record_focus(id);
-                    // Re-raise floating windows when focus changes to a tiled window
-                    // This handles external focus changes (user clicking a tiled window)
-                    if !self.workspaces.active().is_floating(id)
-                        && !self.workspaces.active().floating.is_empty()
-                    {
-                        self.raise_floating_windows();
-                    }
                 }
             }
             WindowEvent::Moved { element, .. } => {
