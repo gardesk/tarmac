@@ -390,6 +390,21 @@ impl WmState {
         self.install_observer_for_app(pid, &ax_app, name, bundle_id);
     }
 
+    /// Update focus based on a mouse click position.
+    pub fn click_to_focus(&mut self, x: f64, y: f64) {
+        let geoms = self.tree.calculate_geometries(self.screen_rect);
+        let clicked = geoms
+            .iter()
+            .find(|(_, rect)| rect.contains_point(x, y))
+            .map(|(id, _)| *id);
+
+        if let Some(id) = clicked
+            && self.focused != Some(id)
+        {
+            self.focus_window(id);
+        }
+    }
+
     /// Called when the poller detects a window ID disappeared from screen.
     pub fn on_window_closed(&mut self, wid: u32) {
         let id = wid as WindowId;

@@ -36,12 +36,26 @@ fn main() {
     // Set up keybinds and event tap
     let keybinds = KeybindManager::with_defaults();
     let _event_tap = EventTap::install(Box::new(move |event| {
-        if let Some(action) = keybinds.dispatch(&event) {
-            tracing::debug!(?action, "keybind matched");
-            handle_action(action);
-            true // suppress the event
-        } else {
-            false // pass through
+        use tarmac::core::input::InputEvent;
+        match event {
+            InputEvent::Key(key_event) => {
+                if let Some(action) = keybinds.dispatch(&key_event) {
+                    tracing::debug!(?action, "keybind matched");
+                    handle_action(action);
+                    true // suppress
+                } else {
+                    false // pass through
+                }
+            }
+            InputEvent::MouseClick { x, y } => {
+                // Click-to-focus: find which window was clicked, focus it
+                WM_STATE.with(|s| {
+                    if let Some(state) = s.borrow_mut().as_mut() {
+                        state.click_to_focus(x, y);
+                    }
+                });
+                false // always pass click through
+            }
         }
     }));
 

@@ -9,10 +9,10 @@ use objc2_core_graphics::{
     CGEventTapPlacement, CGEventTapProxy, CGEventType,
 };
 
-use crate::core::input::{KeyEvent, Modifiers};
+use crate::core::input::{InputEvent, KeyEvent, Modifiers};
 
-/// Callback type for processed key events. Return true to suppress the event.
-pub type KeyHandler = Box<dyn Fn(KeyEvent) -> bool>;
+/// Callback type for input events. Return true to suppress the event.
+pub type KeyHandler = Box<dyn Fn(InputEvent) -> bool>;
 
 /// Holds the event tap resources. Drop to disable.
 pub struct EventTap {
@@ -29,7 +29,8 @@ impl EventTap {
 
         let mask: CGEventMask = (1 << CGEventType::KeyDown.0 as u64)
             | (1 << CGEventType::KeyUp.0 as u64)
-            | (1 << CGEventType::FlagsChanged.0 as u64);
+            | (1 << CGEventType::FlagsChanged.0 as u64)
+            | (1 << CGEventType::LeftMouseDown.0 as u64);
 
         let port = unsafe {
             CGEvent::tap_create(
@@ -90,25 +91,32 @@ unsafe extern "C-unwind" fn event_tap_callback(
         return event.as_ptr();
     }
 
-    // Only process KeyDown
-    if event_type != CGEventType::KeyDown {
-        return event.as_ptr();
-    }
-
-    let keycode =
-        CGEvent::integer_value_field(Some(event_ref), CGEventField::KeyboardEventKeycode) as u16;
-    let flags = CGEvent::flags(Some(event_ref));
-    let modifiers = flags_to_modifiers(flags);
-
-    let key_event = KeyEvent { keycode, modifiers };
-
     let handler = unsafe { &*(user_info as *const KeyHandler) };
-    if handler(key_event) {
-        // Suppress the event
-        std::ptr::null_mut()
+
+    let input = if event_type == CGEventType::KeyDown {
+        let keycode =
+            CGEvent::integer_value_field(Some(event_ref), CGEventField::KeyboardEventKeycode)
+                as u16;
+        let flags = CGEvent::flags(Some(event_ref));
+        let modifiers = flags_to_modifiers(flags);
+        Some(InputEvent::Key(KeyEvent { keycode, modifiers }))
+    } else if event_type == CGEventType::LeftMouseDown {
+        let location = CGEvent::location(Some(event_ref));
+        Some(InputEvent::MouseClick {
+            x: location.x,
+            y: location.y,
+        })
     } else {
-        event.as_ptr()
+        None
+    };
+
+    if let Some(input) = input
+        && handler(input)
+    {
+        return std::ptr::null_mut();
     }
+
+    event.as_ptr()
 }
 
 fn flags_to_modifiers(flags: CGEventFlags) -> Modifiers {
