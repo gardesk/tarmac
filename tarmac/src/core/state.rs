@@ -227,18 +227,14 @@ impl WmState {
             "workspace transition"
         );
 
-        // Hide using AeroSpace's bottom-left approach: position the window's
-        // top-left at (left_edge - window_width, screen_bottom). The window
-        // ends up fully off the left edge and below the screen. macOS can't
-        // clamp both axes to keep the title bar visible.
-        let full = get_full_display_frame();
+        // Hide windows far off-screen and verify the actual position after setting
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
-                let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let hide_x = full.x - w - 100.0;
-                let hide_y = full.y + full.height;
-                let _ = ax_set_position(ax_ref, hide_x, hide_y);
-                tracing::debug!(wid, hide_x, hide_y, "hidden");
+                let _ = ax_set_position(ax_ref, -99999.0, 99999.0);
+                // Verify: read back the actual position macOS applied
+                if let Ok((actual_x, actual_y)) = ax_get_position(ax_ref) {
+                    tracing::debug!(wid, actual_x, actual_y, "hidden (actual position)");
+                }
             }
         }
 
