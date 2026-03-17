@@ -227,17 +227,16 @@ impl WmState {
             "workspace transition"
         );
 
-        // Hide windows using AeroSpace's approach: set the window's top-left
-        // to the bottom-right corner of the full display (not just usable area).
-        // kAXPositionAttribute is the window's top-left, so the entire window
-        // body extends below and to the right — fully off-screen.
-        // Use the FULL display frame (including dock/menubar area) to ensure
-        // we're truly at the physical screen edge.
-        let full_display = get_full_display_frame();
-        let hide_x = full_display.x + full_display.width;
-        let hide_y = full_display.y + full_display.height;
+        // Hide using AeroSpace's bottom-left approach: position the window's
+        // top-left at (left_edge - window_width, screen_bottom). The window
+        // ends up fully off the left edge and below the screen. macOS can't
+        // clamp both axes to keep the title bar visible.
+        let full = get_full_display_frame();
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
+                let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                let hide_x = full.x - w - 100.0;
+                let hide_y = full.y + full.height;
                 let _ = ax_set_position(ax_ref, hide_x, hide_y);
                 tracing::debug!(wid, hide_x, hide_y, "hidden");
             }
@@ -270,11 +269,12 @@ impl WmState {
             .workspaces
             .move_window_to(focused, target.clone(), self.screen_rect)
         {
-            // Hide the moved window at the full display's bottom-right corner
+            // Hide the moved window off-screen (bottom-left approach)
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let full_display = get_full_display_frame();
-                let hide_x = full_display.x + full_display.width;
-                let hide_y = full_display.y + full_display.height;
+                let full = get_full_display_frame();
+                let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                let hide_x = full.x - w - 100.0;
+                let hide_y = full.y + full.height;
                 let _ = ax_set_position(ax_ref, hide_x, hide_y);
             }
 
