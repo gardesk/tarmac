@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 thread_local! {
     static WORKSPACE_POLLER: RefCell<Option<WorkspacePollingObserver>> = const { RefCell::new(None) };
+    static WM_STATE: RefCell<Option<WmState>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -28,8 +29,9 @@ fn main() {
     install_signal_handlers();
 
     // Initialize window manager state
-    let state = RefCell::new(WmState::new());
-    state.borrow_mut().discover_and_observe();
+    let mut state = WmState::new();
+    state.discover_and_observe();
+    WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
     // Set up keybinds and event tap
     let keybinds = KeybindManager::with_defaults();
@@ -82,8 +84,8 @@ fn install_polling_timer() {
     unsafe {
         let timer = CFRunLoopTimerCreate(
             ptr::null(),
-            CFAbsoluteTimeGetCurrent() + 0.5,
-            0.5,
+            CFAbsoluteTimeGetCurrent() + 0.05,
+            0.05, // 50ms — responsive event processing
             0,
             0,
             Some(poll_timer_callback),
@@ -95,6 +97,14 @@ fn install_polling_timer() {
 }
 
 unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
+    // Drain queued AX observer events and process them
+    WM_STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            state.process_events();
+        }
+    });
+
+    // Poll for app launches/terminations
     WORKSPACE_POLLER.with(|p| {
         if let Some(poller) = p.borrow_mut().as_mut() {
             poller.poll();

@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use objc2_application_services::AXUIElement;
 use objc2_core_foundation::CFRetained;
@@ -16,6 +18,13 @@ use crate::platform::observer::{AppObserver, WindowEvent};
 use super::tree::{Node, Rect};
 use super::window::{WindowId, WindowRegistry, WindowState};
 
+/// An event queued from an observer callback for deferred processing.
+struct QueuedEvent {
+    event: WindowEvent,
+    app_name: String,
+    app_bundle: String,
+}
+
 /// Central state for the window manager.
 /// Lives on the main thread (not Send/Sync).
 pub struct WmState {
@@ -25,6 +34,7 @@ pub struct WmState {
     ax_refs: HashMap<WindowId, CFRetained<AXUIElement>>,
     observers: HashMap<i32, AppObserver>,
     screen_rect: Rect,
+    event_queue: Rc<RefCell<Vec<QueuedEvent>>>,
 }
 
 impl Default for WmState {
@@ -42,6 +52,7 @@ impl WmState {
             ax_refs: HashMap::new(),
             observers: HashMap::new(),
             screen_rect: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            event_queue: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
@@ -85,10 +96,9 @@ impl WmState {
             "initial window registry populated"
         );
 
-        // Apply initial layout
         self.apply_layout();
 
-        // Install observers
+        // Install observers for all unique PIDs
         let pids: Vec<(i32, String, String)> = self
             .registry
             .all()
@@ -110,6 +120,15 @@ impl WmState {
         tracing::info!(observers = self.observers.len(), "observers installed");
     }
 
+    /// Process all queued events from observer callbacks.
+    /// Call this from a timer tick on the main thread.
+    pub fn process_events(&mut self) {
+        let events: Vec<QueuedEvent> = self.event_queue.borrow_mut().drain(..).collect();
+        for queued in events {
+            self.handle_event(&queued.event, &queued.app_name, &queued.app_bundle);
+        }
+    }
+
     /// Recalculate geometries from the BSP tree and apply to all windows.
     pub fn apply_layout(&self) {
         let geometries = self.tree.calculate_geometries(self.screen_rect);
@@ -128,7 +147,7 @@ impl WmState {
     }
 
     /// Handle a window event from an AX observer.
-    pub fn handle_event(&mut self, event: &WindowEvent, app_name: &str, app_bundle: &str) {
+    fn handle_event(&mut self, event: &WindowEvent, app_name: &str, app_bundle: &str) {
         match event {
             WindowEvent::Created {
                 pid: app_pid,
@@ -196,6 +215,8 @@ impl WmState {
                 }
             }
             WindowEvent::Moved { element, .. } => {
+                // Don't react to moves — we're the ones moving windows.
+                // Only update registry for bookkeeping.
                 if let Ok(id) = ax_get_window_id(element)
                     && let Ok((x, y)) = ax_get_position(element)
                     && let Some(w) = self.registry.get(id)
@@ -308,12 +329,15 @@ impl WmState {
             return;
         }
 
+        let queue = Rc::clone(&self.event_queue);
         let cb_name = name.to_string();
         let cb_bundle = bundle_id.to_string();
         let callback = Box::new(move |event: WindowEvent| {
-            // Log-only for now. Real event handling requires main-thread state access.
-            // Sprint 2 wires this via the event loop. For now, log.
-            handle_event_log(&event, &cb_name, &cb_bundle);
+            queue.borrow_mut().push(QueuedEvent {
+                event,
+                app_name: cb_name.clone(),
+                app_bundle: cb_bundle.clone(),
+            });
         });
 
         match AppObserver::new(pid, ax_ref, callback) {
@@ -324,51 +348,6 @@ impl WmState {
             Err(e) => {
                 tracing::trace!(app = name, pid, err = %e, "failed to create observer");
             }
-        }
-    }
-}
-
-fn handle_event_log(event: &WindowEvent, app_name: &str, _app_bundle: &str) {
-    match event {
-        WindowEvent::Created { pid: _, element } => {
-            if !is_manageable_window(element) {
-                return;
-            }
-            let title = ax_get_string(element, "AXTitle").unwrap_or_default();
-            let id = ax_get_window_id(element).unwrap_or(0);
-            tracing::info!(id, app = app_name, title = %title, "window created");
-        }
-        WindowEvent::Destroyed { element, .. } => {
-            let id = ax_get_window_id(element).unwrap_or(0);
-            tracing::info!(id, app = app_name, "window destroyed");
-        }
-        WindowEvent::FocusChanged { element, .. } => {
-            let id = ax_get_window_id(element).unwrap_or(0);
-            let title = ax_get_string(element, "AXTitle").unwrap_or_default();
-            tracing::debug!(id, app = app_name, title = %title, "focus changed");
-        }
-        WindowEvent::Moved { element, .. } => {
-            let id = ax_get_window_id(element).unwrap_or(0);
-            if let Ok((x, y)) = ax_get_position(element) {
-                tracing::debug!(id, x, y, "window moved");
-            }
-        }
-        WindowEvent::Resized { element, .. } => {
-            let id = ax_get_window_id(element).unwrap_or(0);
-            if let Ok((w, h)) = ax_get_size(element) {
-                tracing::debug!(id, w, h, "window resized");
-            }
-        }
-        WindowEvent::TitleChanged { element, .. } => {
-            let id = ax_get_window_id(element).unwrap_or(0);
-            let title = ax_get_string(element, "AXTitle").unwrap_or_default();
-            tracing::debug!(id, title = %title, "title changed");
-        }
-        WindowEvent::Minimized { .. } => {
-            tracing::debug!(app = app_name, "window minimized");
-        }
-        WindowEvent::Unminimized { .. } => {
-            tracing::debug!(app = app_name, "window unminimized");
         }
     }
 }
