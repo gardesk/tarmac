@@ -44,11 +44,15 @@ fn main() {
                     handle_action(action);
                     true // suppress
                 } else {
-                    tracing::trace!(
-                        keycode = key_event.keycode,
-                        mods = ?key_event.modifiers,
-                        "unmatched key"
-                    );
+                    // Log at debug for modifier keys to help diagnose binding issues
+                    if !key_event.modifiers.is_empty() {
+                        tracing::debug!(
+                            keycode = format!("0x{:02X}", key_event.keycode),
+                            mods = ?key_event.modifiers,
+                            mods_stripped = ?(key_event.modifiers & !tarmac::core::input::Modifiers::FN),
+                            "unmatched key"
+                        );
+                    }
                     false // pass through
                 }
             }
@@ -90,6 +94,13 @@ fn main() {
                     state.on_app_terminated(pid);
                 }
             });
+        }),
+        Box::new(move |wid| {
+            WM_STATE.with(|s| {
+                s.borrow()
+                    .as_ref()
+                    .is_some_and(|state| state.is_window_hidden(wid))
+            })
         }),
     );
     WORKSPACE_POLLER.with(|p| *p.borrow_mut() = Some(poller));
