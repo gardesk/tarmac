@@ -12,7 +12,7 @@ use crate::platform::accessibility::{
 use crate::platform::application::{
     discover_all_windows, discover_applications, enumerate_windows,
 };
-use crate::platform::display::{get_full_display_frame, get_usable_frame};
+use crate::platform::display::get_usable_frame;
 use crate::platform::observer::{AppObserver, WindowEvent};
 
 use super::tree::{Node, Rect};
@@ -227,20 +227,22 @@ impl WmState {
             "workspace transition"
         );
 
-        // Hide windows far off-screen and verify the actual position after setting
+        // Hide windows: minimize to dock to fully hide.
+        // macOS clamps off-screen positioning to keep title bars visible,
+        // so minimization is the only reliable full-hide mechanism.
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
-                let _ = ax_set_position(ax_ref, -99999.0, 99999.0);
-                // Verify: read back the actual position macOS applied
-                if let Ok((actual_x, actual_y)) = ax_get_position(ax_ref) {
-                    tracing::debug!(wid, actual_x, actual_y, "hidden (actual position)");
-                }
+                let attr = objc2_core_foundation::CFString::from_static_str("AXMinimized");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &attr, true);
+                tracing::debug!(wid, "minimized");
             }
         }
 
-        // Show new windows
+        // Show new windows: unminimize and position
         for (wid, rect) in &transition.show {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
+                let attr = objc2_core_foundation::CFString::from_static_str("AXMinimized");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &attr, false);
                 let _ = ax_set_position(ax_ref, rect.x, rect.y);
                 let _ = ax_set_size(ax_ref, rect.width, rect.height);
             }
@@ -265,13 +267,10 @@ impl WmState {
             .workspaces
             .move_window_to(focused, target.clone(), self.screen_rect)
         {
-            // Hide the moved window off-screen (bottom-left approach)
+            // Minimize the moved window
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let full = get_full_display_frame();
-                let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let hide_x = full.x - w - 100.0;
-                let hide_y = full.y + full.height;
-                let _ = ax_set_position(ax_ref, hide_x, hide_y);
+                let attr = objc2_core_foundation::CFString::from_static_str("AXMinimized");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &attr, true);
             }
 
             // Retile current workspace
