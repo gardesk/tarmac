@@ -227,12 +227,13 @@ impl WmState {
             "workspace transition"
         );
 
-        // Hide old windows — position beyond the bottom-right corner of the screen.
-        // Don't change size (macOS enforces minimums that cause visible artifacts).
-        let hide_x = self.screen_rect.x + self.screen_rect.width + 1.0;
-        let hide_y = self.screen_rect.y + self.screen_rect.height + 1.0;
+        // Hide old windows — position fully beyond the bottom-right corner.
+        // Offset by the window's own size so title bar doesn't peek.
         for wid in &transition.hide {
             if let Some(ax_ref) = self.ax_refs.get(wid) {
+                let (w, h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                let hide_x = self.screen_rect.x + self.screen_rect.width + w;
+                let hide_y = self.screen_rect.y + self.screen_rect.height + h;
                 let _ = ax_set_position(ax_ref, hide_x, hide_y);
                 tracing::debug!(wid, "hidden");
             }
@@ -265,10 +266,11 @@ impl WmState {
             .workspaces
             .move_window_to(focused, target.clone(), self.screen_rect)
         {
-            // Hide the moved window beyond the bottom-right corner
+            // Hide the moved window fully beyond the bottom-right corner
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let hide_x = self.screen_rect.x + self.screen_rect.width + 1.0;
-                let hide_y = self.screen_rect.y + self.screen_rect.height + 1.0;
+                let (w, h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                let hide_x = self.screen_rect.x + self.screen_rect.width + w;
+                let hide_y = self.screen_rect.y + self.screen_rect.height + h;
                 let _ = ax_set_position(ax_ref, hide_x, hide_y);
             }
 
