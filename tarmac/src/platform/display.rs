@@ -202,10 +202,55 @@ fn find_nsscreen_for_display(
     None
 }
 
+/// Register a callback for display configuration changes (hotplug).
+/// The callback receives a boolean: true = display added/changed, false = display removed.
+pub fn register_display_change_callback(callback: Box<dyn Fn()>) {
+    // Store callback in a static to keep it alive
+    use std::sync::Mutex;
+    static CALLBACK: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
+
+    // Safety: the callback is only called from the main thread's CFRunLoop.
+    // We use transmute to add Send since Mutex requires it.
+    let send_cb: Box<dyn Fn() + Send> = unsafe { std::mem::transmute(callback) };
+
+    *CALLBACK.lock().unwrap() = Some(send_cb);
+
+    unsafe extern "C" fn display_reconfiguration_callback(
+        _display: u32,
+        _flags: u32,
+        _user_info: *mut std::ffi::c_void,
+    ) {
+        // Only react to "done" events (after reconfiguration is complete)
+        let begin_flag = 1u32 << 0;
+        if _flags & begin_flag != 0 {
+            return; // Skip "begin" events
+        }
+        if let Ok(guard) = CALLBACK.lock()
+            && let Some(cb) = guard.as_ref()
+        {
+            cb();
+        }
+    }
+
+    unsafe {
+        CGDisplayRegisterReconfigurationCallback(
+            Some(display_reconfiguration_callback),
+            std::ptr::null_mut(),
+        );
+    }
+    tracing::info!("display hotplug callback registered");
+}
+
 unsafe extern "C" {
     fn CGMainDisplayID() -> u32;
     fn CGDisplayBounds(display: u32) -> CGRect;
     fn CGGetActiveDisplayList(max: u32, displays: *mut u32, count: *mut u32) -> i32;
     fn CGWarpMouseCursorPosition(new_cursor_position: CGPoint) -> i32;
     fn CGAssociateMouseAndMouseCursorPosition(connected: bool) -> i32;
+    fn CGDisplayRegisterReconfigurationCallback(
+        callback: Option<
+            unsafe extern "C" fn(display: u32, flags: u32, user_info: *mut std::ffi::c_void),
+        >,
+        user_info: *mut std::ffi::c_void,
+    ) -> i32;
 }
