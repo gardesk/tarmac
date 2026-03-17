@@ -108,13 +108,6 @@ impl WmState {
         for queued in events {
             self.handle_event(&queued.event, &queued.app_name, &queued.app_bundle);
         }
-
-        // Ensure floating windows stay raised above tiled windows.
-        // This handles cases where the user clicks a tiled window directly
-        // (bypassing our click handler), which macOS raises above floating.
-        if !self.workspaces.active().floating.is_empty() {
-            self.raise_floating_windows();
-        }
     }
 
     // --- Layout ---
@@ -663,6 +656,13 @@ impl WmState {
                     && self.registry.contains(id)
                 {
                     self.workspaces.active_mut().record_focus(id);
+                    // Re-raise floating windows when focus changes to a tiled window
+                    // This handles external focus changes (user clicking a tiled window)
+                    if !self.workspaces.active().is_floating(id)
+                        && !self.workspaces.active().floating.is_empty()
+                    {
+                        self.raise_floating_windows();
+                    }
                 }
             }
             WindowEvent::Moved { element, .. } => {
