@@ -398,8 +398,13 @@ impl WmState {
         let window_under = if floating_under.is_some() {
             floating_under
         } else {
-            // Check tiled windows
-            let geoms = ws.tree.calculate_geometries(self.screen_rect);
+            // Check tiled windows using gap-aware geometry matching actual layout
+            let geoms = ws.tree.calculate_geometries_with_gaps(
+                self.screen_rect,
+                self.gap_inner,
+                self.gap_outer,
+                true,
+            );
             geoms
                 .iter()
                 .find(|(_, rect)| rect.contains_point(x, y))
@@ -475,7 +480,12 @@ impl WmState {
         let id = if let Some(fid) = floating_hit {
             Some(fid)
         } else {
-            let geoms = ws.tree.calculate_geometries(self.screen_rect);
+            let geoms = ws.tree.calculate_geometries_with_gaps(
+                self.screen_rect,
+                self.gap_inner,
+                self.gap_outer,
+                true,
+            );
             geoms
                 .iter()
                 .find(|(_, rect)| rect.contains_point(x, y))
