@@ -108,6 +108,13 @@ impl WmState {
         for queued in events {
             self.handle_event(&queued.event, &queued.app_name, &queued.app_bundle);
         }
+
+        // Ensure floating windows stay raised above tiled windows.
+        // This handles cases where the user clicks a tiled window directly
+        // (bypassing our click handler), which macOS raises above floating.
+        if !self.workspaces.active().floating.is_empty() {
+            self.raise_floating_windows();
+        }
     }
 
     // --- Layout ---
@@ -224,6 +231,7 @@ impl WmState {
     }
 
     /// Focus-follows-mouse: focus the window under the cursor.
+    /// Checks floating windows first (they're visually on top).
     pub fn mouse_moved(&mut self, x: f64, y: f64) {
         // Check cooldown (suppress after mouse warp to prevent feedback loops)
         if let Some(until) = self.ffm_cooldown_until {
@@ -233,16 +241,26 @@ impl WmState {
             self.ffm_cooldown_until = None;
         }
 
-        let geoms = self
-            .workspaces
-            .active()
-            .tree
-            .calculate_geometries(self.screen_rect);
+        let ws = self.workspaces.active();
 
-        let window_under = geoms
+        // Check floating windows first — they're visually on top
+        let floating_under = ws
+            .floating
             .iter()
-            .find(|(_, rect)| rect.contains_point(x, y))
-            .map(|(id, _)| *id);
+            .rev() // Check most recently focused first
+            .find(|fw| fw.geometry.contains_point(x, y))
+            .map(|fw| fw.id);
+
+        let window_under = if floating_under.is_some() {
+            floating_under
+        } else {
+            // Check tiled windows
+            let geoms = ws.tree.calculate_geometries(self.screen_rect);
+            geoms
+                .iter()
+                .find(|(_, rect)| rect.contains_point(x, y))
+                .map(|(id, _)| *id)
+        };
 
         // Only refocus if the window changed
         if window_under != self.ffm_last_window {
@@ -287,15 +305,27 @@ impl WmState {
     }
 
     pub fn click_to_focus(&mut self, x: f64, y: f64) {
-        let geoms = self
-            .workspaces
-            .active()
-            .tree
-            .calculate_geometries(self.screen_rect);
-        if let Some(id) = geoms
+        let ws = self.workspaces.active();
+
+        // Check floating first
+        let floating_hit = ws
+            .floating
             .iter()
-            .find(|(_, rect)| rect.contains_point(x, y))
-            .map(|(id, _)| *id)
+            .rev()
+            .find(|fw| fw.geometry.contains_point(x, y))
+            .map(|fw| fw.id);
+
+        let id = if let Some(fid) = floating_hit {
+            Some(fid)
+        } else {
+            let geoms = ws.tree.calculate_geometries(self.screen_rect);
+            geoms
+                .iter()
+                .find(|(_, rect)| rect.contains_point(x, y))
+                .map(|(id, _)| *id)
+        };
+
+        if let Some(id) = id
             && self.workspaces.active().focused != Some(id)
         {
             self.focus_window(id);
