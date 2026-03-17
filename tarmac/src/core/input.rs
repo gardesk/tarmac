@@ -169,13 +169,6 @@ pub fn keycode_to_key(keycode: u16) -> Option<Key> {
 
 use crate::core::tree::Direction;
 
-/// An input event from the event tap (key or mouse).
-#[derive(Debug, Clone, Copy)]
-pub enum InputEvent {
-    Key(KeyEvent),
-    MouseClick { x: f64, y: f64 },
-}
-
 /// An action bound to a key combination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Action {
