@@ -390,12 +390,22 @@ fn process_ipc_command(
             }
             "get-workspaces" => {
                 let active_id = state.workspaces.active_id().to_string();
-                let ws_count = state.workspaces.active().all_window_ids().len();
-                let focused = state.workspaces.active().focused;
+                let mut ws_list: Vec<serde_json::Value> = state
+                    .workspaces
+                    .all_workspaces()
+                    .map(|(id, ws)| {
+                        serde_json::json!({
+                            "id": id.to_string(),
+                            "active": id.to_string() == active_id,
+                            "windows": ws.all_window_ids().len(),
+                            "focused": ws.focused,
+                        })
+                    })
+                    .collect();
+                ws_list.sort_by(|a, b| a["id"].as_str().cmp(&b["id"].as_str()));
                 Response::ok(serde_json::json!({
                     "active": active_id,
-                    "windows": ws_count,
-                    "focused": focused,
+                    "workspaces": ws_list,
                 }))
             }
             "get-focused" => {
