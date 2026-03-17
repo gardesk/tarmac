@@ -182,22 +182,39 @@ impl WmState {
         self.apply_layout();
     }
 
+    /// Focus a window with full app activation. Used for keybinds, clicks, workspace switch.
     pub fn focus_window(&mut self, id: WindowId) {
+        self.focus_window_impl(id, true);
+    }
+
+    /// Focus a window without app activation. Used for FFM to avoid z-order disruption.
+    pub fn focus_window_soft(&mut self, id: WindowId) {
+        self.focus_window_impl(id, false);
+    }
+
+    fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             let _ = ax_perform_action(ax_ref, "AXRaise");
-            if let Some(w) = self.registry.get(id) {
-                let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
-                let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+
+            if activate_app {
+                // Full activation — brings all app windows forward
+                if let Some(w) = self.registry.get(id) {
+                    let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
+                    let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                    let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+                }
+            } else {
+                // Soft focus — set AXMain on the window without activating the app.
+                // This gives the window keyboard focus without disturbing z-order.
+                let key = objc2_core_foundation::CFString::from_static_str("AXMain");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &key, true);
+                let key2 = objc2_core_foundation::CFString::from_static_str("AXFocused");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &key2, true);
             }
         }
         self.workspaces.active_mut().record_focus(id);
-
-        // Re-apply floating window levels after every focus change.
-        // App activation can reset window ordering, so we re-set the level.
         self.enforce_floating_levels();
-
-        tracing::debug!(id, "focused window");
+        tracing::debug!(id, activate_app, "focused window");
     }
 
     /// Re-apply SkyLight window levels for all floating windows.
@@ -264,7 +281,7 @@ impl WmState {
             if let Some(id) = window_under
                 && self.workspaces.active().focused != Some(id)
             {
-                self.focus_window(id);
+                self.focus_window_soft(id);
             }
         }
     }
