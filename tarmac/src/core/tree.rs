@@ -314,7 +314,9 @@ impl Node {
                         (bcx - from_cx).abs() * 100.0 + (bcy - from_cy).abs()
                     }
                 };
-                dist_a.partial_cmp(&dist_b).unwrap()
+                dist_a
+                    .partial_cmp(&dist_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(w, _)| *w)
     }
