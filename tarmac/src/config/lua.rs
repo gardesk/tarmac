@@ -7,6 +7,15 @@ use super::settings::Settings;
 use crate::core::input::{Action, Key, Modifiers};
 use crate::core::tree::Direction;
 
+/// A window rule parsed from Lua config.
+#[derive(Debug, Clone)]
+pub struct WindowRule {
+    pub app_name: Option<String>,
+    pub title: Option<String>,
+    pub floating: Option<bool>,
+    pub workspace: Option<u8>,
+}
+
 /// A keybind parsed from Lua config.
 #[derive(Debug, Clone)]
 pub struct LuaKeybind {
@@ -19,12 +28,14 @@ pub struct LuaKeybind {
 pub struct LuaConfig {
     pub settings: Settings,
     pub keybinds: Vec<LuaKeybind>,
+    pub rules: Vec<WindowRule>,
 }
 
-/// Load and execute a Lua config file, returning settings and keybinds.
+/// Load and execute a Lua config file, returning settings, keybinds, and rules.
 pub fn load_config(path: &std::path::Path) -> LuaConfig {
     let settings = Rc::new(RefCell::new(Settings::default()));
     let keybinds: Rc<RefCell<Vec<LuaKeybind>>> = Rc::new(RefCell::new(Vec::new()));
+    let rules: Rc<RefCell<Vec<WindowRule>>> = Rc::new(RefCell::new(Vec::new()));
 
     if !path.exists() {
         tracing::warn!(?path, "no config file found, using defaults");
@@ -32,18 +43,25 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
         return LuaConfig {
             settings: s,
             keybinds: default_keybinds(&Settings::default()),
+            rules: Vec::new(),
         };
     }
 
     let lua = Lua::new();
 
     // Register gar table
-    if let Err(e) = register_gar_api(&lua, Rc::clone(&settings), Rc::clone(&keybinds)) {
+    if let Err(e) = register_gar_api(
+        &lua,
+        Rc::clone(&settings),
+        Rc::clone(&keybinds),
+        Rc::clone(&rules),
+    ) {
         tracing::error!(err = %e, "failed to register gar API");
         let s = settings.borrow().clone();
         return LuaConfig {
             settings: s,
             keybinds: default_keybinds(&Settings::default()),
+            rules: Vec::new(),
         };
     }
 
@@ -69,9 +87,13 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
         binds = default_keybinds(&s);
     }
 
+    let r = rules.borrow().clone();
+    tracing::info!(rules = r.len(), "window rules loaded");
+
     LuaConfig {
         settings: s,
         keybinds: binds,
+        rules: r,
     }
 }
 
@@ -79,6 +101,7 @@ fn register_gar_api(
     lua: &Lua,
     settings: Rc<RefCell<Settings>>,
     keybinds: Rc<RefCell<Vec<LuaKeybind>>>,
+    rules: Rc<RefCell<Vec<WindowRule>>>,
 ) -> LuaResult<()> {
     let gar = lua.create_table()?;
 
@@ -158,6 +181,33 @@ fn register_gar_api(
             }
             Ok(())
         })?,
+    )?;
+
+    // gar.rule({ app_name = "Firefox" }, { workspace = 2, floating = true })
+    let rules_clone = Rc::clone(&rules);
+    gar.set(
+        "rule",
+        lua.create_function(
+            move |_, (match_table, actions_table): (mlua::Table, mlua::Table)| {
+                let app_name: Option<String> = match_table.get("app_name").ok();
+                let title: Option<String> = match_table.get("title").ok();
+                // Also accept "class" as alias for "app_name" (gar Linux compat)
+                let app_name = app_name.or_else(|| match_table.get("class").ok());
+
+                let floating: Option<bool> = actions_table.get("floating").ok();
+                let workspace: Option<u8> = actions_table.get("workspace").ok();
+
+                let rule = WindowRule {
+                    app_name,
+                    title,
+                    floating,
+                    workspace,
+                };
+                tracing::debug!(?rule, "gar.rule");
+                rules_clone.borrow_mut().push(rule);
+                Ok(())
+            },
+        )?,
     )?;
 
     lua.globals().set("gar", gar)?;
