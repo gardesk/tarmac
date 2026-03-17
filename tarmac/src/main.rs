@@ -399,19 +399,37 @@ fn process_ipc_command(
                 }))
             }
             "get-focused" => {
+                use tarmac::platform::accessibility::{
+                    ax_get_position, ax_get_size, ax_get_string,
+                };
                 if let Some(focused_id) = state.workspaces.active().focused {
-                    if let Some(w) = state.registry.get(focused_id) {
-                        Response::ok(serde_json::json!({
-                            "id": w.id,
-                            "app_name": w.app_name,
-                            "title": w.title,
-                            "x": w.x, "y": w.y,
-                            "width": w.width, "height": w.height,
-                            "floating": w.floating,
-                        }))
-                    } else {
-                        Response::ok(serde_json::json!({ "id": focused_id }))
-                    }
+                    let app_name = state
+                        .registry
+                        .get(focused_id)
+                        .map(|w| w.app_name.clone())
+                        .unwrap_or_default();
+                    let floating = state.workspaces.active().is_floating(focused_id);
+
+                    // Query live AX data for current title and geometry
+                    let (title, x, y, width, height) =
+                        if let Some(ax_ref) = state.get_ax_ref(focused_id) {
+                            let title = ax_get_string(ax_ref, "AXTitle").unwrap_or_default();
+                            let (x, y) = ax_get_position(ax_ref).unwrap_or((0.0, 0.0));
+                            let (w, h) = ax_get_size(ax_ref).unwrap_or((0.0, 0.0));
+                            (title, x, y, w, h)
+                        } else {
+                            (String::new(), 0.0, 0.0, 0.0, 0.0)
+                        };
+
+                    Response::ok(serde_json::json!({
+                        "id": focused_id,
+                        "app_name": app_name,
+                        "title": title,
+                        "x": x, "y": y,
+                        "width": width, "height": height,
+                        "floating": floating,
+                        "workspace": state.workspaces.active_id().to_string(),
+                    }))
                 } else {
                     Response::ok(serde_json::json!({ "focused": null }))
                 }
