@@ -244,6 +244,37 @@ impl WmState {
         }
     }
 
+    pub fn toggle_float(&mut self) {
+        let focused = match self.workspaces.active().focused {
+            Some(f) => f,
+            None => return,
+        };
+        if self
+            .workspaces
+            .active_mut()
+            .toggle_float(focused, self.screen_rect)
+        {
+            self.apply_layout();
+            // If now floating, position at its stored geometry
+            if self.workspaces.active().is_floating(focused) {
+                if let Some(fw) = self
+                    .workspaces
+                    .active()
+                    .floating
+                    .iter()
+                    .find(|f| f.id == focused)
+                    && let Some(ax_ref) = self.ax_refs.get(&focused)
+                {
+                    let _ = ax_set_position(ax_ref, fw.geometry.x, fw.geometry.y);
+                    let _ = ax_set_size(ax_ref, fw.geometry.width, fw.geometry.height);
+                }
+                tracing::info!(id = focused, "window floated");
+            } else {
+                tracing::info!(id = focused, "window tiled");
+            }
+        }
+    }
+
     pub fn click_to_focus(&mut self, x: f64, y: f64) {
         let geoms = self
             .workspaces
