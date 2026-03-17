@@ -50,6 +50,7 @@ fn main() {
     state.mouse_follows_focus = config.settings.mouse_follows_focus;
     state.gap_inner = config.settings.gap_inner;
     state.gap_outer = config.settings.gap_outer;
+    state.rules = config.rules;
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
