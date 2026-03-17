@@ -25,6 +25,21 @@ struct QueuedEvent {
     app_bundle: String,
 }
 
+/// Active drag operation on a floating window.
+#[derive(Debug, Clone, Copy)]
+enum DragMode {
+    Move,
+    Resize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DragState {
+    window_id: WindowId,
+    mode: DragMode,
+    start_mouse: (f64, f64),
+    start_geometry: Rect,
+}
+
 /// Central state for the window manager.
 pub struct WmState {
     pub registry: WindowRegistry,
@@ -33,10 +48,9 @@ pub struct WmState {
     observers: HashMap<i32, AppObserver>,
     screen_rect: Rect,
     event_queue: Rc<RefCell<Vec<QueuedEvent>>>,
-    /// Suppress focus-follows-mouse briefly after mouse warp to prevent feedback loops
     ffm_cooldown_until: Option<std::time::Instant>,
-    /// Last window that had focus-follows-mouse focus (to avoid redundant focus calls)
     ffm_last_window: Option<WindowId>,
+    drag: Option<DragState>,
 }
 
 impl Default for WmState {
@@ -56,6 +70,7 @@ impl WmState {
             event_queue: Rc::new(RefCell::new(Vec::new())),
             ffm_cooldown_until: None,
             ffm_last_window: None,
+            drag: None,
         }
     }
 
@@ -212,6 +227,110 @@ impl WmState {
         self.workspaces.active_mut().record_focus(id);
         self.enforce_floating_levels();
         tracing::debug!(id, activate_app, "focused window");
+    }
+
+    // --- Drag operations for floating windows ---
+
+    /// Start a move drag on a floating window (Cmd+LeftClick).
+    pub fn begin_move_drag(&mut self, x: f64, y: f64) {
+        let ws = self.workspaces.active();
+        // Find which floating window is under the cursor
+        if let Some(fw) = ws
+            .floating
+            .iter()
+            .rev()
+            .find(|fw| fw.geometry.contains_point(x, y))
+        {
+            self.drag = Some(DragState {
+                window_id: fw.id,
+                mode: DragMode::Move,
+                start_mouse: (x, y),
+                start_geometry: fw.geometry,
+            });
+            tracing::debug!(id = fw.id, "move drag started");
+        }
+    }
+
+    /// Start a resize drag on a floating window (Cmd+RightClick).
+    pub fn begin_resize_drag(&mut self, x: f64, y: f64) {
+        let ws = self.workspaces.active();
+        if let Some(fw) = ws
+            .floating
+            .iter()
+            .rev()
+            .find(|fw| fw.geometry.contains_point(x, y))
+        {
+            self.drag = Some(DragState {
+                window_id: fw.id,
+                mode: DragMode::Resize,
+                start_mouse: (x, y),
+                start_geometry: fw.geometry,
+            });
+            tracing::debug!(id = fw.id, "resize drag started");
+        }
+    }
+
+    /// Update an active drag operation.
+    pub fn update_drag(&mut self, x: f64, y: f64) {
+        let Some(drag) = self.drag else { return };
+
+        let dx = x - drag.start_mouse.0;
+        let dy = y - drag.start_mouse.1;
+
+        match drag.mode {
+            DragMode::Move => {
+                let new_x = drag.start_geometry.x + dx;
+                let new_y = drag.start_geometry.y + dy;
+
+                // Update floating geometry
+                if let Some(fw) = self
+                    .workspaces
+                    .active_mut()
+                    .floating
+                    .iter_mut()
+                    .find(|f| f.id == drag.window_id)
+                {
+                    fw.geometry.x = new_x;
+                    fw.geometry.y = new_y;
+                }
+
+                // Apply via AX
+                if let Some(ax_ref) = self.ax_refs.get(&drag.window_id) {
+                    let _ = ax_set_position(ax_ref, new_x, new_y);
+                }
+            }
+            DragMode::Resize => {
+                let new_w = (drag.start_geometry.width + dx).max(200.0);
+                let new_h = (drag.start_geometry.height + dy).max(100.0);
+
+                if let Some(fw) = self
+                    .workspaces
+                    .active_mut()
+                    .floating
+                    .iter_mut()
+                    .find(|f| f.id == drag.window_id)
+                {
+                    fw.geometry.width = new_w;
+                    fw.geometry.height = new_h;
+                }
+
+                if let Some(ax_ref) = self.ax_refs.get(&drag.window_id) {
+                    let _ = ax_set_size(ax_ref, new_w, new_h);
+                }
+            }
+        }
+    }
+
+    /// End an active drag operation.
+    pub fn end_drag(&mut self) {
+        if let Some(drag) = self.drag.take() {
+            tracing::debug!(id = drag.window_id, ?drag.mode, "drag ended");
+        }
+    }
+
+    /// Check if a drag is currently active.
+    pub fn is_dragging(&self) -> bool {
+        self.drag.is_some()
     }
 
     /// Re-apply SkyLight window levels for all floating windows.
