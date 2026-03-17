@@ -51,6 +51,8 @@ pub struct WmState {
     ffm_cooldown_until: Option<std::time::Instant>,
     ffm_last_window: Option<WindowId>,
     drag: Option<DragState>,
+    pub focus_follows_mouse: bool,
+    pub mouse_follows_focus: bool,
 }
 
 impl Default for WmState {
@@ -71,6 +73,8 @@ impl WmState {
             ffm_cooldown_until: None,
             ffm_last_window: None,
             drag: None,
+            focus_follows_mouse: true,
+            mouse_follows_focus: true,
         }
     }
 
@@ -153,7 +157,9 @@ impl WmState {
         if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
             self.focus_window(target);
             // Mouse follows focus: warp cursor to the center of the newly focused window
-            if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target) {
+            if self.mouse_follows_focus
+                && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
+            {
                 warp_mouse_to_center(rect);
                 // Suppress focus-follows-mouse for 200ms to prevent feedback loop
                 self.ffm_cooldown_until =
@@ -362,6 +368,9 @@ impl WmState {
     /// Focus-follows-mouse: focus the window under the cursor.
     /// Checks floating windows first (they're visually on top).
     pub fn mouse_moved(&mut self, x: f64, y: f64) {
+        if !self.focus_follows_mouse {
+            return;
+        }
         // Check cooldown (suppress after mouse warp to prevent feedback loops)
         if let Some(until) = self.ffm_cooldown_until {
             if std::time::Instant::now() < until {
@@ -517,6 +526,24 @@ impl WmState {
         }
 
         tracing::info!(ws = %self.workspaces.active_id(), "switched workspace");
+    }
+
+    pub fn workspace_next(&mut self) {
+        let current = match self.workspaces.active_id() {
+            super::workspace::WorkspaceId::Numbered(n) => *n,
+            _ => return,
+        };
+        let next = if current >= 10 { 1 } else { current + 1 };
+        self.switch_workspace(next);
+    }
+
+    pub fn workspace_prev(&mut self) {
+        let current = match self.workspaces.active_id() {
+            super::workspace::WorkspaceId::Numbered(n) => *n,
+            _ => return,
+        };
+        let prev = if current <= 1 { 10 } else { current - 1 };
+        self.switch_workspace(prev);
     }
 
     pub fn move_to_workspace(&mut self, num: u8) {
