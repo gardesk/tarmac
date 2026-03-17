@@ -128,6 +128,11 @@ impl WmState {
         tracing::info!(observers = self.observers.len(), "observers installed");
     }
 
+    /// Get the AX element reference for a window (for IPC queries).
+    pub fn get_ax_ref(&self, id: WindowId) -> Option<&CFRetained<AXUIElement>> {
+        self.ax_refs.get(&id)
+    }
+
     pub fn process_events(&mut self) {
         let events: Vec<QueuedEvent> = self.event_queue.borrow_mut().drain(..).collect();
         for queued in events {
