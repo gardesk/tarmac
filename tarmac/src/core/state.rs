@@ -497,11 +497,12 @@ impl WmState {
     /// Check if a window is on an inactive workspace (intentionally hidden).
     pub fn is_window_hidden(&self, wid: u32) -> bool {
         let id = wid as WindowId;
-        // If the window is in our registry but NOT on the active workspace, it's hidden
         if !self.registry.contains(id) {
             return false;
         }
-        !self.workspaces.active().tree.contains(id)
+        let ws = self.workspaces.active();
+        // Window is hidden if it's not in the active workspace's tree OR floating list
+        !ws.tree.contains(id) && !ws.is_floating(id)
     }
 
     // --- Helpers ---
@@ -522,6 +523,7 @@ impl WmState {
         height: f64,
         ax_ref: CFRetained<AXUIElement>,
     ) {
+        let should_float = should_auto_float(subrole, width, height);
         self.registry.add(WindowState {
             id: *id,
             app_pid,
@@ -534,12 +536,20 @@ impl WmState {
             y,
             width,
             height,
-            floating: false,
+            floating: should_float,
             minimized: false,
         });
         self.ax_refs.insert(*id, ax_ref);
         let ws = self.workspaces.active_mut();
-        ws.tree.insert_with_rect(*id, ws.focused, self.screen_rect);
+        if should_float {
+            ws.floating.push(super::workspace::FloatingWindow {
+                id: *id,
+                geometry: Rect::new(x, y, width, height),
+            });
+            tracing::info!(id, subrole, "auto-floated window");
+        } else {
+            ws.tree.insert_with_rect(*id, ws.focused, self.screen_rect);
+        }
         ws.record_focus(*id);
     }
 
@@ -691,6 +701,14 @@ impl WmState {
             }
         }
     }
+}
+
+/// Check if a window should automatically float based on its subrole and size.
+fn should_auto_float(subrole: &str, width: f64, height: f64) -> bool {
+    matches!(
+        subrole,
+        "AXDialog" | "AXSheet" | "AXFloatingWindow" | "AXSystemFloatingWindow"
+    ) || (width > 0.0 && height > 0.0 && width < 400.0 && height < 300.0)
 }
 
 /// Warp the mouse cursor to the center of a rect.
