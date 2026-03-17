@@ -37,15 +37,8 @@ fn main() {
     let keybinds = KeybindManager::with_defaults();
     let _event_tap = EventTap::install(Box::new(move |event| {
         if let Some(action) = keybinds.dispatch(&event) {
-            tracing::info!(?action, "keybind matched");
-            match action {
-                Action::SpawnTerminal => {
-                    spawn_terminal();
-                }
-                Action::CloseWindow => {
-                    tracing::info!("close window (not yet wired)");
-                }
-            }
+            tracing::debug!(?action, "keybind matched");
+            handle_action(action);
             true // suppress the event
         } else {
             false // pass through
@@ -84,6 +77,21 @@ fn main() {
 
     install_polling_timer();
     run_app();
+}
+
+fn handle_action(action: Action) {
+    WM_STATE.with(|s| {
+        if let Some(state) = s.borrow_mut().as_mut() {
+            match action {
+                Action::SpawnTerminal => spawn_terminal(),
+                Action::CloseWindow => state.close_focused(),
+                Action::Focus(dir) => state.focus_direction(dir),
+                Action::Swap(dir) => state.swap_direction(dir),
+                Action::Resize(dir) => state.resize_direction(dir),
+                Action::Equalize => state.equalize(),
+            }
+        }
+    });
 }
 
 fn spawn_terminal() {

@@ -6,8 +6,8 @@ use objc2_application_services::AXUIElement;
 use objc2_core_foundation::CFRetained;
 
 use crate::platform::accessibility::{
-    ax_get_position, ax_get_size, ax_get_string, ax_get_window_id, ax_set_position, ax_set_size,
-    is_manageable_window,
+    ax_copy_attribute, ax_get_position, ax_get_size, ax_get_string, ax_get_window_id,
+    ax_perform_action, ax_set_position, ax_set_size, is_manageable_window,
 };
 use crate::platform::application::{
     discover_all_windows, discover_applications, enumerate_windows,
@@ -147,6 +147,88 @@ impl WmState {
                 }
             }
         }
+    }
+
+    /// Focus the window in the given direction from the currently focused window.
+    pub fn focus_direction(&mut self, direction: super::tree::Direction) {
+        let focused = match self.focused {
+            Some(f) => f,
+            None => return,
+        };
+        let geoms = self.tree.calculate_geometries(self.screen_rect);
+        if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
+            self.focus_window(target);
+        }
+    }
+
+    /// Swap the focused window with the window in the given direction.
+    pub fn swap_direction(&mut self, direction: super::tree::Direction) {
+        let focused = match self.focused {
+            Some(f) => f,
+            None => return,
+        };
+        let geoms = self.tree.calculate_geometries(self.screen_rect);
+        if let Some(target) = Node::find_adjacent(&geoms, focused, direction)
+            && self.tree.swap(focused, target)
+        {
+            self.apply_layout();
+        }
+    }
+
+    /// Resize the split affecting the focused window in the given direction.
+    pub fn resize_direction(&mut self, direction: super::tree::Direction) {
+        let focused = match self.focused {
+            Some(f) => f,
+            None => return,
+        };
+        if self.tree.resize(focused, direction, 0.05) {
+            self.apply_layout();
+        }
+    }
+
+    /// Equalize all split ratios.
+    pub fn equalize(&mut self) {
+        self.tree.equalize();
+        self.apply_layout();
+    }
+
+    /// Focus a specific window by raising it and activating its app.
+    pub fn focus_window(&mut self, id: WindowId) {
+        if let Some(ax_ref) = self.ax_refs.get(&id) {
+            let _ = ax_perform_action(ax_ref, "AXRaise");
+
+            // Activate the owning application
+            if let Some(w) = self.registry.get(id) {
+                let pid = w.app_pid;
+                let ax_app =
+                    unsafe { objc2_application_services::AXUIElement::new_application(pid) };
+                let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                // Set AXFrontmost = true to activate the app
+                let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+            }
+            self.focused = Some(id);
+            tracing::debug!(id, "focused window");
+        }
+    }
+
+    /// Close the currently focused window via AX.
+    pub fn close_focused(&mut self) {
+        let focused = match self.focused {
+            Some(f) => f,
+            None => return,
+        };
+        if let Some(ax_ref) = self.ax_refs.get(&focused) {
+            // Get the close button and press it
+            let close_attr = objc2_core_foundation::CFString::from_static_str("AXCloseButton");
+            if let Ok(close_btn) = ax_copy_attribute(ax_ref, &close_attr) {
+                let btn_ptr = &*close_btn as *const objc2_core_foundation::CFType
+                    as *const objc2_application_services::AXUIElement;
+                let btn_ref = unsafe { &*btn_ptr };
+                let _ = ax_perform_action(btn_ref, "AXPress");
+                tracing::info!(id = focused, "close button pressed");
+            }
+        }
+        // Actual removal happens via CGWindowList poller detecting the window disappeared
     }
 
     /// Handle a window event from an AX observer.
