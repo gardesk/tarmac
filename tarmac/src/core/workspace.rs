@@ -96,6 +96,7 @@ impl WorkspaceManager {
     }
 
     pub fn active_mut(&mut self) -> &mut Workspace {
+        // Invariant: active workspace is always in the map (created in new() and switch_to())
         self.workspaces.get_mut(&self.active).unwrap()
     }
 
