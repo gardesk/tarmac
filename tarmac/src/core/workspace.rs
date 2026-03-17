@@ -108,10 +108,15 @@ pub struct WorkspaceTransition {
     pub focus: Option<WindowId>,
 }
 
-/// Manages all workspaces and tracks which is active.
+use super::monitor::MonitorId;
+
+/// Manages all workspaces and tracks per-monitor active workspace.
 pub struct WorkspaceManager {
     workspaces: HashMap<WorkspaceId, Workspace>,
-    active: WorkspaceId,
+    /// Active workspace per monitor. The "focused monitor" determines
+    /// which entry is returned by active()/active_mut().
+    monitor_workspaces: HashMap<MonitorId, WorkspaceId>,
+    focused_monitor: MonitorId,
 }
 
 impl WorkspaceManager {
@@ -120,28 +125,81 @@ impl WorkspaceManager {
         let mut workspaces = HashMap::new();
         workspaces.insert(default_ws.clone(), Workspace::new(default_ws.clone()));
 
+        let mut monitor_workspaces = HashMap::new();
+        monitor_workspaces.insert(0, default_ws.clone());
+
         Self {
             workspaces,
-            active: default_ws,
+            monitor_workspaces,
+            focused_monitor: 0,
         }
     }
 
-    pub fn active_id(&self) -> &WorkspaceId {
-        &self.active
+    /// Initialize monitor-workspace assignments.
+    /// Workspace N maps to monitor N (sorted by position).
+    pub fn assign_monitors(&mut self, monitor_ids: &[MonitorId]) {
+        self.monitor_workspaces.clear();
+        for (i, &mid) in monitor_ids.iter().enumerate() {
+            let ws_num = (i + 1) as u8;
+            let ws_id = WorkspaceId::Numbered(ws_num);
+            self.get_or_create(ws_id.clone());
+            self.monitor_workspaces.insert(mid, ws_id);
+        }
+        if let Some(&first) = monitor_ids.first() {
+            self.focused_monitor = first;
+        }
+        tracing::info!(
+            monitors = monitor_ids.len(),
+            "workspace-monitor assignments initialized"
+        );
+        for (mid, wsid) in &self.monitor_workspaces {
+            tracing::debug!(monitor = mid, workspace = %wsid, "assignment");
+        }
     }
 
-    /// Iterate all workspaces that have been created (have or had windows).
+    pub fn set_focused_monitor(&mut self, monitor: MonitorId) {
+        self.focused_monitor = monitor;
+    }
+
+    pub fn focused_monitor(&self) -> MonitorId {
+        self.focused_monitor
+    }
+
+    pub fn active_id(&self) -> &WorkspaceId {
+        self.monitor_workspaces
+            .get(&self.focused_monitor)
+            .unwrap_or_else(|| {
+                self.monitor_workspaces
+                    .values()
+                    .next()
+                    .expect("no workspaces assigned")
+            })
+    }
+
+    /// Get the active workspace ID for a specific monitor.
+    pub fn active_id_for_monitor(&self, monitor: MonitorId) -> Option<&WorkspaceId> {
+        self.monitor_workspaces.get(&monitor)
+    }
+
+    /// Iterate all workspaces that have been created.
     pub fn all_workspaces(&self) -> impl Iterator<Item = (&WorkspaceId, &Workspace)> {
         self.workspaces.iter()
     }
 
+    /// Get all monitor-workspace assignments.
+    pub fn monitor_assignments(&self) -> &HashMap<MonitorId, WorkspaceId> {
+        &self.monitor_workspaces
+    }
+
     pub fn active(&self) -> &Workspace {
-        &self.workspaces[&self.active]
+        let id = self.active_id();
+        &self.workspaces[id]
     }
 
     pub fn active_mut(&mut self) -> &mut Workspace {
-        // Invariant: active workspace is always in the map (created in new() and switch_to())
-        self.workspaces.get_mut(&self.active).unwrap()
+        let id = self.active_id().clone();
+        // Invariant: active workspace is always in the map
+        self.workspaces.get_mut(&id).unwrap()
     }
 
     pub fn get_or_create(&mut self, id: WorkspaceId) -> &mut Workspace {
@@ -150,9 +208,11 @@ impl WorkspaceManager {
             .or_insert_with(|| Workspace::new(id))
     }
 
-    /// Switch to a different workspace. Returns the transition to apply.
+    /// Switch the focused monitor to a different workspace. Returns the transition to apply.
+    /// If the target workspace is active on another monitor, swap workspaces.
     pub fn switch_to(&mut self, target_id: WorkspaceId, screen_rect: Rect) -> WorkspaceTransition {
-        if target_id == self.active {
+        let current_id = self.active_id().clone();
+        if target_id == current_id {
             return WorkspaceTransition {
                 hide: vec![],
                 show: vec![],
@@ -160,7 +220,14 @@ impl WorkspaceManager {
             };
         }
 
-        // Collect windows to hide from current workspace
+        // Check if target workspace is active on another monitor — if so, swap
+        let other_monitor = self
+            .monitor_workspaces
+            .iter()
+            .find(|(mid, wsid)| **wsid == target_id && **mid != self.focused_monitor)
+            .map(|(mid, _)| *mid);
+
+        // Collect windows to hide from current workspace on focused monitor
         let hide = self.active().all_window_ids();
 
         // Activate target workspace
@@ -168,7 +235,13 @@ impl WorkspaceManager {
         let show = target.tree.calculate_geometries(screen_rect);
         let focus = target.focused.or_else(|| target.tree.first_window());
 
-        self.active = target_id;
+        // Update monitor-workspace mapping
+        if let Some(other_mid) = other_monitor {
+            // Swap: other monitor gets our old workspace, we get target
+            self.monitor_workspaces.insert(other_mid, current_id);
+        }
+        self.monitor_workspaces
+            .insert(self.focused_monitor, target_id);
 
         WorkspaceTransition { hide, show, focus }
     }
@@ -181,7 +254,7 @@ impl WorkspaceManager {
         target_id: WorkspaceId,
         screen_rect: Rect,
     ) -> bool {
-        if target_id == self.active {
+        if target_id == *self.active_id() {
             return false;
         }
 
@@ -208,11 +281,11 @@ impl WorkspaceManager {
         true
     }
 
-    /// Find which workspace contains a window.
+    /// Find which workspace contains a window (tiled or floating).
     pub fn workspace_for_window(&self, window_id: WindowId) -> Option<&WorkspaceId> {
         self.workspaces
             .iter()
-            .find(|(_, ws)| ws.tree.contains(window_id))
+            .find(|(_, ws)| ws.tree.contains(window_id) || ws.is_floating(window_id))
             .map(|(id, _)| id)
     }
 }
