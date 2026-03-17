@@ -191,8 +191,6 @@ impl WmState {
                 let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
             }
             self.workspaces.active_mut().record_focus(id);
-            // Ensure all floating windows stay above tiled windows
-            self.raise_floating_windows();
             tracing::debug!(id, "focused window");
         }
     }
@@ -672,6 +670,17 @@ impl WmState {
                 {
                     let (width, height) = (w.width, w.height);
                     self.registry.update_geometry(id, x, y, width, height);
+                    // Update floating window geometry so FFM uses correct bounds
+                    if let Some(fw) = self
+                        .workspaces
+                        .active_mut()
+                        .floating
+                        .iter_mut()
+                        .find(|f| f.id == id)
+                    {
+                        fw.geometry.x = x;
+                        fw.geometry.y = y;
+                    }
                 }
             }
             WindowEvent::Resized { element, .. } => {
@@ -680,6 +689,15 @@ impl WmState {
                         (ax_get_position(element), ax_get_size(element))
                 {
                     self.registry.update_geometry(id, x, y, w, h);
+                    if let Some(fw) = self
+                        .workspaces
+                        .active_mut()
+                        .floating
+                        .iter_mut()
+                        .find(|f| f.id == id)
+                    {
+                        fw.geometry = Rect::new(x, y, w, h);
+                    }
                 }
             }
             WindowEvent::TitleChanged { element, .. } => {
