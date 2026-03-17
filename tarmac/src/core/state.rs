@@ -732,6 +732,15 @@ impl WmState {
             return;
         }
 
+        tracing::debug!(
+            id,
+            app_name,
+            title,
+            subrole,
+            rules_count = self.rules.len(),
+            "add_window_to_active"
+        );
+
         // Check window rules for matching (case-insensitive substring)
         let mut rule_float: Option<bool> = None;
         let mut rule_workspace: Option<u8> = None;
