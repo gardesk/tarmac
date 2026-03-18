@@ -1131,11 +1131,21 @@ impl WmState {
         }
     }
 
-    /// Hide a single window using WindowServer alpha.
-    /// apply_layout restores alpha=1.0 when a window's workspace becomes visible.
+    /// Hide a single window using alpha + AX position off-screen.
+    /// Some apps (e.g. Music) restore their own visibility when they process
+    /// an AX resize/position, overriding SLSSetWindowAlpha. So we also send
+    /// an AX position command to move the window far off-screen — this goes
+    /// through the same AX channel and overrides any prior position commands.
+    /// apply_layout restores both alpha=1.0 and correct position when the
+    /// window's workspace becomes visible.
     fn hide_window(&self, wid: super::window::WindowId) {
-        let ok = crate::platform::skylight::set_window_alpha(wid, 0.0);
-        tracing::debug!(wid, ok, "hide_window alpha=0");
+        crate::platform::skylight::set_window_alpha(wid, 0.0);
+        if let Some(ax_ref) = self.ax_refs.get(&wid) {
+            // Use AX position (same channel as apply_layout) to ensure the
+            // app processes this AFTER any prior positioning commands.
+            let _ = ax_set_position(ax_ref, -30000.0, 30000.0);
+        }
+        tracing::debug!(wid, "hide_window");
     }
 
     pub fn workspace_next(&mut self) {
