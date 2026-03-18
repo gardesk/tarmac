@@ -202,6 +202,7 @@ impl WmState {
         self.apply_layout();
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
+        self.fix_oversized_windows();
         self.install_observers_for_all();
 
         tracing::info!(observers = self.observers.len(), "observers installed");
@@ -272,6 +273,74 @@ impl WmState {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    /// After layout, check for windows that overflow their tiles.
+    /// Try swapping the oversized window into the largest available tile.
+    /// If it still doesn't fit, auto-float it.
+    pub fn fix_oversized_windows(&mut self) {
+        for mi in 0..self.monitors.len() {
+            let ws_idx = self.monitors[mi].active_workspace;
+            let screen_rect = self.monitor_rect(mi);
+            let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
+                screen_rect, self.gap_inner, self.gap_outer, true,
+            );
+            if geometries.is_empty() { continue; }
+
+            // Find windows that overflow their tiles
+            let mut oversized: Vec<(super::window::WindowId, f64, f64)> = Vec::new();
+            for (wid, rect) in &geometries {
+                if let Some(ax_ref) = self.ax_refs.get(wid) {
+                    if let Ok((aw, ah)) = ax_get_size(ax_ref) {
+                        if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
+                            oversized.push((*wid, aw, ah));
+                        }
+                    }
+                }
+            }
+
+            for (oversized_wid, min_w, min_h) in oversized {
+                // Find the largest tile that could fit this window
+                let best_swap = geometries.iter()
+                    .filter(|(wid, _)| *wid != oversized_wid)
+                    .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
+                    .max_by(|(_, a), (_, b)| {
+                        (a.width * a.height).partial_cmp(&(b.width * b.height))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(wid, _)| *wid);
+
+                if let Some(swap_target) = best_swap {
+                    // Swap in the BSP tree and re-apply layout
+                    tracing::info!(
+                        oversized = oversized_wid, target = swap_target,
+                        "swapping oversized window into larger tile"
+                    );
+                    self.workspaces.get_mut(ws_idx).tree.swap(oversized_wid, swap_target);
+                    self.apply_layout();
+                } else {
+                    // No tile large enough — auto-float
+                    tracing::info!(
+                        id = oversized_wid, min_w, min_h,
+                        "auto-floating window that exceeds all tiles"
+                    );
+                    let sr = self.monitor_rect(mi);
+                    self.workspaces.get_mut(ws_idx).toggle_float(oversized_wid, sr);
+                    if let Some(ax_ref) = self.ax_refs.get(&oversized_wid) {
+                        // Center the floated window
+                        let fx = sr.x + (sr.width - min_w) / 2.0;
+                        let fy = sr.y + (sr.height - min_h) / 2.0;
+                        let _ = ax_set_position(ax_ref, fx, fy);
+                        let _ = ax_set_size(ax_ref, min_w, min_h);
+                    }
+                    use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+                    set_window_level(oversized_wid, K_CG_FLOATING_WINDOW_LEVEL);
+                    self.apply_layout();
+                }
+                // Only fix one window per pass to avoid cascading swaps
+                break;
             }
         }
     }
@@ -701,6 +770,7 @@ impl WmState {
             self.apply_layout();
             std::thread::sleep(std::time::Duration::from_millis(50));
             self.apply_layout();
+            self.fix_oversized_windows();
             if let Some(wid) = self.workspaces.get(target_idx).focused {
                 self.focus_window(wid);
             }
@@ -1261,6 +1331,7 @@ impl WmState {
                     element.clone(),
                 );
                 self.apply_layout();
+                self.fix_oversized_windows();
             }
             WindowEvent::Destroyed { element, .. } => {
                 if let Ok(id) = ax_get_window_id(element)
