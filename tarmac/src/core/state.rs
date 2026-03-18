@@ -421,23 +421,18 @@ impl WmState {
                     None => break,
                 };
 
-                // Find next workspace to try, including those with existing windows.
-                // Skip the current workspace and any already processed.
-                // Cap at 20 workspaces to prevent runaway creation.
-                let max_ws = 20;
-                let next_ws = (evict_search_from..self.workspaces.count().min(max_ws))
-                    .find(|&i| i != ws_idx && !processed.contains(&i));
+                // Find next non-visible workspace to evict to.
+                // Only evict to non-visible workspaces — visible ones would
+                // need immediate overflow checking with potentially stale sizes.
+                let next_ws = (evict_search_from..self.workspaces.count())
+                    .find(|&i| i != ws_idx && !self.workspaces.get(i).visible);
                 let next_ws = match next_ws {
                     Some(ws) => ws,
-                    None if self.workspaces.count() < max_ws => {
+                    None => {
+                        // All workspaces visible or exhausted — create one
                         let idx = self.workspaces.count();
                         self.workspaces.get_or_create(idx);
                         idx
-                    }
-                    None => {
-                        // Hit workspace cap — float as last resort
-                        self.float_oversized_on_workspace(ws_idx, screen_rect);
-                        break;
                     }
                 };
                 evict_search_from = next_ws + 1;
@@ -486,8 +481,15 @@ impl WmState {
                 );
                 target_ws.record_focus(oversized_wid);
 
-                // Queue the target workspace for overflow checking
-                if !processed.contains(&next_ws) && !pending.contains(&next_ws) {
+                // Only queue VISIBLE target workspaces for overflow checking.
+                // Non-visible workspaces have stale ax_get_size values and will
+                // be checked when the user switches to them (switch_workspace
+                // calls fix_oversized_windows). This prevents runaway eviction
+                // chains caused by stale sizes.
+                if self.monitor_showing_workspace(next_ws).is_some()
+                    && !processed.contains(&next_ws)
+                    && !pending.contains(&next_ws)
+                {
                     pending.push(next_ws);
                 }
             }
