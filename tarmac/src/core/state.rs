@@ -1438,12 +1438,16 @@ impl WmState {
 
     /// After moving a window to a specific workspace, try swaps to fix overflow.
     /// If no swap works, float the window centered instead of evicting.
+    /// Only runs when the target workspace is visible — hidden workspaces have
+    /// stale window sizes and will be checked when switched to.
     fn fix_oversized_on_target(&mut self, ws_idx: usize, moved_wid: super::window::WindowId) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Only check visible workspaces — hidden windows have stale sizes
+        let screen_rect = match self.monitor_showing_workspace(ws_idx) {
+            Some(mi) => self.monitor_rect(mi),
+            None => return, // Will be checked on switch_workspace
+        };
 
-        let screen_rect = self.monitor_showing_workspace(ws_idx)
-            .map(|mi| self.monitor_rect(mi))
-            .unwrap_or_else(|| self.focused_rect());
+        std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Check if the moved window actually overflows
         let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
