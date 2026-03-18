@@ -319,59 +319,75 @@ impl WmState {
                 .unwrap_or_else(|| self.focused_rect());
 
             // Phase 1: Swap oversized windows into larger tiles.
-            // "Settled" windows are those already placed in a good tile by a prior
-            // swap — they cannot be displaced, preventing ping-pong loops.
-            // "No-swap" windows had no valid swap target — skip them so we can
-            // still try swapping OTHER oversized windows that might have targets.
+            // Batch all swaps using BSP geometry (no AX calls), then apply layout
+            // once and settle. This is both faster (one layout instead of N) and
+            // more correct (displaced windows settle before re-checking).
             let mut settled: Vec<super::window::WindowId> = Vec::new();
-            let mut no_swap: Vec<super::window::WindowId> = Vec::new();
-            loop {
-                let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
-                    screen_rect, self.gap_inner, self.gap_outer, true,
-                );
-                if geometries.is_empty() { break; }
+            let mut did_any_swap = true;
+            while did_any_swap {
+                did_any_swap = false;
+                let mut no_swap: Vec<super::window::WindowId> = Vec::new();
 
-                // Find the first oversized window (skip settled and no-swap)
-                let oversized = geometries.iter().find_map(|(wid, rect)| {
-                    if settled.contains(wid) || no_swap.contains(wid) { return None; }
-                    let ax_ref = self.ax_refs.get(wid)?;
-                    let (aw, ah) = ax_get_size(ax_ref).ok()?;
-                    if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
-                        Some((*wid, aw, ah))
-                    } else {
-                        None
-                    }
-                });
-
-                let (ow, min_w, min_h) = match oversized {
-                    Some(v) => v,
-                    None => break, // All windows fit, settled, or exhausted swaps
-                };
-
-                let best_swap = geometries.iter()
-                    .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
-                    .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
-                    .max_by(|(_, a), (_, b)| {
-                        (a.width * a.height).partial_cmp(&(b.width * b.height))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(wid, _)| *wid);
-
-                if let Some(swap_target) = best_swap {
-                    tracing::info!(
-                        oversized = ow, target = swap_target,
-                        ws = ws_idx + 1, "swapping oversized window into larger tile"
+                loop {
+                    // Geometries are computed from the BSP tree (cheap, no AX).
+                    // After batched swaps, tree geometry reflects the new layout
+                    // even before apply_layout sends AX commands.
+                    let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
+                        screen_rect, self.gap_inner, self.gap_outer, true,
                     );
-                    self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
-                    self.apply_layout();
-                    settled.push(ow);
-                    // Clear no_swap — tiles changed, previously-blocked windows
-                    // might now have valid swap targets
-                    no_swap.clear();
-                } else {
-                    // No swap for this window — skip it and try others
-                    no_swap.push(ow);
+                    if geometries.is_empty() { break; }
+
+                    // Find the first oversized window (skip settled and no-swap).
+                    // Use the pre-swap ax_get_size (actual minimum) against the
+                    // BSP-computed tile rect to decide if a swap is needed.
+                    let oversized = geometries.iter().find_map(|(wid, rect)| {
+                        if settled.contains(wid) || no_swap.contains(wid) { return None; }
+                        let ax_ref = self.ax_refs.get(wid)?;
+                        let (aw, ah) = ax_get_size(ax_ref).ok()?;
+                        if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
+                            Some((*wid, aw, ah))
+                        } else {
+                            None
+                        }
+                    });
+
+                    let (ow, min_w, min_h) = match oversized {
+                        Some(v) => v,
+                        None => break,
+                    };
+
+                    let best_swap = geometries.iter()
+                        .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
+                        .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
+                        .max_by(|(_, a), (_, b)| {
+                            (a.width * a.height).partial_cmp(&(b.width * b.height))
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                        .map(|(wid, _)| *wid);
+
+                    if let Some(swap_target) = best_swap {
+                        tracing::info!(
+                            oversized = ow, target = swap_target,
+                            ws = ws_idx + 1, "swapping oversized window into larger tile"
+                        );
+                        // Swap in BSP tree only — no apply_layout yet
+                        self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
+                        settled.push(ow);
+                        did_any_swap = true;
+                        // Don't break — continue scanning for more swaps in the
+                        // same pass using updated BSP geometry
+                    } else {
+                        no_swap.push(ow);
+                    }
                 }
+
+                if did_any_swap {
+                    // Single apply_layout for all swaps in this pass, then settle
+                    self.apply_layout();
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                // Outer loop re-checks: displaced windows may now overflow after
+                // settling. The settled set prevents ping-pong.
             }
 
             // Phase 2: Evict remaining oversized windows that couldn't be fixed by swaps.
