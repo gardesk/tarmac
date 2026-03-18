@@ -465,14 +465,12 @@ impl WmState {
                 );
                 target_ws.record_focus(oversized_wid);
 
+                // Hide the evicted window BEFORE apply_layout. Always hide,
+                // even on visible workspaces — the recursive check will restore
+                // alpha=1.0 via apply_layout if the window stays on that workspace.
+                // If it gets re-evicted, it stays hidden (no flash).
+                self.hide_window(oversized_wid);
                 self.apply_layout();
-
-                // Hide AFTER apply_layout to win the race against any prior
-                // AX position commands that may have placed the window on-screen
-                // (e.g. when evicting from a visible workspace like ws2→ws3).
-                if !self.workspaces.get(next_ws).visible {
-                    self.hide_window(oversized_wid);
-                }
 
                 // Queue the target workspace for overflow checking
                 if !processed.contains(&next_ws) && !pending.contains(&next_ws) {
@@ -1097,12 +1095,12 @@ impl WmState {
         }
     }
 
-    /// Hide a single window: alpha=0 + SkyLight move far off-screen.
-    /// Uses alpha for instant visual hide and SLSMoveWindow for position
-    /// (bypasses AX clamping that keeps windows partially on-screen).
+    /// Hide a single window using WindowServer alpha.
+    /// Alpha=0 is the only reliable hide — AX position clamping prevents
+    /// truly off-screen moves, and SLSMoveWindow has inconsistent behavior.
+    /// apply_layout restores alpha=1.0 when a window's workspace becomes visible.
     fn hide_window(&self, wid: super::window::WindowId) {
         crate::platform::skylight::set_window_alpha(wid, 0.0);
-        crate::platform::skylight::move_window(wid, -10000.0, 10000.0);
     }
 
     pub fn workspace_next(&mut self) {
