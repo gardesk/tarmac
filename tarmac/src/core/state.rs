@@ -400,6 +400,12 @@ impl WmState {
                 );
                 if geometries.is_empty() { break; }
 
+                // A single window alone on a workspace can never truly overflow —
+                // it gets the full screen. ax_get_size may return a stale size from
+                // a previous tile, not the actual minimum. Skip overflow detection
+                // for solo windows.
+                if geometries.len() <= 1 { break; }
+
                 let oversized = geometries.iter().find_map(|(wid, rect)| {
                     let ax_ref = self.ax_refs.get(wid)?;
                     let (aw, ah) = ax_get_size(ax_ref).ok()?;
@@ -417,14 +423,23 @@ impl WmState {
 
                 // Find next workspace to try, including those with existing windows.
                 // Skip the current workspace and any already processed.
-                let next_ws = (evict_search_from..self.workspaces.count())
-                    .find(|&i| i != ws_idx && !processed.contains(&i))
-                    .unwrap_or_else(|| {
+                // Cap at 20 workspaces to prevent runaway creation.
+                let max_ws = 20;
+                let next_ws = (evict_search_from..self.workspaces.count().min(max_ws))
+                    .find(|&i| i != ws_idx && !processed.contains(&i));
+                let next_ws = match next_ws {
+                    Some(ws) => ws,
+                    None if self.workspaces.count() < max_ws => {
                         let idx = self.workspaces.count();
                         self.workspaces.get_or_create(idx);
                         idx
-                    });
-                // Next eviction starts after this one to avoid re-trying same workspace
+                    }
+                    None => {
+                        // Hit workspace cap — float as last resort
+                        self.float_oversized_on_workspace(ws_idx, screen_rect);
+                        break;
+                    }
+                };
                 evict_search_from = next_ws + 1;
 
                 // Check if we've wrapped all the way around.
