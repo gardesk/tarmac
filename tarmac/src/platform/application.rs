@@ -231,25 +231,27 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
 }
 
 /// Activate an application by PID using NSRunningApplication.
-/// Uses activateFromApplication (macOS 14+) with fallback to activateWithOptions.
+/// Tries both activation methods for reliability across macOS versions.
 pub fn activate_app(pid: i32) {
-    let tarmac_pid = std::process::id() as i32;
     let Some(target) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
         return;
     };
 
-    // macOS 14+: activateFromApplication is the non-deprecated path.
-    // It activates the target from the perspective of the calling app,
-    // which reliably updates title bars across monitors.
-    if let Some(caller) = NSRunningApplication::runningApplicationWithProcessIdentifier(tarmac_pid)
-    {
-        #[allow(deprecated)]
-        let opts = objc2_app_kit::NSApplicationActivationOptions::ActivateIgnoringOtherApps;
-        target.activateFromApplication_options(&caller, opts);
-    } else {
-        #[allow(deprecated)]
-        let opts = objc2_app_kit::NSApplicationActivationOptions::ActivateIgnoringOtherApps;
-        target.activateWithOptions(opts);
+    // Try both methods — activateWithOptions is deprecated on macOS 14+
+    // but still works for some cases. activateFromApplication is the
+    // replacement but requires a valid caller app.
+    #[allow(deprecated)]
+    let opts = objc2_app_kit::NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+
+    let ok = target.activateWithOptions(opts);
+    if !ok {
+        // Fallback: try from tarmac's perspective
+        let tarmac_pid = std::process::id() as i32;
+        if let Some(caller) =
+            NSRunningApplication::runningApplicationWithProcessIdentifier(tarmac_pid)
+        {
+            target.activateFromApplication_options(&caller, opts);
+        }
     }
 }
 
@@ -260,13 +262,7 @@ pub fn deactivate_all_windows() {
     if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
         #[allow(deprecated)]
         let opts = objc2_app_kit::NSApplicationActivationOptions::ActivateIgnoringOtherApps;
-        if let Some(caller) =
-            NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
-        {
-            app.activateFromApplication_options(&caller, opts);
-        } else {
-            app.activateWithOptions(opts);
-        }
+        app.activateWithOptions(opts);
     }
 }
 

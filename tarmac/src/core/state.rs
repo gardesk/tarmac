@@ -652,23 +652,30 @@ impl WmState {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
                 // Full activation sequence for reliable cross-monitor focus:
-                // 1. NSRunningApplication.activate (brings app to foreground FIRST)
-                // 2. Set AXFocused on window (tells AX this is the focused window)
-                // 3. Set AXMain on window (makes it the key window)
-                // 4. AXRaise (brings to front of app's window stack)
+                // 1. Set AXFrontmost on the app-level AX element
+                // 2. NSRunningApplication.activate (brings app to foreground)
+                // 3. AXRaise (brings window to front of app's stack)
+                // 4. Set AXMain on window (makes it the key window)
+                // 5. Set AXFocused on window (tells AX this is focused)
                 //
-                // Activating the app first ensures macOS is ready to accept
-                // window-level focus changes. Setting AXFocused explicitly
-                // handles same-app cross-monitor cases (e.g. WezTerm on both
-                // monitors) where activate_app is a no-op.
+                // Setting AXFrontmost on the app AND calling activate_app
+                // covers both same-app (WezTerm→WezTerm) and cross-app cases.
                 if let Some(w) = self.registry.get(id) {
+                    let app_ref = unsafe {
+                        objc2_application_services::AXUIElement::new_application(w.app_pid)
+                    };
+                    let frontmost_key =
+                        objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                    let _ = crate::platform::accessibility::ax_set_bool(
+                        &app_ref, &frontmost_key, true,
+                    );
                     crate::platform::application::activate_app(w.app_pid);
                 }
-                let focused_key = objc2_core_foundation::CFString::from_static_str("AXFocused");
-                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &focused_key, true);
+                let _ = ax_perform_action(ax_ref, "AXRaise");
                 let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
                 let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, true);
-                let _ = ax_perform_action(ax_ref, "AXRaise");
+                let focused_key = objc2_core_foundation::CFString::from_static_str("AXFocused");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &focused_key, true);
             } else {
                 // Soft focus -- update internal tracking only, don't touch macOS.
             }
