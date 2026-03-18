@@ -644,13 +644,7 @@ impl WmState {
         if let Some(mi) = detected_mi {
             if mi != self.focused_monitor {
                 self.focused_monitor = mi;
-                self.ffm_last_window = None;
-                // Clear ws.focused so FFM's `focused != Some(id)` check
-                // passes when the cursor reaches a window. Don't call
-                // focus_window here — the cursor is in the outer gap between
-                // monitors and macOS will ignore AX activation. Let FFM
-                // handle it naturally when cursor enters a tile.
-                self.active_workspace_mut().focused = None;
+                self.ffm_last_window = None; // Reset so FFM re-evaluates
                 tracing::debug!(monitor = mi, "FFM detected monitor change");
             }
         }
@@ -681,12 +675,12 @@ impl WmState {
                 .map(|(id, _)| *id)
         };
 
-        // Only refocus if the window changed
+        // Focus when window under cursor changes. No `ws.focused` guard —
+        // after monitor crossing macOS needs AX re-activation even if our
+        // internal state already tracks the window as focused.
         if window_under != self.ffm_last_window {
             self.ffm_last_window = window_under;
-            if let Some(id) = window_under
-                && self.active_workspace().focused != Some(id)
-            {
+            if let Some(id) = window_under {
                 if self.active_workspace().floating.is_empty() {
                     self.focus_window(id);
                 } else {
@@ -695,15 +689,6 @@ impl WmState {
             }
         }
 
-        // Log near-boundary crossings for diagnosis
-        if x.abs() < 30.0 {
-            tracing::debug!(
-                x = format!("{:.0}", x), y = format!("{:.0}", y),
-                mon = self.focused_monitor,
-                under = ?window_under,
-                "boundary"
-            );
-        }
     }
 
     pub fn toggle_float(&mut self) {
