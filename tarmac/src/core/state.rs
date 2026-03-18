@@ -471,14 +471,7 @@ impl WmState {
                 // AX position commands that may have placed the window on-screen
                 // (e.g. when evicting from a visible workspace like ws2→ws3).
                 if !self.workspaces.get(next_ws).visible {
-                    crate::platform::skylight::set_window_alpha(oversized_wid, 0.0);
-                    if let Some(ax_ref) = self.ax_refs.get(&oversized_wid) {
-                        let hide_frame = self.monitors[self.focused_monitor].frame;
-                        let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                        let _ = ax_set_position(ax_ref,
-                            hide_frame.x + 1.0 - w,
-                            hide_frame.y + hide_frame.height - 1.0);
-                    }
+                    self.hide_window(oversized_wid);
                 }
 
                 // Queue the target workspace for overflow checking
@@ -1088,16 +1081,10 @@ impl WmState {
     }
 
     /// Hide all windows on a workspace using AeroSpace per-monitor approach.
-    fn hide_workspace_windows(&self, ws_idx: usize, monitor_idx: usize) {
-        let hide_frame = self.monitors[monitor_idx].frame;
-        let hide_y = hide_frame.y + hide_frame.height - 1.0;
+    fn hide_workspace_windows(&self, ws_idx: usize, _monitor_idx: usize) {
         let ws = self.workspaces.get(ws_idx);
         for wid in ws.all_window_ids() {
-            if let Some(ax_ref) = self.ax_refs.get(&wid) {
-                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let hide_x = hide_frame.x + 1.0 - w;
-                let _ = ax_set_position(ax_ref, hide_x, hide_y);
-            }
+            self.hide_window(wid);
         }
     }
 
@@ -1106,7 +1093,20 @@ impl WmState {
     fn hide_workspace_windows_immediate(&self, ws_idx: usize) {
         let ws = self.workspaces.get(ws_idx);
         for wid in ws.all_window_ids() {
-            crate::platform::skylight::set_window_alpha(wid, 0.0);
+            self.hide_window(wid);
+        }
+    }
+
+    /// Hide a single window: alpha=0 + position far off all screens.
+    /// Uses alpha for instant visual hide and position to prevent the
+    /// window frame from intercepting clicks or peeking on other monitors.
+    fn hide_window(&self, wid: super::window::WindowId) {
+        crate::platform::skylight::set_window_alpha(wid, 0.0);
+        if let Some(ax_ref) = self.ax_refs.get(&wid) {
+            // Position far below and left of all possible monitors.
+            // macOS screen coordinates can go negative (external left of primary),
+            // so we go to a very large positive Y and large negative X.
+            let _ = ax_set_position(ax_ref, -10000.0, 10000.0);
         }
     }
 
@@ -1464,15 +1464,9 @@ impl WmState {
         }
         target_ws.record_focus(focused);
 
-        // If target is not visible, hide the window (AeroSpace approach)
+        // If target is not visible, hide the window
         if !self.workspaces.get(target_idx).visible {
-            if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let hide_frame = self.monitors[self.focused_monitor].frame;
-                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let _ = ax_set_position(ax_ref,
-                    hide_frame.x + 1.0 - w,
-                    hide_frame.y + hide_frame.height - 1.0);
-            }
+            self.hide_window(focused);
         }
 
         // Double-apply for cross-monitor moves
@@ -1841,14 +1835,7 @@ impl WmState {
             tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
 
             if !is_active {
-                // Hide the window (AeroSpace approach per monitor)
-                if let Some(ax_ref) = self.ax_refs.get(id) {
-                    let hide_frame = self.monitors[self.focused_monitor].frame;
-                    let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                    let _ = ax_set_position(ax_ref,
-                        hide_frame.x + 1.0 - w,
-                        hide_frame.y + hide_frame.height - 1.0);
-                }
+                self.hide_window(*id);
                 // Switch to the target workspace to follow the window
                 self.switch_workspace(ws_num);
             }
