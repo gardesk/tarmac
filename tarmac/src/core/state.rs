@@ -1131,16 +1131,25 @@ impl WmState {
     /// Hide a single window using alpha + AX position off-screen.
     /// Some apps (e.g. Music) restore their own visibility when they process
     /// an AX resize/position, overriding SLSSetWindowAlpha. So we also send
-    /// an AX position command to move the window far off-screen — this goes
-    /// through the same AX channel and overrides any prior position commands.
+    /// an AX position command to move the window off the bottom of the
+    /// lowest monitor — macOS clamps to the window's current monitor, so we
+    /// find the lowest edge across all monitors and position below it.
     /// apply_layout restores both alpha=1.0 and correct position when the
     /// window's workspace becomes visible.
     fn hide_window(&self, wid: super::window::WindowId) {
         crate::platform::skylight::set_window_alpha(wid, 0.0);
         if let Some(ax_ref) = self.ax_refs.get(&wid) {
-            // Use AX position (same channel as apply_layout) to ensure the
-            // app processes this AFTER any prior positioning commands.
-            let _ = ax_set_position(ax_ref, -30000.0, 30000.0);
+            // Find the lowest point and leftmost point across all monitors
+            let max_y = self.monitors.iter()
+                .map(|m| m.frame.y + m.frame.height)
+                .fold(0.0_f64, f64::max);
+            let min_x = self.monitors.iter()
+                .map(|m| m.frame.x)
+                .fold(0.0_f64, f64::min);
+            // Get window width to shift fully left of leftmost monitor
+            let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+            // Position: fully below all monitors AND fully left of all monitors
+            let _ = ax_set_position(ax_ref, min_x - w - 100.0, max_y + 100.0);
         }
         tracing::debug!(wid, "hide_window");
     }
