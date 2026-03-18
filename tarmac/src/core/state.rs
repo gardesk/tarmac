@@ -651,18 +651,24 @@ impl WmState {
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
-                // AeroSpace activation sequence:
-                // 1. Set AXMain on window (makes it the key window)
-                // 2. AXRaise (brings to front of app)
-                // 3. NSRunningApplication.activate (brings app to foreground)
-                // Using activate(options: .activateIgnoringOtherApps) instead
-                // of AXFrontmost — macOS respects this more reliably.
-                let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
-                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, true);
-                let _ = ax_perform_action(ax_ref, "AXRaise");
+                // Full activation sequence for reliable cross-monitor focus:
+                // 1. NSRunningApplication.activate (brings app to foreground FIRST)
+                // 2. Set AXFocused on window (tells AX this is the focused window)
+                // 3. Set AXMain on window (makes it the key window)
+                // 4. AXRaise (brings to front of app's window stack)
+                //
+                // Activating the app first ensures macOS is ready to accept
+                // window-level focus changes. Setting AXFocused explicitly
+                // handles same-app cross-monitor cases (e.g. WezTerm on both
+                // monitors) where activate_app is a no-op.
                 if let Some(w) = self.registry.get(id) {
                     crate::platform::application::activate_app(w.app_pid);
                 }
+                let focused_key = objc2_core_foundation::CFString::from_static_str("AXFocused");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &focused_key, true);
+                let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, true);
+                let _ = ax_perform_action(ax_ref, "AXRaise");
             } else {
                 // Soft focus -- update internal tracking only, don't touch macOS.
             }
