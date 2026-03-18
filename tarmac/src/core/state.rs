@@ -929,6 +929,22 @@ impl WmState {
         self.apply_layout();
         if let Some(wid) = self.active_workspace().focused {
             self.focus_window(wid);
+            if self.mouse_follows_focus {
+                let sr = self.focused_rect();
+                let geoms = self.active_workspace().tree
+                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+                if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
+                    warp_mouse_to_center(rect);
+                } else {
+                    warp_mouse_to_center(&sr);
+                }
+                self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.ffm_last_window = Some(wid);
+            }
+        } else if self.mouse_follows_focus {
+            let sr = self.focused_rect();
+            warp_mouse_to_center(&sr);
+            self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
         }
         tracing::info!(monitor = next, ws = %self.active_workspace().id, "focused monitor");
     }
@@ -940,6 +956,22 @@ impl WmState {
         self.apply_layout();
         if let Some(wid) = self.active_workspace().focused {
             self.focus_window(wid);
+            if self.mouse_follows_focus {
+                let sr = self.focused_rect();
+                let geoms = self.active_workspace().tree
+                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+                if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
+                    warp_mouse_to_center(rect);
+                } else {
+                    warp_mouse_to_center(&sr);
+                }
+                self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.ffm_last_window = Some(wid);
+            }
+        } else if self.mouse_follows_focus {
+            let sr = self.focused_rect();
+            warp_mouse_to_center(&sr);
+            self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
         }
         tracing::info!(monitor = prev, ws = %self.active_workspace().id, "focused monitor");
     }
