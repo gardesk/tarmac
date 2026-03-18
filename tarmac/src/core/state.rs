@@ -222,7 +222,13 @@ impl WmState {
     // --- Layout ---
 
     /// Apply layout for ALL visible workspaces on their respective monitors.
+    /// Uses the yabai/AeroSpace pattern: disable AXEnhancedUserInterface,
+    /// then size → position → size per window.
     pub fn apply_layout(&self) {
+        use crate::platform::accessibility::ax_set_bool;
+        let eui_key =
+            objc2_core_foundation::CFString::from_static_str("AXEnhancedUserInterface");
+
         for (mi, monitor) in self.monitors.iter().enumerate() {
             let ws = self.workspaces.get(monitor.active_workspace);
             let screen_rect = self.monitor_rect(mi);
@@ -232,34 +238,37 @@ impl WmState {
             tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
-            // Three-pass layout to handle cross-monitor moves:
-            // Pass 1: position all windows to their target monitor.
-            // This ensures macOS knows which display each window is on.
+
             for (wid, rect) in &geometries {
                 tracing::debug!(wid, x = rect.x, y = rect.y, w = rect.width, h = rect.height, "tile");
                 if let Some(ax_ref) = self.ax_refs.get(wid) {
-                    let _ = ax_set_position(ax_ref, rect.x, rect.y);
-                }
-            }
-            // Pass 2: resize all windows. Now macOS evaluates size
-            // constraints on the correct display.
-            for (wid, rect) in &geometries {
-                if let Some(ax_ref) = self.ax_refs.get(wid) {
+                    // Get the app-level AX element to toggle AXEnhancedUserInterface
+                    let app_ref = if let Some(w) = self.registry.get(*wid) {
+                        Some(unsafe { AXUIElement::new_application(w.app_pid) })
+                    } else {
+                        None
+                    };
+
+                    // Disable AXEnhancedUserInterface (yabai/AeroSpace workaround).
+                    // This makes macOS more compliant with resize requests.
+                    let was_eui = app_ref.as_ref().and_then(|app| {
+                        crate::platform::accessibility::ax_get_bool(app, &eui_key).ok()
+                    });
+                    if was_eui == Some(true) {
+                        if let Some(app) = &app_ref {
+                            let _ = ax_set_bool(app, &eui_key, false);
+                        }
+                    }
+
+                    // Size → Position → Size (yabai/AeroSpace order)
                     let _ = ax_set_size(ax_ref, rect.width, rect.height);
-                }
-            }
-            // Pass 3: final position + retry oversized windows.
-            // Position all at tile origin. If a window refused the size
-            // (e.g. Firefox min-width 500px), try resizing one more time
-            // now that the window is confirmed on the right monitor.
-            // Any remaining overflow goes right/down into the gap.
-            for (wid, rect) in &geometries {
-                if let Some(ax_ref) = self.ax_refs.get(wid) {
                     let _ = ax_set_position(ax_ref, rect.x, rect.y);
-                    // Retry size — window is now definitely on the right monitor
-                    if let Ok((aw, ah)) = ax_get_size(ax_ref) {
-                        if (aw - rect.width).abs() > 1.0 || (ah - rect.height).abs() > 1.0 {
-                            let _ = ax_set_size(ax_ref, rect.width, rect.height);
+                    let _ = ax_set_size(ax_ref, rect.width, rect.height);
+
+                    // Restore AXEnhancedUserInterface
+                    if was_eui == Some(true) {
+                        if let Some(app) = &app_ref {
+                            let _ = ax_set_bool(app, &eui_key, true);
                         }
                     }
                 }

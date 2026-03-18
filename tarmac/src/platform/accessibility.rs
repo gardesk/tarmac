@@ -192,6 +192,13 @@ pub fn ax_set_bool(element: &AXUIElement, attr: &CFString, value: bool) -> AxRes
     check(err)
 }
 
+/// Get a boolean attribute value from an AXUIElement.
+pub fn ax_get_bool(element: &AXUIElement, attr: &CFString) -> AxResult<bool> {
+    let value = ax_copy_attribute(element, attr)?;
+    let ptr = &*value as *const CFType as *const c_void;
+    Ok(ptr == unsafe { kCFBooleanTrue })
+}
+
 /// Perform an action on an AXUIElement (e.g., AXRaise, AXPress).
 pub fn ax_perform_action(element: &AXUIElement, action: &'static str) -> AxResult<()> {
     let action_str = CFString::from_static_str(action);
