@@ -17,6 +17,14 @@ pub const K_CG_FLOATING_WINDOW_LEVEL: c_int = 3;
 unsafe extern "C" {
     fn SLSMainConnectionID() -> CGSConnectionID;
     fn SLSSetWindowLevel(cid: CGSConnectionID, wid: u32, level: c_int) -> CGError;
+    fn SLSSetWindowAlpha(cid: CGSConnectionID, wid: u32, alpha: f32) -> CGError;
+}
+
+/// Set a window's opacity in the WindowServer (0.0 = invisible, 1.0 = opaque).
+pub fn set_window_alpha(window_id: u32, alpha: f32) -> bool {
+    let cid = unsafe { SLSMainConnectionID() };
+    let result = unsafe { SLSSetWindowAlpha(cid, window_id, alpha) };
+    result == 0
 }
 
 /// Set a window's z-level in the WindowServer.
