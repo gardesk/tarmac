@@ -52,7 +52,6 @@ pub struct WmState {
     event_queue: Rc<RefCell<Vec<QueuedEvent>>>,
     ffm_cooldown_until: Option<std::time::Instant>,
     ffm_last_window: Option<WindowId>,
-    ffm_crossed_monitor: bool,
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
@@ -80,7 +79,6 @@ impl WmState {
             event_queue: Rc::new(RefCell::new(Vec::new())),
             ffm_cooldown_until: None,
             ffm_last_window: None,
-            ffm_crossed_monitor: false,
             drag: None,
             focus_follows_mouse: true,
             mouse_follows_focus: true,
@@ -476,11 +474,6 @@ impl WmState {
         self.focus_window_impl(id, true);
     }
 
-    /// Focus a window without app activation. Used for FFM to avoid z-order disruption.
-    pub fn focus_window_soft(&mut self, id: WindowId) {
-        self.focus_window_impl(id, false);
-    }
-
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
@@ -673,7 +666,6 @@ impl WmState {
             if mi != self.focused_monitor {
                 self.focused_monitor = mi;
                 self.ffm_last_window = None;
-                self.ffm_crossed_monitor = true; // Bypass focused guard once
                 tracing::debug!(monitor = mi, "FFM detected monitor change");
 
                 // If the new monitor's workspace is empty, deactivate all
@@ -713,23 +705,17 @@ impl WmState {
                 .map(|(id, _)| *id)
         };
 
-        // Refocus when window under cursor changes
+        // Refocus when window under cursor changes.
+        // The outer guard (window_under != ffm_last_window) is the only
+        // dedup we need — it fires once per window crossing.  No inner
+        // "need_focus" guard: ws.focused can drift from macOS's actual
+        // focus (keyboard nav, click, queued events), so always issue
+        // the full AX activation sequence.  enforce_floating_levels()
+        // inside focus_window keeps floating z-order correct.
         if window_under != self.ffm_last_window {
             self.ffm_last_window = window_under;
             if let Some(id) = window_under {
-                // After monitor crossing, bypass the focused guard — macOS
-                // lost OS-level focus even if our state tracks it.
-                // On same-monitor, the guard prevents redundant AX calls.
-                let need_focus = self.ffm_crossed_monitor
-                    || self.active_workspace().focused != Some(id);
-                if need_focus {
-                    if self.active_workspace().floating.is_empty() {
-                        self.focus_window(id);
-                    } else {
-                        self.focus_window_soft(id);
-                    }
-                    self.ffm_crossed_monitor = false;
-                }
+                self.focus_window(id);
             }
         }
 
@@ -795,10 +781,12 @@ impl WmState {
                 .map(|(id, _)| *id)
         };
 
-        if let Some(id) = id
-            && self.active_workspace().focused != Some(id)
-        {
-            self.focus_window(id);
+        if let Some(id) = id {
+            // Sync FFM tracker so mouse_moved doesn't re-trigger on the same window
+            self.ffm_last_window = Some(id);
+            if self.active_workspace().focused != Some(id) {
+                self.focus_window(id);
+            }
         }
     }
 
