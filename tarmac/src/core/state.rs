@@ -318,58 +318,73 @@ impl WmState {
                 .map(|mi| self.monitor_rect(mi))
                 .unwrap_or_else(|| self.focused_rect());
 
-            // Phase 1: Identify ALL oversized windows and try swaps.
-            // Collect the full set so we only swap with non-oversized windows,
-            // preventing ping-pong loops (e.g. Firefox ↔ Messages).
-            let mut did_swap = true;
-            while did_swap {
-                did_swap = false;
+            // Phase 1: Swap oversized windows into larger tiles.
+            // "Settled" windows are those already placed in a good tile by a prior
+            // swap — they cannot be displaced, preventing ping-pong loops.
+            let mut settled: Vec<super::window::WindowId> = Vec::new();
+            loop {
                 let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
                     screen_rect, self.gap_inner, self.gap_outer, true,
                 );
                 if geometries.is_empty() { break; }
 
-                // Build the full set of oversized window IDs
-                let oversized_set: Vec<super::window::WindowId> = geometries.iter()
-                    .filter_map(|(wid, rect)| {
-                        let ax_ref = self.ax_refs.get(wid)?;
-                        let (aw, ah) = ax_get_size(ax_ref).ok()?;
-                        if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
-                            Some(*wid)
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                if oversized_set.is_empty() { break; }
-
-                // Try to swap each oversized window with a NON-oversized window
-                // in a tile large enough to fit it.
-                for &ow in &oversized_set {
-                    let (min_w, min_h) = self.ax_refs.get(&ow)
-                        .and_then(|ax| ax_get_size(ax).ok())
-                        .unwrap_or((0.0, 0.0));
-
-                    let best_swap = geometries.iter()
-                        .filter(|(wid, _)| *wid != ow && !oversized_set.contains(wid))
-                        .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
-                        .max_by(|(_, a), (_, b)| {
-                            (a.width * a.height).partial_cmp(&(b.width * b.height))
-                                .unwrap_or(std::cmp::Ordering::Equal)
-                        })
-                        .map(|(wid, _)| *wid);
-
-                    if let Some(swap_target) = best_swap {
-                        tracing::info!(
-                            oversized = ow, target = swap_target,
-                            ws = ws_idx + 1, "swapping oversized window into larger tile"
-                        );
-                        self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
-                        self.apply_layout();
-                        did_swap = true;
-                        break; // Restart detection — geometries changed
+                // Find the first oversized window (skip settled ones — they're fine)
+                let oversized = geometries.iter().find_map(|(wid, rect)| {
+                    if settled.contains(wid) { return None; }
+                    let ax_ref = self.ax_refs.get(wid)?;
+                    let (aw, ah) = ax_get_size(ax_ref).ok()?;
+                    if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
+                        Some((*wid, aw, ah))
+                    } else {
+                        None
                     }
+                });
+
+                let (ow, min_w, min_h) = match oversized {
+                    Some(v) => v,
+                    None => break, // All windows fit or are settled
+                };
+
+                // Find best swap target: non-settled, non-oversized, large enough
+                let best_swap = geometries.iter()
+                    .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
+                    .filter(|(wid, rect)| {
+                        // Target tile must fit the oversized window
+                        if rect.width < min_w - 1.0 || rect.height < min_h - 1.0 {
+                            return false;
+                        }
+                        // The displaced window must also fit in the oversized window's
+                        // current (small) tile, otherwise we just create a new overflow
+                        let displaced_ok = self.ax_refs.get(wid)
+                            .and_then(|ax| ax_get_size(ax).ok())
+                            .map(|(dw, dh)| {
+                                // Get the oversized window's current tile
+                                let ow_tile = geometries.iter()
+                                    .find(|(id, _)| *id == ow)
+                                    .map(|(_, r)| r);
+                                ow_tile.is_none_or(|t| dw <= t.width + 1.0 && dh <= t.height + 1.0)
+                            })
+                            .unwrap_or(true);
+                        displaced_ok
+                    })
+                    .max_by(|(_, a), (_, b)| {
+                        (a.width * a.height).partial_cmp(&(b.width * b.height))
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(wid, _)| *wid);
+
+                if let Some(swap_target) = best_swap {
+                    tracing::info!(
+                        oversized = ow, target = swap_target,
+                        ws = ws_idx + 1, "swapping oversized window into larger tile"
+                    );
+                    self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
+                    self.apply_layout();
+                    // Mark the oversized window as settled — it's now in a good tile
+                    settled.push(ow);
+                } else {
+                    // No valid swap — this window will be handled by eviction
+                    break;
                 }
             }
 
@@ -1422,6 +1437,7 @@ impl WmState {
         self.apply_layout();
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
+        self.fix_oversized_windows();
         if let Some(next) = self.active_workspace().focused {
             self.focus_window(next);
         }
