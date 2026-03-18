@@ -367,6 +367,42 @@ impl Node {
             .map(|(w, _)| *w)
     }
 
+    /// Find the window nearest to the entry edge when crossing monitors.
+    /// When entering from the Left (pressing Right), picks the window with smallest center-x.
+    /// When entering from the Right (pressing Left), picks the window with largest center-x.
+    pub fn nearest_to_edge(
+        geometries: &[(WindowId, Rect)],
+        direction: Direction,
+    ) -> Option<WindowId> {
+        if geometries.is_empty() {
+            return None;
+        }
+        geometries
+            .iter()
+            .min_by(|(_, a), (_, b)| {
+                let (acx, _) = a.center();
+                let (bcx, _) = b.center();
+                match direction {
+                    // Pressing Right → entering target from left → want leftmost (smallest x)
+                    Direction::Right => acx.partial_cmp(&bcx).unwrap_or(std::cmp::Ordering::Equal),
+                    // Pressing Left → entering target from right → want rightmost (largest x)
+                    Direction::Left => bcx.partial_cmp(&acx).unwrap_or(std::cmp::Ordering::Equal),
+                    // Up/Down: use y instead
+                    Direction::Down => {
+                        let (_, acy) = a.center();
+                        let (_, bcy) = b.center();
+                        acy.partial_cmp(&bcy).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                    Direction::Up => {
+                        let (_, acy) = a.center();
+                        let (_, bcy) = b.center();
+                        bcy.partial_cmp(&acy).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                }
+            })
+            .map(|(w, _)| *w)
+    }
+
     /// Resize the split affecting a window in the given direction.
     pub fn resize(&mut self, window: WindowId, direction: Direction, delta: f32) -> bool {
         match self {
@@ -891,6 +927,48 @@ mod tests {
         assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Up), Some(2));
         assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Right), Some(4));
         assert_eq!(Node::find_adjacent(&geoms, 4, Direction::Left), Some(3));
+    }
+
+    // --- Nearest to edge tests ---
+
+    #[test]
+    fn nearest_to_edge_picks_leftmost_on_right_cross() {
+        // Simulate 4-window layout
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+        let geoms = tree.calculate_geometries(SCREEN);
+        // Pressing Right to enter this monitor → want leftmost window
+        // Win1 is at x=0 (leftmost)
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Right), Some(1));
+    }
+
+    #[test]
+    fn nearest_to_edge_picks_rightmost_on_left_cross() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+        let geoms = tree.calculate_geometries(SCREEN);
+        // Pressing Left to enter this monitor → want rightmost window
+        // Win4 center=(1680,810) is rightmost
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Left), Some(4));
+    }
+
+    #[test]
+    fn nearest_to_edge_empty() {
+        let geoms: Vec<(WindowId, Rect)> = vec![];
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Right), None);
+    }
+
+    #[test]
+    fn nearest_to_edge_single_window() {
+        let geoms = vec![(1, Rect::new(0.0, 0.0, 1920.0, 1080.0))];
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Right), Some(1));
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Left), Some(1));
     }
 
     // --- Gap tests ---

@@ -42,6 +42,28 @@ pub fn prev_index(monitors: &[Monitor], from: usize) -> usize {
     sorted[if pos == 0 { sorted.len() - 1 } else { pos - 1 }]
 }
 
+/// Next monitor index in position order (no wrapping — returns None at rightmost edge).
+pub fn next_index_nowrap(monitors: &[Monitor], from: usize) -> Option<usize> {
+    let sorted = sorted_indices(monitors);
+    let pos = sorted.iter().position(|&i| i == from).unwrap_or(0);
+    if pos + 1 < sorted.len() {
+        Some(sorted[pos + 1])
+    } else {
+        None
+    }
+}
+
+/// Previous monitor index in position order (no wrapping — returns None at leftmost edge).
+pub fn prev_index_nowrap(monitors: &[Monitor], from: usize) -> Option<usize> {
+    let sorted = sorted_indices(monitors);
+    let pos = sorted.iter().position(|&i| i == from).unwrap_or(0);
+    if pos > 0 {
+        Some(sorted[pos - 1])
+    } else {
+        None
+    }
+}
+
 /// Find which monitor index contains a screen point.
 pub fn index_at_point(monitors: &[Monitor], x: f64, y: f64) -> Option<usize> {
     monitors
@@ -93,6 +115,28 @@ mod tests {
         assert_eq!(index_at_point(&monitors, 500.0, 500.0), Some(0));
         assert_eq!(index_at_point(&monitors, 2500.0, 500.0), Some(1));
         assert_eq!(index_at_point(&monitors, -100.0, 500.0), None);
+    }
+
+    #[test]
+    fn next_prev_nowrap() {
+        let monitors = make_monitors();
+        assert_eq!(next_index_nowrap(&monitors, 0), Some(1));
+        assert_eq!(next_index_nowrap(&monitors, 1), None); // rightmost edge
+        assert_eq!(prev_index_nowrap(&monitors, 0), None); // leftmost edge
+        assert_eq!(prev_index_nowrap(&monitors, 1), Some(0));
+    }
+
+    #[test]
+    fn single_monitor_nowrap() {
+        let monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 2048.0, 1326.0),
+            usable_frame: Rect::new(0.0, 40.0, 2048.0, 1286.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        assert_eq!(next_index_nowrap(&monitors, 0), None);
+        assert_eq!(prev_index_nowrap(&monitors, 0), None);
     }
 
     #[test]
