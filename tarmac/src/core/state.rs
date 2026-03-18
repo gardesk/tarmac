@@ -248,38 +248,18 @@ impl WmState {
                     let _ = ax_set_size(ax_ref, rect.width, rect.height);
                 }
             }
-            // Pass 3: clamp oversized windows.
-            // Read back actual sizes. If a window is larger than its tile
-            // (e.g. Firefox min-width 500px in a 470px tile), reposition so
-            // the right/bottom edge aligns with the tile boundary. The
-            // overflow hides behind the adjacent window on the other side.
+            // Pass 3: final position + retry oversized windows.
+            // Position all at tile origin. If a window refused the size
+            // (e.g. Firefox min-width 500px), try resizing one more time
+            // now that the window is confirmed on the right monitor.
+            // Any remaining overflow goes right/down into the gap.
             for (wid, rect) in &geometries {
                 if let Some(ax_ref) = self.ax_refs.get(wid) {
+                    let _ = ax_set_position(ax_ref, rect.x, rect.y);
+                    // Retry size — window is now definitely on the right monitor
                     if let Ok((aw, ah)) = ax_get_size(ax_ref) {
-                        let mut need_reposition = false;
-                        let mut final_x = rect.x;
-                        let mut final_y = rect.y;
-
-                        // If window is wider than tile, right-align it
-                        if aw > rect.width + 1.0 {
-                            final_x = rect.x + rect.width - aw;
-                            need_reposition = true;
-                            tracing::debug!(wid, tile_w = rect.width, actual_w = aw,
-                                "clamping oversized width");
-                        }
-                        // If window is taller than tile, bottom-align it
-                        if ah > rect.height + 1.0 {
-                            final_y = rect.y + rect.height - ah;
-                            need_reposition = true;
-                            tracing::debug!(wid, tile_h = rect.height, actual_h = ah,
-                                "clamping oversized height");
-                        }
-
-                        if need_reposition {
-                            let _ = ax_set_position(ax_ref, final_x, final_y);
-                        } else {
-                            // Normal case: just ensure final position
-                            let _ = ax_set_position(ax_ref, rect.x, rect.y);
+                        if (aw - rect.width).abs() > 1.0 || (ah - rect.height).abs() > 1.0 {
+                            let _ = ax_set_size(ax_ref, rect.width, rect.height);
                         }
                     }
                 }
