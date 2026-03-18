@@ -1437,11 +1437,121 @@ impl WmState {
         self.apply_layout();
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
-        self.fix_oversized_windows();
+
+        // User explicitly chose this workspace — try swaps, but if it still
+        // overflows, float it centered here instead of evicting elsewhere.
+        if !was_floating {
+            self.fix_oversized_on_target(target_idx, focused);
+        }
+
         if let Some(next) = self.active_workspace().focused {
             self.focus_window(next);
         }
         tracing::info!(id = focused, target = num, "moved window to workspace");
+    }
+
+    /// After moving a window to a specific workspace, try swaps to fix overflow.
+    /// If no swap works, float the window centered instead of evicting.
+    fn fix_oversized_on_target(&mut self, ws_idx: usize, moved_wid: super::window::WindowId) {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let screen_rect = self.monitor_showing_workspace(ws_idx)
+            .map(|mi| self.monitor_rect(mi))
+            .unwrap_or_else(|| self.focused_rect());
+
+        // Check if the moved window actually overflows
+        let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
+            screen_rect, self.gap_inner, self.gap_outer, true,
+        );
+
+        let (min_w, min_h) = match geometries.iter().find(|(wid, _)| *wid == moved_wid) {
+            Some((_, rect)) => {
+                let (aw, ah) = self.ax_refs.get(&moved_wid)
+                    .and_then(|ax| ax_get_size(ax).ok())
+                    .unwrap_or((0.0, 0.0));
+                if aw <= rect.width + 1.0 && ah <= rect.height + 1.0 {
+                    return; // Fits fine
+                }
+                (aw, ah)
+            }
+            None => return, // Not in tree (floating or missing)
+        };
+
+        // Try swaps with settled-set logic (same as fix_oversized_windows phase 1)
+        let mut settled: Vec<super::window::WindowId> = Vec::new();
+        loop {
+            let geoms = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
+                screen_rect, self.gap_inner, self.gap_outer, true,
+            );
+            if geoms.is_empty() { break; }
+
+            // Find first unsettled oversized window
+            let oversized = geoms.iter().find_map(|(wid, rect)| {
+                if settled.contains(wid) { return None; }
+                let ax_ref = self.ax_refs.get(wid)?;
+                let (aw, ah) = ax_get_size(ax_ref).ok()?;
+                if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
+                    Some((*wid, aw, ah))
+                } else {
+                    None
+                }
+            });
+
+            let (ow, ow_min_w, ow_min_h) = match oversized {
+                Some(v) => v,
+                None => return, // All fixed by swaps
+            };
+
+            let best_swap = geoms.iter()
+                .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
+                .filter(|(wid, rect)| {
+                    if rect.width < ow_min_w - 1.0 || rect.height < ow_min_h - 1.0 {
+                        return false;
+                    }
+                    // Verify displaced window fits in the small tile
+                    self.ax_refs.get(wid)
+                        .and_then(|ax| ax_get_size(ax).ok())
+                        .map(|(dw, dh)| {
+                            let ow_tile = geoms.iter()
+                                .find(|(id, _)| *id == ow)
+                                .map(|(_, r)| r);
+                            ow_tile.is_none_or(|t| dw <= t.width + 1.0 && dh <= t.height + 1.0)
+                        })
+                        .unwrap_or(true)
+                })
+                .max_by(|(_, a), (_, b)| {
+                    (a.width * a.height).partial_cmp(&(b.width * b.height))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(wid, _)| *wid);
+
+            if let Some(swap_target) = best_swap {
+                tracing::info!(
+                    oversized = ow, target = swap_target,
+                    ws = ws_idx + 1, "swapping oversized window into larger tile"
+                );
+                self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
+                self.apply_layout();
+                settled.push(ow);
+            } else {
+                // No swap possible — float this window centered
+                tracing::info!(
+                    id = ow, min_w = ow_min_w, min_h = ow_min_h,
+                    ws = ws_idx + 1, "floating oversized window on target workspace"
+                );
+                self.workspaces.get_mut(ws_idx).toggle_float(ow, screen_rect);
+                if let Some(ax_ref) = self.ax_refs.get(&ow) {
+                    let fx = screen_rect.x + (screen_rect.width - ow_min_w) / 2.0;
+                    let fy = screen_rect.y + (screen_rect.height - ow_min_h) / 2.0;
+                    let _ = ax_set_position(ax_ref, fx, fy);
+                    let _ = ax_set_size(ax_ref, ow_min_w, ow_min_h);
+                }
+                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+                set_window_level(ow, K_CG_FLOATING_WINDOW_LEVEL);
+                self.apply_layout();
+                // Continue checking — other windows may still overflow
+            }
+        }
     }
 
     // --- App lifecycle ---
