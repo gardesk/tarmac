@@ -1462,7 +1462,7 @@ impl WmState {
             screen_rect, self.gap_inner, self.gap_outer, true,
         );
 
-        let (min_w, min_h) = match geometries.iter().find(|(wid, _)| *wid == moved_wid) {
+        let (_min_w, _min_h) = match geometries.iter().find(|(wid, _)| *wid == moved_wid) {
             Some((_, rect)) => {
                 let (aw, ah) = self.ax_refs.get(&moved_wid)
                     .and_then(|ax| ax_get_size(ax).ok())
@@ -1896,15 +1896,17 @@ impl WmState {
                 {
                     let (width, height) = (w.width, w.height);
                     self.registry.update_geometry(id, x, y, width, height);
-                    // Update floating window geometry so FFM uses correct bounds
-                    if let Some(fw) = self
-                        .active_workspace_mut()
-                        .floating
-                        .iter_mut()
-                        .find(|f| f.id == id)
-                    {
-                        fw.geometry.x = x;
-                        fw.geometry.y = y;
+                    // Update floating window geometry on its actual workspace
+                    if let Some(ws_idx) = self.workspaces.find_window(id) {
+                        if let Some(fw) = self
+                            .workspaces.get_mut(ws_idx)
+                            .floating
+                            .iter_mut()
+                            .find(|f| f.id == id)
+                        {
+                            fw.geometry.x = x;
+                            fw.geometry.y = y;
+                        }
                     }
                 }
             }
@@ -1914,13 +1916,15 @@ impl WmState {
                         (ax_get_position(element), ax_get_size(element))
                 {
                     self.registry.update_geometry(id, x, y, w, h);
-                    if let Some(fw) = self
-                        .active_workspace_mut()
-                        .floating
-                        .iter_mut()
-                        .find(|f| f.id == id)
-                    {
-                        fw.geometry = Rect::new(x, y, w, h);
+                    if let Some(ws_idx) = self.workspaces.find_window(id) {
+                        if let Some(fw) = self
+                            .workspaces.get_mut(ws_idx)
+                            .floating
+                            .iter_mut()
+                            .find(|f| f.id == id)
+                        {
+                            fw.geometry = Rect::new(x, y, w, h);
+                        }
                     }
                 }
             }
@@ -2011,30 +2015,6 @@ fn should_auto_float(subrole: &str, _width: f64, _height: f64) -> bool {
 }
 
 /// Compute a hide position for a window that's off-screen on ALL monitors.
-/// Uses the bottom-left corner of the leftmost monitor minus the window width,
-/// plus the full height of all monitors below the lowest monitor.
-fn compute_hide_position(
-    monitors: &[super::monitor::Monitor],
-    window_width: f64,
-) -> (f64, f64) {
-    if monitors.is_empty() {
-        return (1.0 - window_width, 10000.0);
-    }
-    // Find the leftmost x and the bottommost y across all monitors
-    let min_x = monitors
-        .iter()
-        .map(|m| m.frame.x)
-        .fold(f64::INFINITY, f64::min);
-    let max_y = monitors
-        .iter()
-        .map(|m| m.frame.y + m.frame.height)
-        .fold(f64::NEG_INFINITY, f64::max);
-    // Position: far left and far below all monitors.
-    // Large margins prevent macOS screen-edge clamping from
-    // keeping any part of the window visible.
-    (min_x - window_width - 5000.0, max_y + 5000.0)
-}
-
 /// Warp the mouse cursor to the center of a rect.
 fn warp_mouse_to_center(rect: &Rect) {
     let (cx, cy) = rect.center();
