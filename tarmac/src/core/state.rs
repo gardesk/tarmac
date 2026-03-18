@@ -105,9 +105,17 @@ impl WmState {
     }
 
     /// Usable frame for a monitor, adjusted for bar_height.
+    /// Only applies bar_height on monitors where macOS didn't already
+    /// deduct a system menu bar (i.e., non-primary / external monitors).
     fn monitor_rect(&self, mi: usize) -> Rect {
-        let r = self.monitors[mi].usable_frame;
-        if self.bar_height > 0.0 {
+        let m = &self.monitors[mi];
+        let r = m.usable_frame;
+        // If usable_frame.y == frame.y, the system didn't deduct a menu bar
+        // for this monitor — apply bar_height for sketchybar/etc.
+        // If usable_frame.y > frame.y, the system already reserved space.
+        let needs_bar = self.bar_height > 0.0
+            && (r.y - m.frame.y).abs() < 1.0;
+        if needs_bar {
             Rect::new(r.x, r.y + self.bar_height, r.width, r.height - self.bar_height)
         } else {
             r
@@ -1499,8 +1507,10 @@ fn compute_hide_position(
         .iter()
         .map(|m| m.frame.y + m.frame.height)
         .fold(f64::NEG_INFINITY, f64::max);
-    // Position: far left of leftmost monitor and below all monitors
-    (min_x - window_width - 100.0, max_y + 100.0)
+    // Position: far left and far below all monitors.
+    // Large margins prevent macOS screen-edge clamping from
+    // keeping any part of the window visible.
+    (min_x - window_width - 5000.0, max_y + 5000.0)
 }
 
 /// Warp the mouse cursor to the center of a rect.
