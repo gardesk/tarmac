@@ -627,6 +627,16 @@ impl WmState {
             self.ffm_cooldown_until = None;
         }
 
+        // Detect monitor change — update focused_monitor if cursor moved
+        // to a different display so FFM checks the correct workspace.
+        if let Some(mi) = super::monitor::index_at_point(&self.monitors, x, y) {
+            if mi != self.focused_monitor {
+                self.focused_monitor = mi;
+                self.ffm_last_window = None; // Reset so FFM re-evaluates
+                tracing::debug!(monitor = mi, "FFM detected monitor change");
+            }
+        }
+
         let ws = self.active_workspace();
 
         // Check floating windows first -- they're visually on top
@@ -750,10 +760,23 @@ impl WmState {
         // Case 1: Target workspace is already visible on some monitor → jump focus
         if let Some(other_mi) = self.monitor_showing_workspace(target_idx) {
             self.focused_monitor = other_mi;
+            self.ffm_last_window = None; // Reset FFM state for new workspace
             if let Some(wid) = self.workspaces.get(target_idx).focused {
                 self.focus_window(wid);
-            }
-            if self.mouse_follows_focus {
+                // Warp to the focused WINDOW center (not monitor center)
+                if self.mouse_follows_focus {
+                    let sr = self.focused_rect();
+                    let geoms = self.workspaces.get(target_idx).tree
+                        .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+                    if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
+                        warp_mouse_to_center(rect);
+                    } else {
+                        warp_mouse_to_center(&sr);
+                    }
+                    self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                    self.ffm_last_window = Some(wid);
+                }
+            } else if self.mouse_follows_focus {
                 let rect = self.focused_rect();
                 warp_mouse_to_center(&rect);
                 self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
@@ -796,10 +819,22 @@ impl WmState {
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
         self.fix_oversized_windows();
+        self.ffm_last_window = None; // Reset FFM state for new workspace
         if let Some(wid) = self.workspaces.get(target_idx).focused {
             self.focus_window(wid);
-        }
-        if self.mouse_follows_focus {
+            if self.mouse_follows_focus {
+                let sr = self.focused_rect();
+                let geoms = self.workspaces.get(target_idx).tree
+                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+                if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
+                    warp_mouse_to_center(rect);
+                } else {
+                    warp_mouse_to_center(&sr);
+                }
+                self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.ffm_last_window = Some(wid);
+            }
+        } else if self.mouse_follows_focus {
             let rect = self.focused_rect();
             warp_mouse_to_center(&rect);
             self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
