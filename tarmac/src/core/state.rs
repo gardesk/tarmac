@@ -242,31 +242,38 @@ impl WmState {
                     let _ = ax_set_size(ax_ref, rect.width, rect.height);
                 }
             }
-            // Pass 3: final position to correct any drift from resizing.
+            // Pass 3: clamp oversized windows.
+            // Read back actual sizes. If a window is larger than its tile
+            // (e.g. Firefox min-width 500px in a 470px tile), reposition so
+            // the right/bottom edge aligns with the tile boundary. The
+            // overflow hides behind the adjacent window on the other side.
             for (wid, rect) in &geometries {
                 if let Some(ax_ref) = self.ax_refs.get(wid) {
-                    let _ = ax_set_position(ax_ref, rect.x, rect.y);
-                }
-            }
-            // Pass 3: verify — read back actual sizes to diagnose gaps
-            for (wid, rect) in &geometries {
-                if let Some(ax_ref) = self.ax_refs.get(wid) {
-                    if let (Ok((aw, ah)), Ok((ax, ay))) =
-                        (ax_get_size(ax_ref), ax_get_position(ax_ref))
-                    {
-                        let dw = (aw - rect.width).abs();
-                        let dh = (ah - rect.height).abs();
-                        let dx = (ax - rect.x).abs();
-                        let dy = (ay - rect.y).abs();
-                        if dw > 1.0 || dh > 1.0 || dx > 1.0 || dy > 1.0 {
-                            tracing::warn!(
-                                wid,
-                                req_x = rect.x, req_y = rect.y,
-                                req_w = rect.width, req_h = rect.height,
-                                actual_x = ax, actual_y = ay,
-                                actual_w = aw, actual_h = ah,
-                                "window rejected geometry"
-                            );
+                    if let Ok((aw, ah)) = ax_get_size(ax_ref) {
+                        let mut need_reposition = false;
+                        let mut final_x = rect.x;
+                        let mut final_y = rect.y;
+
+                        // If window is wider than tile, right-align it
+                        if aw > rect.width + 1.0 {
+                            final_x = rect.x + rect.width - aw;
+                            need_reposition = true;
+                            tracing::debug!(wid, tile_w = rect.width, actual_w = aw,
+                                "clamping oversized width");
+                        }
+                        // If window is taller than tile, bottom-align it
+                        if ah > rect.height + 1.0 {
+                            final_y = rect.y + rect.height - ah;
+                            need_reposition = true;
+                            tracing::debug!(wid, tile_h = rect.height, actual_h = ah,
+                                "clamping oversized height");
+                        }
+
+                        if need_reposition {
+                            let _ = ax_set_position(ax_ref, final_x, final_y);
+                        } else {
+                            // Normal case: just ensure final position
+                            let _ = ax_set_position(ax_ref, rect.x, rect.y);
                         }
                     }
                 }
