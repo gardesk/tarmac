@@ -760,18 +760,17 @@ impl WmState {
                 self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
             }
         } else {
-            // Hide current workspace windows: make transparent + move off-screen.
-            // SLSSetWindowAlpha(0) makes the window fully invisible at the
-            // WindowServer level — no title bar peeking regardless of macOS
-            // position clamping. We also move off-screen so the window doesn't
-            // intercept clicks or hover events.
+            // Hide current workspace windows.
+            // Strategy: shrink to 1x1, then position using AeroSpace approach
+            // relative to the focused monitor's bottom edge. macOS keeps
+            // 1px on-screen but a 1x1 window is invisible.
+            let hide_rect = self.monitors[self.focused_monitor].frame;
+            let hide_y = hide_rect.y + hide_rect.height - 1.0;
             let current_ws = self.workspaces.get(current_idx);
             for wid in current_ws.all_window_ids() {
-                crate::platform::skylight::set_window_alpha(wid, 0.0);
                 if let Some(ax_ref) = self.ax_refs.get(&wid) {
-                    let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                    let (hx, hy) = compute_hide_position(&self.monitors, w);
-                    let _ = ax_set_position(ax_ref, hx, hy);
+                    let _ = ax_set_size(ax_ref, 1.0, 1.0);
+                    let _ = ax_set_position(ax_ref, hide_rect.x, hide_y);
                 }
             }
             self.workspaces.get_mut(current_idx).visible = false;
@@ -1019,13 +1018,12 @@ impl WmState {
         }
         target_ws.record_focus(focused);
 
-        // If target is not visible, hide the window (alpha=0 + move off-screen)
+        // If target is not visible, hide the window (shrink 1x1 + bottom edge)
         if !self.workspaces.get(target_idx).visible {
-            crate::platform::skylight::set_window_alpha(focused, 0.0);
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let (hx, hy) = compute_hide_position(&self.monitors, w);
-                let _ = ax_set_position(ax_ref, hx, hy);
+                let hide_rect = self.monitors[self.focused_monitor].frame;
+                let _ = ax_set_size(ax_ref, 1.0, 1.0);
+                let _ = ax_set_position(ax_ref, hide_rect.x, hide_rect.y + hide_rect.height - 1.0);
             }
         }
 
@@ -1288,12 +1286,11 @@ impl WmState {
             tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
 
             if !is_active {
-                // Hide the window (alpha=0 + move off-screen)
-                crate::platform::skylight::set_window_alpha(*id, 0.0);
+                // Hide the window (shrink 1x1 + bottom edge)
                 if let Some(ax_ref) = self.ax_refs.get(id) {
-                    let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                    let (hx, hy) = compute_hide_position(&self.monitors, w);
-                    let _ = ax_set_position(ax_ref, hx, hy);
+                    let hide_rect = self.monitors[self.focused_monitor].frame;
+                    let _ = ax_set_size(ax_ref, 1.0, 1.0);
+                    let _ = ax_set_position(ax_ref, hide_rect.x, hide_rect.y + hide_rect.height - 1.0);
                 }
                 // Switch to the target workspace to follow the window
                 self.switch_workspace(ws_num);
