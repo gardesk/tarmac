@@ -757,12 +757,13 @@ impl WmState {
                 self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
             }
         } else {
-            // Hide current workspace windows
+            // Hide current workspace windows: shrink to 1x1 then move off-screen.
+            // 1x1 is invisible even if macOS clamps the position.
             let current_ws = self.workspaces.get(current_idx);
             for wid in current_ws.all_window_ids() {
                 if let Some(ax_ref) = self.ax_refs.get(&wid) {
-                    let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                    let (hx, hy) = compute_hide_position(&self.monitors, w);
+                    let _ = ax_set_size(ax_ref, 1.0, 1.0);
+                    let (hx, hy) = compute_hide_position(&self.monitors, 1.0);
                     let _ = ax_set_position(ax_ref, hx, hy);
                 }
             }
@@ -1011,11 +1012,11 @@ impl WmState {
         }
         target_ws.record_focus(focused);
 
-        // If target is not visible, hide the window
+        // If target is not visible, hide the window (shrink + move off-screen)
         if !self.workspaces.get(target_idx).visible {
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let (hx, hy) = compute_hide_position(&self.monitors, w);
+                let _ = ax_set_size(ax_ref, 1.0, 1.0);
+                let (hx, hy) = compute_hide_position(&self.monitors, 1.0);
                 let _ = ax_set_position(ax_ref, hx, hy);
             }
         }
@@ -1279,10 +1280,10 @@ impl WmState {
             tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
 
             if !is_active {
-                // Hide the window off all monitors
+                // Hide the window off all monitors (shrink + move)
                 if let Some(ax_ref) = self.ax_refs.get(id) {
-                    let (w, _h) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                    let (hx, hy) = compute_hide_position(&self.monitors, w);
+                    let _ = ax_set_size(ax_ref, 1.0, 1.0);
+                    let (hx, hy) = compute_hide_position(&self.monitors, 1.0);
                     let _ = ax_set_position(ax_ref, hx, hy);
                 }
                 // Switch to the target workspace to follow the window
