@@ -361,58 +361,71 @@ impl WmState {
     // --- Window operations ---
 
     pub fn focus_direction(&mut self, direction: super::tree::Direction) {
+        use super::tree::Direction;
+
         let ws = self.active_workspace();
-        let focused = match ws.focused {
-            Some(f) => f,
-            None => return,
-        };
+        let focused = ws.focused;
         let sr = self.focused_rect();
-        let geoms = ws.tree.calculate_geometries(sr);
-        if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
-            self.focus_window(target);
-            if self.mouse_follows_focus
-                && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
+
+        // Try intra-workspace navigation first (only if we have a focused window)
+        if let Some(from) = focused {
+            let geoms = ws.tree.calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+            if let Some(target) = Node::find_adjacent(&geoms, from, direction) {
+                self.focus_window(target);
+                if self.mouse_follows_focus
+                    && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
+                {
+                    warp_mouse_to_center(rect);
+                    self.ffm_cooldown_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                    self.ffm_last_window = Some(target);
+                }
+                return;
+            }
+        }
+
+        // No adjacent window (or empty workspace) — try crossing monitors
+        if self.monitors.len() <= 1 {
+            return;
+        }
+        let new_mi = match direction {
+            Direction::Right => super::monitor::next_index_nowrap(&self.monitors, self.focused_monitor),
+            Direction::Left => super::monitor::prev_index_nowrap(&self.monitors, self.focused_monitor),
+            _ => None,
+        };
+        if let Some(new_mi) = new_mi {
+            self.focused_monitor = new_mi;
+            let target_sr = self.focused_rect();
+            let target_geoms = self.active_workspace().tree
+                .calculate_geometries_with_gaps(target_sr, self.gap_inner, self.gap_outer, true);
+
+            if let Some(wid) = Node::nearest_to_edge(&target_geoms, direction)
+                .or(self.active_workspace().focused)
             {
-                warp_mouse_to_center(rect);
-                self.ffm_cooldown_until =
-                    Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
-                self.ffm_last_window = Some(target);
-            }
-        } else if self.monitors.len() > 1 {
-            // No window found in direction on current monitor --
-            // try crossing to adjacent monitor
-            use super::tree::Direction;
-            let new_mi = match direction {
-                Direction::Right => {
-                    let next = super::monitor::next_index(&self.monitors, self.focused_monitor);
-                    if next != self.focused_monitor { Some(next) } else { None }
-                }
-                Direction::Left => {
-                    let prev = super::monitor::prev_index(&self.monitors, self.focused_monitor);
-                    if prev != self.focused_monitor { Some(prev) } else { None }
-                }
-                _ => None, // Up/Down stays on current monitor
-            };
-            if let Some(new_mi) = new_mi {
-                self.focused_monitor = new_mi;
-                if let Some(wid) = self.active_workspace().focused {
-                    self.focus_window(wid);
-                    if self.mouse_follows_focus {
-                        let geoms = self
-                            .active_workspace()
-                            .tree
-                            .calculate_geometries(self.focused_rect());
-                        if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
-                            warp_mouse_to_center(rect);
-                            self.ffm_cooldown_until = Some(
-                                std::time::Instant::now() + std::time::Duration::from_millis(200),
-                            );
-                            self.ffm_last_window = Some(wid);
-                        }
+                // Target has windows — focus the nearest one
+                self.focus_window(wid);
+                if self.mouse_follows_focus {
+                    if let Some((_, rect)) = target_geoms.iter().find(|(id, _)| *id == wid) {
+                        warp_mouse_to_center(rect);
                     }
+                    self.ffm_cooldown_until = Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(200),
+                    );
+                    self.ffm_last_window = Some(wid);
                 }
-                tracing::debug!(monitor = new_mi, "crossed to adjacent monitor");
+            } else {
+                // Target workspace is empty — deactivate all title bars
+                // and warp mouse to monitor center
+                crate::platform::application::deactivate_all_windows();
+                self.ffm_last_window = None;
+                if self.mouse_follows_focus {
+                    warp_mouse_to_center(&target_sr);
+                    self.ffm_cooldown_until = Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(200),
+                    );
+                }
             }
+            tracing::debug!(monitor = new_mi, "crossed to adjacent monitor");
         }
     }
 

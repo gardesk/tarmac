@@ -243,6 +243,19 @@ pub fn activate_app(pid: i32) {
     }
 }
 
+/// Deactivate all windows by making tarmac (which has no windows) the frontmost app.
+/// This causes all other apps' title bars to appear inactive.
+pub fn deactivate_all_windows() {
+    let pid = std::process::id() as i32;
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        unsafe {
+            app.activateWithOptions(
+                objc2_app_kit::NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+            );
+        }
+    }
+}
+
 /// Get all on-screen layer-0 windows from CGWindowList.
 pub fn get_cg_window_list() -> Vec<CgWindowInfo> {
     let mut result = Vec::new();
