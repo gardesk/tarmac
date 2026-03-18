@@ -299,13 +299,30 @@ impl WmState {
         // request but snap to their minimum size later.
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        for mi in 0..self.monitors.len() {
-            let ws_idx = self.monitors[mi].active_workspace;
+        // Collect the initial set of workspaces to check (visible on monitors).
+        let mut pending: Vec<usize> = (0..self.monitors.len())
+            .map(|mi| self.monitors[mi].active_workspace)
+            .collect();
+        // Track workspaces we've already fully processed to avoid infinite loops.
+        let mut processed: Vec<usize> = Vec::new();
+        // Track the first overflow workspace we created (for wrap-around).
+        let mut first_overflow_ws: Option<usize> = None;
 
-            // Loop until no more oversized windows are found on this workspace.
-            // Each iteration recomputes geometries since swaps/removals invalidate them.
+        while let Some(ws_idx) = pending.pop() {
+            if processed.contains(&ws_idx) {
+                continue;
+            }
+
+            // Determine the screen rect for this workspace's layout.
+            let screen_rect = self.monitor_showing_workspace(ws_idx)
+                .map(|mi| self.monitor_rect(mi))
+                .unwrap_or_else(|| {
+                    // Not currently visible — use focused monitor's rect as proxy
+                    // (this is what the window will tile against when switched to)
+                    self.focused_rect()
+                });
+
             loop {
-                let screen_rect = self.monitor_rect(mi);
                 let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
                     screen_rect, self.gap_inner, self.gap_outer, true,
                 );
@@ -324,10 +341,10 @@ impl WmState {
 
                 let (oversized_wid, min_w, min_h) = match oversized {
                     Some(v) => v,
-                    None => break, // No more oversized windows
+                    None => break,
                 };
 
-                // Find the largest tile that could fit this window
+                // Try swapping into a larger tile on the same workspace
                 let best_swap = geometries.iter()
                     .filter(|(wid, _)| *wid != oversized_wid)
                     .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
@@ -340,59 +357,118 @@ impl WmState {
                 if let Some(swap_target) = best_swap {
                     tracing::info!(
                         oversized = oversized_wid, target = swap_target,
-                        "swapping oversized window into larger tile"
+                        ws = ws_idx + 1, "swapping oversized window into larger tile"
                     );
                     self.workspaces.get_mut(ws_idx).tree.swap(oversized_wid, swap_target);
                     self.apply_layout();
-                } else {
-                    // No tile large enough — move to workspace+1
-                    // Find the next non-visible workspace after this one
-                    let next_ws = (ws_idx + 1..self.workspaces.count())
-                        .find(|&i| !self.workspaces.get(i).visible)
-                        .unwrap_or_else(|| {
-                            // All workspaces visible or none available — use ws_idx+1
-                            let idx = ws_idx + 1;
-                            self.workspaces.get_or_create(idx);
-                            idx
-                        });
-                    let next_ws_num = (next_ws + 1) as u8;
+                    continue;
+                }
 
-                    tracing::info!(
-                        id = oversized_wid, min_w, min_h,
-                        from_ws = ws_idx + 1, to_ws = next_ws + 1,
-                        "moving oversized window to next workspace (no tile fits)"
-                    );
+                // No tile fits — evict to next workspace.
+                // Find the next non-visible workspace after this one.
+                let next_ws = (ws_idx + 1..self.workspaces.count())
+                    .find(|&i| !self.workspaces.get(i).visible)
+                    .unwrap_or_else(|| {
+                        let idx = self.workspaces.count();
+                        self.workspaces.get_or_create(idx);
+                        idx
+                    });
 
-                    // Remove from current workspace
-                    let ws = self.workspaces.get_mut(ws_idx);
-                    ws.tree.remove(oversized_wid);
-                    if ws.focused == Some(oversized_wid) {
-                        ws.pop_focus();
-                    }
-                    ws.focus_history.retain(|id| *id != oversized_wid);
+                // Check if we've wrapped all the way around to where overflow
+                // windows started — if so, this workspace is the last resort.
+                let hit_limit = first_overflow_ws.is_some_and(|first| {
+                    processed.contains(&next_ws) || next_ws == first
+                });
 
-                    // Insert into target workspace
-                    let target_rect = self.monitor_showing_workspace(next_ws)
-                        .map(|tmi| self.monitor_rect(tmi))
-                        .unwrap_or(screen_rect);
-                    let target_ws = self.workspaces.get_or_create(next_ws);
-                    target_ws.tree.insert_with_rect(
-                        oversized_wid, target_ws.focused, target_rect,
-                    );
-                    target_ws.record_focus(oversized_wid);
+                if hit_limit {
+                    // Last resort: float remaining oversized windows on this workspace
+                    self.float_oversized_on_workspace(ws_idx, screen_rect);
+                    break;
+                }
 
-                    // Hide the window if the target workspace isn't visible
-                    if !self.workspaces.get(next_ws).visible {
-                        crate::platform::skylight::set_window_alpha(oversized_wid, 0.0);
-                    }
+                if first_overflow_ws.is_none() {
+                    first_overflow_ws = Some(next_ws);
+                }
 
-                    tracing::info!(
-                        id = oversized_wid,
-                        "oversized window sent to workspace {next_ws_num}"
-                    );
-                    self.apply_layout();
+                tracing::info!(
+                    id = oversized_wid, min_w, min_h,
+                    from_ws = ws_idx + 1, to_ws = next_ws + 1,
+                    "evicting oversized window to next workspace"
+                );
+
+                // Remove from current workspace
+                let ws = self.workspaces.get_mut(ws_idx);
+                ws.tree.remove(oversized_wid);
+                if ws.focused == Some(oversized_wid) {
+                    ws.pop_focus();
+                }
+                ws.focus_history.retain(|id| *id != oversized_wid);
+
+                // Insert into target workspace
+                let target_rect = self.monitor_showing_workspace(next_ws)
+                    .map(|tmi| self.monitor_rect(tmi))
+                    .unwrap_or(screen_rect);
+                let target_ws = self.workspaces.get_or_create(next_ws);
+                target_ws.tree.insert_with_rect(
+                    oversized_wid, target_ws.focused, target_rect,
+                );
+                target_ws.record_focus(oversized_wid);
+
+                // Hide window if target workspace isn't visible
+                if !self.workspaces.get(next_ws).visible {
+                    crate::platform::skylight::set_window_alpha(oversized_wid, 0.0);
+                }
+
+                self.apply_layout();
+
+                // Queue the target workspace for overflow checking
+                if !processed.contains(&next_ws) && !pending.contains(&next_ws) {
+                    pending.push(next_ws);
                 }
             }
+
+            processed.push(ws_idx);
+        }
+    }
+
+    /// Float all oversized windows on a workspace as an absolute last resort.
+    /// Only called when every workspace has been tried and overflow persists.
+    fn float_oversized_on_workspace(&mut self, ws_idx: usize, screen_rect: Rect) {
+        loop {
+            let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
+                screen_rect, self.gap_inner, self.gap_outer, true,
+            );
+            if geometries.is_empty() { break; }
+
+            let oversized = geometries.iter().find_map(|(wid, rect)| {
+                let ax_ref = self.ax_refs.get(wid)?;
+                let (aw, ah) = ax_get_size(ax_ref).ok()?;
+                if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
+                    Some((*wid, aw, ah))
+                } else {
+                    None
+                }
+            });
+
+            let (oversized_wid, min_w, min_h) = match oversized {
+                Some(v) => v,
+                None => break,
+            };
+
+            tracing::warn!(
+                id = oversized_wid, min_w, min_h, ws = ws_idx + 1,
+                "last-resort float: all workspaces exhausted"
+            );
+            self.workspaces.get_mut(ws_idx).toggle_float(oversized_wid, screen_rect);
+            if let Some(ax_ref) = self.ax_refs.get(&oversized_wid) {
+                let fx = screen_rect.x + (screen_rect.width - min_w) / 2.0;
+                let fy = screen_rect.y + (screen_rect.height - min_h) / 2.0;
+                let _ = ax_set_position(ax_ref, fx, fy);
+                let _ = ax_set_size(ax_ref, min_w, min_h);
+            }
+            use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+            set_window_level(oversized_wid, K_CG_FLOATING_WINDOW_LEVEL);
+            self.apply_layout();
         }
     }
 
