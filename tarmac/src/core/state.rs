@@ -301,25 +301,32 @@ impl WmState {
 
         for mi in 0..self.monitors.len() {
             let ws_idx = self.monitors[mi].active_workspace;
-            let screen_rect = self.monitor_rect(mi);
-            let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
-                screen_rect, self.gap_inner, self.gap_outer, true,
-            );
-            if geometries.is_empty() { continue; }
 
-            // Find windows that overflow their tiles
-            let mut oversized: Vec<(super::window::WindowId, f64, f64)> = Vec::new();
-            for (wid, rect) in &geometries {
-                if let Some(ax_ref) = self.ax_refs.get(wid) {
-                    if let Ok((aw, ah)) = ax_get_size(ax_ref) {
-                        if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
-                            oversized.push((*wid, aw, ah));
-                        }
+            // Loop until no more oversized windows are found on this workspace.
+            // Each iteration recomputes geometries since swaps/removals invalidate them.
+            loop {
+                let screen_rect = self.monitor_rect(mi);
+                let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
+                    screen_rect, self.gap_inner, self.gap_outer, true,
+                );
+                if geometries.is_empty() { break; }
+
+                // Find the first window that overflows its tile
+                let oversized = geometries.iter().find_map(|(wid, rect)| {
+                    let ax_ref = self.ax_refs.get(wid)?;
+                    let (aw, ah) = ax_get_size(ax_ref).ok()?;
+                    if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
+                        Some((*wid, aw, ah))
+                    } else {
+                        None
                     }
-                }
-            }
+                });
 
-            for (oversized_wid, min_w, min_h) in oversized {
+                let (oversized_wid, min_w, min_h) = match oversized {
+                    Some(v) => v,
+                    None => break, // No more oversized windows
+                };
+
                 // Find the largest tile that could fit this window
                 let best_swap = geometries.iter()
                     .filter(|(wid, _)| *wid != oversized_wid)
@@ -331,7 +338,6 @@ impl WmState {
                     .map(|(wid, _)| *wid);
 
                 if let Some(swap_target) = best_swap {
-                    // Swap in the BSP tree and re-apply layout
                     tracing::info!(
                         oversized = oversized_wid, target = swap_target,
                         "swapping oversized window into larger tile"
@@ -339,26 +345,53 @@ impl WmState {
                     self.workspaces.get_mut(ws_idx).tree.swap(oversized_wid, swap_target);
                     self.apply_layout();
                 } else {
-                    // No tile large enough — auto-float
+                    // No tile large enough — move to workspace+1
+                    // Find the next non-visible workspace after this one
+                    let next_ws = (ws_idx + 1..self.workspaces.count())
+                        .find(|&i| !self.workspaces.get(i).visible)
+                        .unwrap_or_else(|| {
+                            // All workspaces visible or none available — use ws_idx+1
+                            let idx = ws_idx + 1;
+                            self.workspaces.get_or_create(idx);
+                            idx
+                        });
+                    let next_ws_num = (next_ws + 1) as u8;
+
                     tracing::info!(
                         id = oversized_wid, min_w, min_h,
-                        "auto-floating window that exceeds all tiles"
+                        from_ws = ws_idx + 1, to_ws = next_ws + 1,
+                        "moving oversized window to next workspace (no tile fits)"
                     );
-                    let sr = self.monitor_rect(mi);
-                    self.workspaces.get_mut(ws_idx).toggle_float(oversized_wid, sr);
-                    if let Some(ax_ref) = self.ax_refs.get(&oversized_wid) {
-                        // Center the floated window
-                        let fx = sr.x + (sr.width - min_w) / 2.0;
-                        let fy = sr.y + (sr.height - min_h) / 2.0;
-                        let _ = ax_set_position(ax_ref, fx, fy);
-                        let _ = ax_set_size(ax_ref, min_w, min_h);
+
+                    // Remove from current workspace
+                    let ws = self.workspaces.get_mut(ws_idx);
+                    ws.tree.remove(oversized_wid);
+                    if ws.focused == Some(oversized_wid) {
+                        ws.pop_focus();
                     }
-                    use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-                    set_window_level(oversized_wid, K_CG_FLOATING_WINDOW_LEVEL);
+                    ws.focus_history.retain(|id| *id != oversized_wid);
+
+                    // Insert into target workspace
+                    let target_rect = self.monitor_showing_workspace(next_ws)
+                        .map(|tmi| self.monitor_rect(tmi))
+                        .unwrap_or(screen_rect);
+                    let target_ws = self.workspaces.get_or_create(next_ws);
+                    target_ws.tree.insert_with_rect(
+                        oversized_wid, target_ws.focused, target_rect,
+                    );
+                    target_ws.record_focus(oversized_wid);
+
+                    // Hide the window if the target workspace isn't visible
+                    if !self.workspaces.get(next_ws).visible {
+                        crate::platform::skylight::set_window_alpha(oversized_wid, 0.0);
+                    }
+
+                    tracing::info!(
+                        id = oversized_wid,
+                        "oversized window sent to workspace {next_ws_num}"
+                    );
                     self.apply_layout();
                 }
-                // Only fix one window per pass to avoid cascading swaps
-                break;
             }
         }
     }
