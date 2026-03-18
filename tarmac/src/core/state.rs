@@ -1372,74 +1372,9 @@ impl WmState {
         self.apply_layout();
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
-        // Only do swaps during hotplug — never evict windows the user is looking
-        // at to invisible workspaces. Eviction is disorienting after a display
-        // change; the user can manually rearrange if needed.
-        self.fix_oversized_swaps_only();
+        self.fix_oversized_windows();
 
         tracing::info!(old_count, new_count = self.monitors.len(), "monitors refreshed");
-    }
-
-    /// Swap-only overflow fix: try to place oversized windows in larger tiles
-    /// but never evict to other workspaces. Used after hotplug where silently
-    /// moving windows would be disorienting.
-    fn fix_oversized_swaps_only(&mut self) {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        for mi in 0..self.monitors.len() {
-            let ws_idx = self.monitors[mi].active_workspace;
-            let screen_rect = self.monitor_rect(mi);
-            let mut settled: Vec<super::window::WindowId> = Vec::new();
-
-            loop {
-                let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
-                    screen_rect, self.gap_inner, self.gap_outer, true,
-                );
-                if geometries.is_empty() { break; }
-
-                let oversized = geometries.iter().find_map(|(wid, rect)| {
-                    if settled.contains(wid) { return None; }
-                    let ax_ref = self.ax_refs.get(wid)?;
-                    let (aw, ah) = ax_get_size(ax_ref).ok()?;
-                    if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
-                        Some((*wid, aw, ah))
-                    } else {
-                        None
-                    }
-                });
-
-                let (ow, min_w, min_h) = match oversized {
-                    Some(v) => v,
-                    None => break,
-                };
-
-                let best_swap = geometries.iter()
-                    .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
-                    .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
-                    .max_by(|(_, a), (_, b)| {
-                        (a.width * a.height).partial_cmp(&(b.width * b.height))
-                            .unwrap_or(std::cmp::Ordering::Equal)
-                    })
-                    .map(|(wid, _)| *wid);
-
-                if let Some(swap_target) = best_swap {
-                    tracing::info!(
-                        oversized = ow, target = swap_target,
-                        ws = ws_idx + 1, "swapping oversized window into larger tile"
-                    );
-                    self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
-                    self.apply_layout();
-                    settled.push(ow);
-                } else {
-                    // No swap possible — leave it. Don't evict during hotplug.
-                    tracing::info!(
-                        id = ow, min_w, min_h, ws = ws_idx + 1,
-                        "oversized window has no swap target (hotplug, skipping eviction)"
-                    );
-                    break;
-                }
-            }
-        }
     }
 
     pub fn move_to_workspace(&mut self, num: u8) {
