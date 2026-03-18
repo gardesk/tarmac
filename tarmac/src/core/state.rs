@@ -644,13 +644,13 @@ impl WmState {
         if let Some(mi) = detected_mi {
             if mi != self.focused_monitor {
                 self.focused_monitor = mi;
-                self.ffm_last_window = None; // Reset so FFM re-evaluates
-                // Re-activate the workspace's focused window — macOS needs
-                // AXRaise/AXFrontmost even if our internal state already
-                // tracks it as focused (it lost OS-level focus on monitor switch).
-                if let Some(wid) = self.active_workspace().focused {
-                    self.focus_window(wid);
-                }
+                self.ffm_last_window = None;
+                // Clear ws.focused so FFM's `focused != Some(id)` check
+                // passes when the cursor reaches a window. Don't call
+                // focus_window here — the cursor is in the outer gap between
+                // monitors and macOS will ignore AX activation. Let FFM
+                // handle it naturally when cursor enters a tile.
+                self.active_workspace_mut().focused = None;
                 tracing::debug!(monitor = mi, "FFM detected monitor change");
             }
         }
@@ -687,14 +687,22 @@ impl WmState {
             if let Some(id) = window_under
                 && self.active_workspace().focused != Some(id)
             {
-                // Use soft focus only when floating windows exist to preserve z-order.
-                // Otherwise use full activation for proper title bar highlighting.
                 if self.active_workspace().floating.is_empty() {
                     self.focus_window(id);
                 } else {
                     self.focus_window_soft(id);
                 }
             }
+        }
+
+        // Log near-boundary crossings for diagnosis
+        if x.abs() < 30.0 {
+            tracing::debug!(
+                x = format!("{:.0}", x), y = format!("{:.0}", y),
+                mon = self.focused_monitor,
+                under = ?window_under,
+                "boundary"
+            );
         }
     }
 
