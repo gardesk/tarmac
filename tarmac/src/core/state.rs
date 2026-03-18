@@ -633,7 +633,6 @@ impl WmState {
         // (handles cases where cursor is at a Y position outside a shorter monitor).
         let detected_mi = super::monitor::index_at_point(&self.monitors, x, y)
             .or_else(|| {
-                // Nearest monitor by x distance
                 self.monitors.iter().enumerate()
                     .min_by_key(|(_, m)| {
                         let cx = m.frame.x + m.frame.width / 2.0;
@@ -641,16 +640,12 @@ impl WmState {
                     })
                     .map(|(i, _)| i)
             });
+        let mut just_crossed_monitor = false;
         if let Some(mi) = detected_mi {
             if mi != self.focused_monitor {
                 self.focused_monitor = mi;
-                self.ffm_last_window = None; // Reset so FFM re-evaluates
-                // Re-activate the workspace's focused window — macOS needs
-                // AXRaise/AXFrontmost even if our internal state already
-                // tracks it as focused (it lost OS-level focus on monitor switch).
-                if let Some(wid) = self.active_workspace().focused {
-                    self.focus_window(wid);
-                }
+                self.ffm_last_window = None;
+                just_crossed_monitor = true;
                 tracing::debug!(monitor = mi, "FFM detected monitor change");
             }
         }
@@ -661,14 +656,13 @@ impl WmState {
         let floating_under = ws
             .floating
             .iter()
-            .rev() // Check most recently focused first
+            .rev()
             .find(|fw| fw.geometry.contains_point(x, y))
             .map(|fw| fw.id);
 
         let window_under = if floating_under.is_some() {
             floating_under
         } else {
-            // Check tiled windows using gap-aware geometry matching actual layout
             let geoms = ws.tree.calculate_geometries_with_gaps(
                 self.focused_rect(),
                 self.gap_inner,
@@ -681,18 +675,19 @@ impl WmState {
                 .map(|(id, _)| *id)
         };
 
-        // Only refocus if the window changed
-        if window_under != self.ffm_last_window {
+        // Refocus if window changed, or force re-activation after monitor crossing
+        // (macOS loses OS-level focus on monitor switch even if our state tracks it)
+        if window_under != self.ffm_last_window || just_crossed_monitor {
             self.ffm_last_window = window_under;
-            if let Some(id) = window_under
-                && self.active_workspace().focused != Some(id)
-            {
-                // Use soft focus only when floating windows exist to preserve z-order.
-                // Otherwise use full activation for proper title bar highlighting.
-                if self.active_workspace().floating.is_empty() {
-                    self.focus_window(id);
-                } else {
-                    self.focus_window_soft(id);
+            if let Some(id) = window_under {
+                // After crossing monitors, always do full activation even if
+                // ws.focused already matches — macOS needs AXRaise/AXFrontmost
+                if just_crossed_monitor || self.active_workspace().focused != Some(id) {
+                    if self.active_workspace().floating.is_empty() {
+                        self.focus_window(id);
+                    } else {
+                        self.focus_window_soft(id);
+                    }
                 }
             }
         }
