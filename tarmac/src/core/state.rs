@@ -465,12 +465,10 @@ impl WmState {
                 );
                 target_ws.record_focus(oversized_wid);
 
-                // Hide the evicted window BEFORE apply_layout. Always hide,
-                // even on visible workspaces — the recursive check will restore
-                // alpha=1.0 via apply_layout if the window stays on that workspace.
-                // If it gets re-evicted, it stays hidden (no flash).
-                self.hide_window(oversized_wid);
+                // apply_layout would restore alpha=1.0 on the evicted window
+                // if it landed on a visible workspace. Hide it AFTER layout.
                 self.apply_layout();
+                self.hide_window(oversized_wid);
 
                 // Queue the target workspace for overflow checking
                 if !processed.contains(&next_ws) && !pending.contains(&next_ws) {
