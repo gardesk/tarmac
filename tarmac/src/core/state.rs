@@ -480,6 +480,19 @@ impl WmState {
 
             processed.push(ws_idx);
         }
+
+        // Safety net: ensure ALL windows on non-visible workspaces are hidden.
+        // During eviction chains (ws1→ws2→ws3), apply_layout restores alpha=1.0
+        // on intermediate workspaces before the recursive check re-evicts.
+        // This final pass guarantees no ghost windows remain.
+        for ws_idx in 0..self.workspaces.count() {
+            if self.monitor_showing_workspace(ws_idx).is_some() {
+                continue; // Visible workspace — windows should be shown
+            }
+            for wid in self.workspaces.get(ws_idx).all_window_ids() {
+                crate::platform::skylight::set_window_alpha(wid, 0.0);
+            }
+        }
     }
 
     /// Float all oversized windows on a workspace as an absolute last resort.
