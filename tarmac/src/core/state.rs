@@ -675,6 +675,15 @@ impl WmState {
                 self.ffm_last_window = None;
                 self.ffm_crossed_monitor = true; // Bypass focused guard once
                 tracing::debug!(monitor = mi, "FFM detected monitor change");
+
+                // If the new monitor's workspace is empty, deactivate all
+                // title bars so no window appears focused.
+                if self.active_workspace().tree.window_count() == 0
+                    && self.active_workspace().floating.is_empty()
+                {
+                    crate::platform::application::deactivate_all_windows();
+                    return;
+                }
             }
         }
 
