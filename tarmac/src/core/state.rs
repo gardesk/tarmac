@@ -498,9 +498,9 @@ impl WmState {
         }
 
         // Safety net: ensure ALL windows on non-visible workspaces are hidden.
-        // During eviction chains (ws1→ws2→ws3), apply_layout restores alpha=1.0
-        // on intermediate workspaces before the recursive check re-evicts.
-        // This final pass guarantees no ghost windows remain.
+        // Uses the same hide_window as switch_workspace (alpha=0 + AX position
+        // off-screen). This is the LAST thing that runs, so the AX position
+        // command overrides any prior positioning from apply_layout.
         for ws_idx in 0..self.workspaces.count() {
             if self.monitor_showing_workspace(ws_idx).is_some() {
                 continue; // Visible workspace — windows should be shown
@@ -510,10 +510,7 @@ impl WmState {
                 tracing::info!(ws = ws_idx + 1, count = wids.len(), "safety net hiding non-visible workspace");
             }
             for wid in wids {
-                let ok = crate::platform::skylight::set_window_alpha(wid, 0.0);
-                if !ok {
-                    tracing::warn!(wid, ws = ws_idx + 1, "safety net set_window_alpha(0) FAILED");
-                }
+                self.hide_window(wid);
             }
         }
     }
@@ -1879,8 +1876,8 @@ impl WmState {
             }
         } else {
             let sr = self.focused_rect();
+            let ws = self.active_workspace_mut();
             if should_float {
-                let ws = self.active_workspace_mut();
                 let geom = rule_geometry
                     .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
                     .unwrap_or_else(|| Rect::new(x, y, width, height));
@@ -1888,57 +1885,11 @@ impl WmState {
                     id: *id,
                     geometry: geom,
                 });
-                ws.record_focus(*id);
                 tracing::info!(id, subrole, "auto-floated window");
             } else {
-                // Pre-check: simulate adding this window and see if it would
-                // fit. If the window's creation size won't fit the smallest
-                // tile, send it directly to a non-visible workspace — never
-                // lay it out on the active workspace (prevents ghost windows
-                // from apps that restore visibility on AX position).
-                let active_idx = self.active_ws_idx();
-                let would_fit = {
-                    let ws = self.workspaces.get(active_idx);
-                    let mut test_tree = ws.tree.clone();
-                    test_tree.insert_with_rect(*id, ws.focused, sr);
-                    let geoms = test_tree.calculate_geometries_with_gaps(
-                        sr, self.gap_inner, self.gap_outer, true,
-                    );
-                    // Check if this window's tile is large enough for its size
-                    geoms.iter()
-                        .find(|(wid, _)| *wid == *id)
-                        .map(|(_, rect)| width <= rect.width + 1.0 && height <= rect.height + 1.0)
-                        .unwrap_or(true)
-                };
-
-                if would_fit {
-                    let ws = self.active_workspace_mut();
-                    ws.tree.insert_with_rect(*id, ws.focused, sr);
-                    ws.record_focus(*id);
-                } else {
-                    // Window won't fit — send directly to a non-visible workspace
-                    let target_ws = (0..self.workspaces.count())
-                        .find(|&i| i != active_idx && !self.workspaces.get(i).visible)
-                        .unwrap_or_else(|| {
-                            let idx = self.workspaces.count();
-                            self.workspaces.get_or_create(idx);
-                            idx
-                        });
-                    let target_rect = self.monitor_showing_workspace(target_ws)
-                        .map(|mi| self.monitor_rect(mi))
-                        .unwrap_or(sr);
-                    let ws = self.workspaces.get_or_create(target_ws);
-                    ws.tree.insert_with_rect(*id, ws.focused, target_rect);
-                    ws.record_focus(*id);
-                    self.hide_window(*id);
-                    tracing::info!(
-                        id, app_name, width, height,
-                        ws = target_ws + 1,
-                        "window won't fit active workspace, sent to ws{}",
-                        target_ws + 1
-                    );
-                }
+                ws.tree.insert_with_rect(*id, ws.focused, sr);
             }
+            ws.record_focus(*id);
         }
     }
 
