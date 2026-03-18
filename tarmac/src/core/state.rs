@@ -465,7 +465,11 @@ impl WmState {
                 );
                 target_ws.record_focus(oversized_wid);
 
-                // Hide window if target workspace isn't visible
+                self.apply_layout();
+
+                // Hide AFTER apply_layout to win the race against any prior
+                // AX position commands that may have placed the window on-screen
+                // (e.g. when evicting from a visible workspace like ws2→ws3).
                 if !self.workspaces.get(next_ws).visible {
                     crate::platform::skylight::set_window_alpha(oversized_wid, 0.0);
                     if let Some(ax_ref) = self.ax_refs.get(&oversized_wid) {
@@ -476,8 +480,6 @@ impl WmState {
                             hide_frame.y + hide_frame.height - 1.0);
                     }
                 }
-
-                self.apply_layout();
 
                 // Queue the target workspace for overflow checking
                 if !processed.contains(&next_ws) && !pending.contains(&next_ws) {
