@@ -1111,11 +1111,20 @@ impl WmState {
         tracing::info!(ws = num, monitor = show_on_monitor, "switched workspace");
     }
 
-    /// Hide all windows on a workspace using AeroSpace per-monitor approach.
-    fn hide_workspace_windows(&self, ws_idx: usize, _monitor_idx: usize) {
+    /// Hide all windows on a workspace by positioning them below their monitor.
+    /// This is the proven approach from AeroSpace — macOS clamps AX positions
+    /// to the window's current monitor, so positioning just below the monitor's
+    /// bottom edge keeps the window fully off-screen on THAT monitor.
+    fn hide_workspace_windows(&self, ws_idx: usize, monitor_idx: usize) {
+        let hide_frame = self.monitors[monitor_idx].frame;
+        let hide_y = hide_frame.y + hide_frame.height + 5000.0;
         let ws = self.workspaces.get(ws_idx);
         for wid in ws.all_window_ids() {
-            self.hide_window(wid);
+            if let Some(ax_ref) = self.ax_refs.get(&wid) {
+                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                let hide_x = hide_frame.x + 1.0 - w;
+                let _ = ax_set_position(ax_ref, hide_x, hide_y);
+            }
         }
     }
 
@@ -1124,34 +1133,23 @@ impl WmState {
     fn hide_workspace_windows_immediate(&self, ws_idx: usize) {
         let ws = self.workspaces.get(ws_idx);
         for wid in ws.all_window_ids() {
-            self.hide_window(wid);
+            crate::platform::skylight::set_window_alpha(wid, 0.0);
         }
     }
 
-    /// Hide a single window using alpha + AX position off-screen.
-    /// Some apps (e.g. Music) restore their own visibility when they process
-    /// an AX resize/position, overriding SLSSetWindowAlpha. So we also send
-    /// an AX position command to move the window off the bottom of the
-    /// lowest monitor — macOS clamps to the window's current monitor, so we
-    /// find the lowest edge across all monitors and position below it.
-    /// apply_layout restores both alpha=1.0 and correct position when the
-    /// window's workspace becomes visible.
+    /// Hide a single window after eviction. Uses alpha=0 plus AX position
+    /// below the focused monitor. The AX position goes through the same
+    /// channel as apply_layout, so the app processes it after any prior
+    /// positioning commands.
     fn hide_window(&self, wid: super::window::WindowId) {
         crate::platform::skylight::set_window_alpha(wid, 0.0);
         if let Some(ax_ref) = self.ax_refs.get(&wid) {
-            // Find the lowest point and leftmost point across all monitors
-            let max_y = self.monitors.iter()
-                .map(|m| m.frame.y + m.frame.height)
-                .fold(0.0_f64, f64::max);
-            let min_x = self.monitors.iter()
-                .map(|m| m.frame.x)
-                .fold(0.0_f64, f64::min);
-            // Get window width to shift fully left of leftmost monitor
+            let hide_frame = self.monitors[self.focused_monitor].frame;
             let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-            // Position: fully below all monitors AND fully left of all monitors
-            let _ = ax_set_position(ax_ref, min_x - w - 100.0, max_y + 100.0);
+            let hide_x = hide_frame.x + 1.0 - w;
+            let hide_y = hide_frame.y + hide_frame.height + 5000.0;
+            let _ = ax_set_position(ax_ref, hide_x, hide_y);
         }
-        tracing::debug!(wid, "hide_window");
     }
 
     pub fn workspace_next(&mut self) {
