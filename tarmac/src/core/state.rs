@@ -1487,7 +1487,11 @@ impl WmState {
                 if let Ok(id) = ax_get_window_id(element)
                     && self.registry.contains(id)
                 {
-                    self.active_workspace_mut().record_focus(id);
+                    // Record on the workspace that contains this window,
+                    // not the active workspace (same fix as focus_window_impl)
+                    if let Some(ws_idx) = self.workspaces.find_window(id) {
+                        self.workspaces.get_mut(ws_idx).record_focus(id);
+                    }
                 }
             }
             WindowEvent::Moved { element, .. } => {
