@@ -747,9 +747,8 @@ impl WmState {
 
         tracing::info!(from = current_idx + 1, to = num, "switching workspace");
 
-        // Is target workspace already visible on some monitor?
+        // Case 1: Target workspace is already visible on some monitor → jump focus
         if let Some(other_mi) = self.monitor_showing_workspace(target_idx) {
-            // Just move focus to that monitor (gar-style: no swap)
             self.focused_monitor = other_mi;
             if let Some(wid) = self.workspaces.get(target_idx).focused {
                 self.focus_window(wid);
@@ -759,40 +758,67 @@ impl WmState {
                 warp_mouse_to_center(&rect);
                 self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
             }
+            tracing::info!(ws = num, monitor = other_mi, "jumped to visible workspace");
+            return;
+        }
+
+        // Case 2: Target has windows and remembers a different monitor → jump there
+        let target_has_windows = !self.workspaces.get(target_idx).is_empty();
+        let target_last_monitor = self.workspaces.get(target_idx).last_monitor;
+        let show_on_monitor = if target_has_windows
+            && let Some(mi) = target_last_monitor
+            && mi < self.monitors.len()
+            && mi != self.focused_monitor
+        {
+            mi // Jump to the remembered monitor
         } else {
-            // Hide current workspace windows.
-            // Keep full size — shrinking triggers macOS to relocate across
-            // monitors. Use AeroSpace approach: right edge at monitor.x + 1,
-            // y at monitor bottom - 1. Keeps window within the monitor's
-            // x range so macOS won't move it elsewhere.
-            let hide_frame = self.monitors[self.focused_monitor].frame;
-            let hide_y = hide_frame.y + hide_frame.height - 1.0;
-            let current_ws = self.workspaces.get(current_idx);
-            for wid in current_ws.all_window_ids() {
-                if let Some(ax_ref) = self.ax_refs.get(&wid) {
-                    let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                    let hide_x = hide_frame.x + 1.0 - w;
-                    let _ = ax_set_position(ax_ref, hide_x, hide_y);
-                }
-            }
-            self.workspaces.get_mut(current_idx).visible = false;
+            self.focused_monitor // Show on current monitor
+        };
 
-            // Show target workspace
-            self.monitors[self.focused_monitor].active_workspace = target_idx;
-            self.workspaces.get_mut(target_idx).visible = true;
-            self.workspaces.get_mut(target_idx).last_monitor = Some(self.focused_monitor);
+        // Hide the workspace currently on the target monitor
+        let displaced_idx = self.monitors[show_on_monitor].active_workspace;
+        self.hide_workspace_windows(displaced_idx, show_on_monitor);
+        self.workspaces.get_mut(displaced_idx).visible = false;
+        // If the displaced workspace is empty, unassign it from the monitor
+        if self.workspaces.get(displaced_idx).is_empty() {
+            self.workspaces.get_mut(displaced_idx).last_monitor = None;
+            tracing::debug!(ws = displaced_idx + 1, "empty workspace unassigned");
+        }
 
-            // Double-apply: first pass positions windows on the monitor,
-            // second pass resizes correctly after macOS processes the moves.
-            self.apply_layout();
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            self.apply_layout();
-            self.fix_oversized_windows();
-            if let Some(wid) = self.workspaces.get(target_idx).focused {
-                self.focus_window(wid);
+        // Show target workspace on the chosen monitor
+        self.monitors[show_on_monitor].active_workspace = target_idx;
+        self.workspaces.get_mut(target_idx).visible = true;
+        self.workspaces.get_mut(target_idx).last_monitor = Some(show_on_monitor);
+        self.focused_monitor = show_on_monitor;
+
+        // Apply layout with double-apply for cross-monitor moves
+        self.apply_layout();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        self.apply_layout();
+        self.fix_oversized_windows();
+        if let Some(wid) = self.workspaces.get(target_idx).focused {
+            self.focus_window(wid);
+        }
+        if self.mouse_follows_focus {
+            let rect = self.focused_rect();
+            warp_mouse_to_center(&rect);
+            self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+        }
+        tracing::info!(ws = num, monitor = show_on_monitor, "switched workspace");
+    }
+
+    /// Hide all windows on a workspace using AeroSpace per-monitor approach.
+    fn hide_workspace_windows(&self, ws_idx: usize, monitor_idx: usize) {
+        let hide_frame = self.monitors[monitor_idx].frame;
+        let hide_y = hide_frame.y + hide_frame.height - 1.0;
+        let ws = self.workspaces.get(ws_idx);
+        for wid in ws.all_window_ids() {
+            if let Some(ax_ref) = self.ax_refs.get(&wid) {
+                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                let hide_x = hide_frame.x + 1.0 - w;
+                let _ = ax_set_position(ax_ref, hide_x, hide_y);
             }
         }
-        tracing::info!(ws = num, "switched workspace");
     }
 
     pub fn workspace_next(&mut self) {
