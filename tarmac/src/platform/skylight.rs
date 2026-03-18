@@ -18,12 +18,30 @@ unsafe extern "C" {
     fn SLSMainConnectionID() -> CGSConnectionID;
     fn SLSSetWindowLevel(cid: CGSConnectionID, wid: u32, level: c_int) -> CGError;
     fn SLSSetWindowAlpha(cid: CGSConnectionID, wid: u32, alpha: f32) -> CGError;
+    fn SLSMoveWindow(cid: CGSConnectionID, wid: u32, point: *const CGPoint) -> CGError;
+}
+
+#[repr(C)]
+struct CGPoint {
+    x: f64,
+    y: f64,
 }
 
 /// Set a window's opacity in the WindowServer (0.0 = invisible, 1.0 = opaque).
 pub fn set_window_alpha(window_id: u32, alpha: f32) -> bool {
     let cid = unsafe { SLSMainConnectionID() };
     let result = unsafe { SLSSetWindowAlpha(cid, window_id, alpha) };
+    result == 0
+}
+
+/// Move a window in the WindowServer, bypassing AX position clamping.
+/// macOS AX API clamps positions to keep windows partially on-screen.
+/// SLSMoveWindow operates at the WindowServer level and allows truly
+/// off-screen positioning needed for hiding windows.
+pub fn move_window(window_id: u32, x: f64, y: f64) -> bool {
+    let cid = unsafe { SLSMainConnectionID() };
+    let point = CGPoint { x, y };
+    let result = unsafe { SLSMoveWindow(cid, window_id, &point) };
     result == 0
 }
 

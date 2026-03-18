@@ -1097,17 +1097,12 @@ impl WmState {
         }
     }
 
-    /// Hide a single window: alpha=0 + position far off all screens.
-    /// Uses alpha for instant visual hide and position to prevent the
-    /// window frame from intercepting clicks or peeking on other monitors.
+    /// Hide a single window: alpha=0 + SkyLight move far off-screen.
+    /// Uses alpha for instant visual hide and SLSMoveWindow for position
+    /// (bypasses AX clamping that keeps windows partially on-screen).
     fn hide_window(&self, wid: super::window::WindowId) {
         crate::platform::skylight::set_window_alpha(wid, 0.0);
-        if let Some(ax_ref) = self.ax_refs.get(&wid) {
-            // Position far below and left of all possible monitors.
-            // macOS screen coordinates can go negative (external left of primary),
-            // so we go to a very large positive Y and large negative X.
-            let _ = ax_set_position(ax_ref, -10000.0, 10000.0);
-        }
+        crate::platform::skylight::move_window(wid, -10000.0, 10000.0);
     }
 
     pub fn workspace_next(&mut self) {
