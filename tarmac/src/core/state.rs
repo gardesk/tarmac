@@ -294,6 +294,11 @@ impl WmState {
     /// Try swapping the oversized window into the largest available tile.
     /// If it still doesn't fit, auto-float it.
     pub fn fix_oversized_windows(&mut self) {
+        // Give apps time to settle to their actual minimum size after apply_layout.
+        // Some apps (e.g. Messages) handle AX resize asynchronously — they ack the
+        // request but snap to their minimum size later.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
         for mi in 0..self.monitors.len() {
             let ws_idx = self.monitors[mi].active_workspace;
             let screen_rect = self.monitor_rect(mi);
