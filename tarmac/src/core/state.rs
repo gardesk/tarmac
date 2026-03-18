@@ -52,6 +52,7 @@ pub struct WmState {
     event_queue: Rc<RefCell<Vec<QueuedEvent>>>,
     ffm_cooldown_until: Option<std::time::Instant>,
     ffm_last_window: Option<WindowId>,
+    ffm_crossed_monitor: bool,
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
@@ -79,6 +80,7 @@ impl WmState {
             event_queue: Rc::new(RefCell::new(Vec::new())),
             ffm_cooldown_until: None,
             ffm_last_window: None,
+            ffm_crossed_monitor: false,
             drag: None,
             focus_follows_mouse: true,
             mouse_follows_focus: true,
@@ -644,7 +646,8 @@ impl WmState {
         if let Some(mi) = detected_mi {
             if mi != self.focused_monitor {
                 self.focused_monitor = mi;
-                self.ffm_last_window = None; // Reset so FFM re-evaluates
+                self.ffm_last_window = None;
+                self.ffm_crossed_monitor = true; // Bypass focused guard once
                 tracing::debug!(monitor = mi, "FFM detected monitor change");
             }
         }
@@ -675,16 +678,22 @@ impl WmState {
                 .map(|(id, _)| *id)
         };
 
-        // Focus when window under cursor changes. No `ws.focused` guard —
-        // after monitor crossing macOS needs AX re-activation even if our
-        // internal state already tracks the window as focused.
+        // Refocus when window under cursor changes
         if window_under != self.ffm_last_window {
             self.ffm_last_window = window_under;
             if let Some(id) = window_under {
-                if self.active_workspace().floating.is_empty() {
-                    self.focus_window(id);
-                } else {
-                    self.focus_window_soft(id);
+                // After monitor crossing, bypass the focused guard — macOS
+                // lost OS-level focus even if our state tracks it.
+                // On same-monitor, the guard prevents redundant AX calls.
+                let need_focus = self.ffm_crossed_monitor
+                    || self.active_workspace().focused != Some(id);
+                if need_focus {
+                    if self.active_workspace().floating.is_empty() {
+                        self.focus_window(id);
+                    } else {
+                        self.focus_window_soft(id);
+                    }
+                    self.ffm_crossed_monitor = false;
                 }
             }
         }
