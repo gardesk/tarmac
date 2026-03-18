@@ -321,16 +321,19 @@ impl WmState {
             // Phase 1: Swap oversized windows into larger tiles.
             // "Settled" windows are those already placed in a good tile by a prior
             // swap — they cannot be displaced, preventing ping-pong loops.
+            // "No-swap" windows had no valid swap target — skip them so we can
+            // still try swapping OTHER oversized windows that might have targets.
             let mut settled: Vec<super::window::WindowId> = Vec::new();
+            let mut no_swap: Vec<super::window::WindowId> = Vec::new();
             loop {
                 let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
                     screen_rect, self.gap_inner, self.gap_outer, true,
                 );
                 if geometries.is_empty() { break; }
 
-                // Find the first oversized window (skip settled ones — they're fine)
+                // Find the first oversized window (skip settled and no-swap)
                 let oversized = geometries.iter().find_map(|(wid, rect)| {
-                    if settled.contains(wid) { return None; }
+                    if settled.contains(wid) || no_swap.contains(wid) { return None; }
                     let ax_ref = self.ax_refs.get(wid)?;
                     let (aw, ah) = ax_get_size(ax_ref).ok()?;
                     if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
@@ -342,14 +345,9 @@ impl WmState {
 
                 let (ow, min_w, min_h) = match oversized {
                     Some(v) => v,
-                    None => break, // All windows fit or are settled
+                    None => break, // All windows fit, settled, or exhausted swaps
                 };
 
-                // Find best swap target: non-settled, in a tile large enough.
-                // Don't pre-check the displaced window's size — ax_get_size returns
-                // its current rendered size (== its current tile), not its minimum.
-                // If the displaced window overflows after the swap, the next loop
-                // iteration will catch it (settled set prevents ping-pong).
                 let best_swap = geometries.iter()
                     .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
                     .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
@@ -366,15 +364,20 @@ impl WmState {
                     );
                     self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
                     self.apply_layout();
-                    // Mark the oversized window as settled — it's now in a good tile
                     settled.push(ow);
+                    // Clear no_swap — tiles changed, previously-blocked windows
+                    // might now have valid swap targets
+                    no_swap.clear();
                 } else {
-                    // No valid swap — this window will be handled by eviction
-                    break;
+                    // No swap for this window — skip it and try others
+                    no_swap.push(ow);
                 }
             }
 
             // Phase 2: Evict remaining oversized windows that couldn't be fixed by swaps.
+            // Try all workspaces in order (including ones with existing windows).
+            // The recursive pass will handle any overflow on the target workspace.
+            let mut evict_search_from = ws_idx + 1;
             loop {
                 let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
                     screen_rect, self.gap_inner, self.gap_outer, true,
@@ -396,14 +399,17 @@ impl WmState {
                     None => break,
                 };
 
-                // Find the next non-visible workspace to evict to.
-                let next_ws = (ws_idx + 1..self.workspaces.count())
-                    .find(|&i| !self.workspaces.get(i).visible)
+                // Find next workspace to try, including those with existing windows.
+                // Skip the current workspace and any already processed.
+                let next_ws = (evict_search_from..self.workspaces.count())
+                    .find(|&i| i != ws_idx && !processed.contains(&i))
                     .unwrap_or_else(|| {
                         let idx = self.workspaces.count();
                         self.workspaces.get_or_create(idx);
                         idx
                     });
+                // Next eviction starts after this one to avoid re-trying same workspace
+                evict_search_from = next_ws + 1;
 
                 // Check if we've wrapped all the way around.
                 let hit_limit = first_overflow_ws.is_some_and(|first| {
@@ -446,7 +452,6 @@ impl WmState {
                 // Hide window if target workspace isn't visible
                 if !self.workspaces.get(next_ws).visible {
                     crate::platform::skylight::set_window_alpha(oversized_wid, 0.0);
-                    // Also move off-screen so the window frame doesn't intercept clicks
                     if let Some(ax_ref) = self.ax_refs.get(&oversized_wid) {
                         let hide_frame = self.monitors[self.focused_monitor].frame;
                         let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
