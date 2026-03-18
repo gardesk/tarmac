@@ -195,6 +195,12 @@ impl WmState {
             "initial window registry populated"
         );
 
+        // Apply layout twice: first pass moves windows to the correct
+        // monitor, second pass resizes correctly since they're already there.
+        // Needed because macOS AX constrains resize to the window's current
+        // display, and the position change may not have taken effect yet.
+        self.apply_layout();
+        std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
         self.install_observers_for_all();
 
@@ -701,6 +707,10 @@ impl WmState {
             self.workspaces.get_mut(target_idx).visible = true;
             self.workspaces.get_mut(target_idx).last_monitor = Some(self.focused_monitor);
 
+            // Double-apply: first pass positions windows on the monitor,
+            // second pass resizes correctly after macOS processes the moves.
+            self.apply_layout();
+            std::thread::sleep(std::time::Duration::from_millis(50));
             self.apply_layout();
             if let Some(wid) = self.workspaces.get(target_idx).focused {
                 self.focus_window(wid);
