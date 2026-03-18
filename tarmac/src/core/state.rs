@@ -489,8 +489,15 @@ impl WmState {
             if self.monitor_showing_workspace(ws_idx).is_some() {
                 continue; // Visible workspace — windows should be shown
             }
-            for wid in self.workspaces.get(ws_idx).all_window_ids() {
-                crate::platform::skylight::set_window_alpha(wid, 0.0);
+            let wids = self.workspaces.get(ws_idx).all_window_ids();
+            if !wids.is_empty() {
+                tracing::info!(ws = ws_idx + 1, count = wids.len(), "safety net hiding non-visible workspace");
+            }
+            for wid in wids {
+                let ok = crate::platform::skylight::set_window_alpha(wid, 0.0);
+                if !ok {
+                    tracing::warn!(wid, ws = ws_idx + 1, "safety net set_window_alpha(0) FAILED");
+                }
             }
         }
     }
@@ -1109,11 +1116,10 @@ impl WmState {
     }
 
     /// Hide a single window using WindowServer alpha.
-    /// Alpha=0 is the only reliable hide — AX position clamping prevents
-    /// truly off-screen moves, and SLSMoveWindow has inconsistent behavior.
     /// apply_layout restores alpha=1.0 when a window's workspace becomes visible.
     fn hide_window(&self, wid: super::window::WindowId) {
-        crate::platform::skylight::set_window_alpha(wid, 0.0);
+        let ok = crate::platform::skylight::set_window_alpha(wid, 0.0);
+        tracing::debug!(wid, ok, "hide_window alpha=0");
     }
 
     pub fn workspace_next(&mut self) {
