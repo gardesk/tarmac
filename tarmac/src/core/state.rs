@@ -629,7 +629,19 @@ impl WmState {
 
         // Detect monitor change — update focused_monitor if cursor moved
         // to a different display so FFM checks the correct workspace.
-        if let Some(mi) = super::monitor::index_at_point(&self.monitors, x, y) {
+        // Use exact hit test first, fall back to nearest monitor by x distance
+        // (handles cases where cursor is at a Y position outside a shorter monitor).
+        let detected_mi = super::monitor::index_at_point(&self.monitors, x, y)
+            .or_else(|| {
+                // Nearest monitor by x distance
+                self.monitors.iter().enumerate()
+                    .min_by_key(|(_, m)| {
+                        let cx = m.frame.x + m.frame.width / 2.0;
+                        ((x - cx).abs() * 1000.0) as i64
+                    })
+                    .map(|(i, _)| i)
+            });
+        if let Some(mi) = detected_mi {
             if mi != self.focused_monitor {
                 self.focused_monitor = mi;
                 self.ffm_last_window = None; // Reset so FFM re-evaluates
@@ -1150,6 +1162,9 @@ impl WmState {
         }
         if added {
             self.apply_layout();
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            self.apply_layout();
+            self.fix_oversized_windows();
         }
         self.install_observer_for_app(pid, &ax_app, owner, "");
     }
@@ -1421,6 +1436,8 @@ impl WmState {
                     h,
                     element.clone(),
                 );
+                self.apply_layout();
+                std::thread::sleep(std::time::Duration::from_millis(50));
                 self.apply_layout();
                 self.fix_oversized_windows();
             }
