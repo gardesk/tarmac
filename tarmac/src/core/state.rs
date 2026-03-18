@@ -226,15 +226,25 @@ impl WmState {
             tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
-            // Position → size → position for each window.
-            // Position first moves the window to the correct monitor so macOS
-            // evaluates size constraints on the right display. Final position
-            // corrects any drift caused by the resize (yabai pattern).
+            // Three-pass layout to handle cross-monitor moves:
+            // Pass 1: position all windows to their target monitor.
+            // This ensures macOS knows which display each window is on.
             for (wid, rect) in &geometries {
                 tracing::debug!(wid, x = rect.x, y = rect.y, w = rect.width, h = rect.height, "tile");
                 if let Some(ax_ref) = self.ax_refs.get(wid) {
                     let _ = ax_set_position(ax_ref, rect.x, rect.y);
+                }
+            }
+            // Pass 2: resize all windows. Now macOS evaluates size
+            // constraints on the correct display.
+            for (wid, rect) in &geometries {
+                if let Some(ax_ref) = self.ax_refs.get(wid) {
                     let _ = ax_set_size(ax_ref, rect.width, rect.height);
+                }
+            }
+            // Pass 3: final position to correct any drift from resizing.
+            for (wid, rect) in &geometries {
+                if let Some(ax_ref) = self.ax_refs.get(wid) {
                     let _ = ax_set_position(ax_ref, rect.x, rect.y);
                 }
             }
