@@ -455,7 +455,13 @@ impl WmState {
                 }
                 ws.focus_history.retain(|id| *id != oversized_wid);
 
-                // Insert into target workspace
+                // Hide and re-layout the SOURCE workspace (without the evicted window).
+                // Do this BEFORE inserting into the target so apply_layout
+                // can't accidentally restore alpha=1.0 on the evicted window.
+                self.hide_window(oversized_wid);
+                self.apply_layout();
+
+                // Now insert into target workspace (already hidden)
                 let target_rect = self.monitor_showing_workspace(next_ws)
                     .map(|tmi| self.monitor_rect(tmi))
                     .unwrap_or(screen_rect);
@@ -464,11 +470,6 @@ impl WmState {
                     oversized_wid, target_ws.focused, target_rect,
                 );
                 target_ws.record_focus(oversized_wid);
-
-                // apply_layout would restore alpha=1.0 on the evicted window
-                // if it landed on a visible workspace. Hide it AFTER layout.
-                self.apply_layout();
-                self.hide_window(oversized_wid);
 
                 // Queue the target workspace for overflow checking
                 if !processed.contains(&next_ws) && !pending.contains(&next_ws) {
