@@ -230,6 +230,19 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
     all_windows
 }
 
+/// Activate an application by PID using NSRunningApplication.
+/// Uses .activateIgnoringOtherApps which is more reliable than AXFrontmost
+/// for cross-monitor focus (same approach as AeroSpace).
+pub fn activate_app(pid: i32) {
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        unsafe {
+            app.activateWithOptions(
+                objc2_app_kit::NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+            );
+        }
+    }
+}
+
 /// Get all on-screen layer-0 windows from CGWindowList.
 pub fn get_cg_window_list() -> Vec<CgWindowInfo> {
     let mut result = Vec::new();

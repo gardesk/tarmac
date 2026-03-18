@@ -471,12 +471,17 @@ impl WmState {
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
-                // Full activation -- raise window and bring app forward
+                // AeroSpace activation sequence:
+                // 1. Set AXMain on window (makes it the key window)
+                // 2. AXRaise (brings to front of app)
+                // 3. NSRunningApplication.activate (brings app to foreground)
+                // Using activate(options: .activateIgnoringOtherApps) instead
+                // of AXFrontmost — macOS respects this more reliably.
+                let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, true);
                 let _ = ax_perform_action(ax_ref, "AXRaise");
                 if let Some(w) = self.registry.get(id) {
-                    let ax_app = unsafe { AXUIElement::new_application(w.app_pid) };
-                    let key = objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                    let _ = crate::platform::accessibility::ax_set_bool(&ax_app, &key, true);
+                    crate::platform::application::activate_app(w.app_pid);
                 }
             } else {
                 // Soft focus -- update internal tracking only, don't touch macOS.
