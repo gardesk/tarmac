@@ -259,11 +259,29 @@ pub fn register_display_change_callback(callback: Box<dyn Fn()>) {
         _flags: u32,
         _user_info: *mut std::ffi::c_void,
     ) {
+        use std::sync::Mutex as StdMutex;
+        use std::time::Instant;
+        static LAST_FIRE: StdMutex<Option<Instant>> = StdMutex::new(None);
+
         // Only react to "done" events (after reconfiguration is complete)
         let begin_flag = 1u32 << 0;
         if _flags & begin_flag != 0 {
             return; // Skip "begin" events
         }
+
+        // Debounce: macOS fires multiple "done" events per reconfiguration.
+        // Skip if last fire was <500ms ago.
+        {
+            let mut last = LAST_FIRE.lock().unwrap();
+            let now = Instant::now();
+            if let Some(t) = *last {
+                if now.duration_since(t).as_millis() < 500 {
+                    return;
+                }
+            }
+            *last = Some(now);
+        }
+
         if let Ok(guard) = CALLBACK.lock()
             && let Some(cb) = guard.as_ref()
         {

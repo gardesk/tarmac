@@ -161,6 +161,7 @@ impl WmState {
         self.monitors[cursor_mi].active_workspace = ws_idx;
         self.workspaces.get_mut(ws_idx).visible = true;
         self.workspaces.get_mut(ws_idx).last_monitor = Some(cursor_mi);
+        self.workspaces.get_mut(ws_idx).last_display_id = Some(self.monitors[cursor_mi].id);
         ws_idx += 1;
 
         // Remaining monitors in left-to-right order
@@ -171,6 +172,7 @@ impl WmState {
             self.monitors[mi].active_workspace = ws_idx;
             self.workspaces.get_mut(ws_idx).visible = true;
             self.workspaces.get_mut(ws_idx).last_monitor = Some(mi);
+            self.workspaces.get_mut(ws_idx).last_display_id = Some(self.monitors[mi].id);
             ws_idx += 1;
         }
 
@@ -855,6 +857,7 @@ impl WmState {
         self.monitors[show_on_monitor].active_workspace = target_idx;
         self.workspaces.get_mut(target_idx).visible = true;
         self.workspaces.get_mut(target_idx).last_monitor = Some(show_on_monitor);
+        self.workspaces.get_mut(target_idx).last_display_id = Some(self.monitors[show_on_monitor].id);
         self.focused_monitor = show_on_monitor;
 
         // Apply layout with double-apply for cross-monitor moves
@@ -896,6 +899,15 @@ impl WmState {
                 let hide_x = hide_frame.x + 1.0 - w;
                 let _ = ax_set_position(ax_ref, hide_x, hide_y);
             }
+        }
+    }
+
+    /// Hide all windows on a workspace immediately using WindowServer alpha.
+    /// Does not need a valid monitor frame — works even after monitor detach.
+    fn hide_workspace_windows_immediate(&self, ws_idx: usize) {
+        let ws = self.workspaces.get(ws_idx);
+        for wid in ws.all_window_ids() {
+            crate::platform::skylight::set_window_alpha(wid, 0.0);
         }
     }
 
@@ -1079,40 +1091,137 @@ impl WmState {
         });
 
         let old_count = self.monitors.len();
+        let old_focused_display_id = self
+            .monitors
+            .get(self.focused_monitor)
+            .map(|m| m.id);
 
-        // Match new displays to old by CGDirectDisplayID to preserve workspace assignments
-        let mut new_monitors: Vec<super::monitor::Monitor> = Vec::with_capacity(new_displays.len());
+        // Collect old display IDs for orphan detection
+        let old_display_ids: Vec<u32> = self.monitors.iter().map(|m| m.id).collect();
+        let new_display_ids: Vec<u32> = new_displays.iter().map(|d| d.id).collect();
+
+        // --- Phase 1: Match new displays to old by CGDirectDisplayID ---
+        let mut new_monitors: Vec<super::monitor::Monitor> =
+            Vec::with_capacity(new_displays.len());
         let mut used_ws: Vec<bool> = vec![false; self.workspaces.count()];
 
         for nd in &new_displays {
             if let Some(old) = self.monitors.iter().find(|om| om.id == nd.id) {
+                // Surviving monitor — preserve workspace assignment
                 let mut m = nd.clone();
                 m.active_workspace = old.active_workspace;
+                let new_idx = new_monitors.len();
+                // Update workspace's last_monitor to the NEW index
+                self.workspaces.get_mut(m.active_workspace).last_monitor = Some(new_idx);
+                self.workspaces.get_mut(m.active_workspace).last_display_id = Some(nd.id);
                 used_ws.resize(used_ws.len().max(m.active_workspace + 1), false);
                 used_ws[m.active_workspace] = true;
-                new_monitors.push(m);
-            } else {
-                // New monitor -- assign first non-visible workspace
-                let ws_idx = used_ws.iter().position(|&u| !u).unwrap_or(used_ws.len());
-                used_ws.resize(used_ws.len().max(ws_idx + 1), false);
-                used_ws[ws_idx] = true;
-                let mut m = nd.clone();
-                m.active_workspace = ws_idx;
-                self.workspaces.get_or_create(ws_idx).visible = true;
-                self.workspaces.get_or_create(ws_idx).last_monitor = Some(new_monitors.len());
                 new_monitors.push(m);
             }
         }
 
+        // --- Phase 2: Hide orphaned workspaces ---
+        for &old_did in &old_display_ids {
+            if new_display_ids.contains(&old_did) {
+                continue; // Display survived
+            }
+            // Find the old monitor with this display ID
+            if let Some(old_m) = self.monitors.iter().find(|m| m.id == old_did) {
+                let ws_idx = old_m.active_workspace;
+                tracing::info!(
+                    display_id = old_did,
+                    workspace = ws_idx + 1,
+                    "hiding orphaned workspace from detached monitor"
+                );
+                self.hide_workspace_windows_immediate(ws_idx);
+                let ws = self.workspaces.get_mut(ws_idx);
+                ws.visible = false;
+                ws.last_monitor = None;
+                // Keep last_display_id intact for reconnection
+            }
+        }
+
+        // --- Phase 3: Assign workspaces to new (unmatched) monitors ---
+        for nd in &new_displays {
+            if self.monitors.iter().any(|om| om.id == nd.id) {
+                // Already matched in phase 1 — skip if already in new_monitors
+                if new_monitors.iter().any(|nm| nm.id == nd.id) {
+                    continue;
+                }
+            }
+            if new_monitors.iter().any(|nm| nm.id == nd.id) {
+                continue; // Already handled
+            }
+
+            // New monitor — try reconnection by last_display_id first
+            let ws_idx = (0..self.workspaces.count())
+                .find(|&i| {
+                    !used_ws.get(i).copied().unwrap_or(false)
+                        && !self.workspaces.get(i).visible
+                        && self.workspaces.get(i).last_display_id == Some(nd.id)
+                })
+                .or_else(|| {
+                    // Second preference: first invisible workspace
+                    (0..self.workspaces.count()).find(|&i| {
+                        !used_ws.get(i).copied().unwrap_or(false)
+                            && !self.workspaces.get(i).visible
+                    })
+                })
+                .unwrap_or_else(|| {
+                    // Last resort: grow
+                    let idx = self.workspaces.count();
+                    self.workspaces.get_or_create(idx);
+                    idx
+                });
+
+            used_ws.resize(used_ws.len().max(ws_idx + 1), false);
+            used_ws[ws_idx] = true;
+
+            let new_idx = new_monitors.len();
+            let mut m = nd.clone();
+            m.active_workspace = ws_idx;
+
+            let ws = self.workspaces.get_mut(ws_idx);
+            ws.visible = true;
+            ws.last_monitor = Some(new_idx);
+            ws.last_display_id = Some(nd.id);
+
+            tracing::info!(
+                display_id = nd.id,
+                workspace = ws_idx + 1,
+                "assigned workspace to new monitor"
+            );
+            new_monitors.push(m);
+        }
+
+        // --- Phase 4: Replace monitors, recover focus ---
         self.monitors = new_monitors;
 
-        // Clamp focused_monitor
-        if self.focused_monitor >= self.monitors.len() {
+        // Map old focused_monitor through display ID → new index
+        if let Some(old_did) = old_focused_display_id {
+            if let Some(new_idx) = self.monitors.iter().position(|m| m.id == old_did) {
+                self.focused_monitor = new_idx;
+            } else {
+                // Focused monitor was detached
+                self.focused_monitor = 0;
+                self.ffm_last_window = None;
+                self.ffm_cooldown_until = None;
+                tracing::info!("focused monitor detached, recovering focus to monitor 0");
+                if let Some(wid) = self.workspaces.get(self.monitors[0].active_workspace).focused {
+                    self.focus_window(wid);
+                }
+                let sr = self.monitor_rect(0);
+                warp_mouse(sr.x + sr.width / 2.0, sr.y + sr.height / 2.0);
+            }
+        } else if self.focused_monitor >= self.monitors.len() {
             self.focused_monitor = 0;
         }
 
-        // Reapply layout on all visible workspaces
+        // --- Phase 5: Double-apply layout ---
         self.apply_layout();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        self.apply_layout();
+        self.fix_oversized_windows();
 
         tracing::info!(old_count, new_count = self.monitors.len(), "monitors refreshed");
     }

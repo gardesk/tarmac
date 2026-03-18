@@ -37,6 +37,8 @@ pub struct Workspace {
     pub focus_history: Vec<WindowId>,
     /// Which monitor index this workspace was last displayed on.
     pub last_monitor: Option<usize>,
+    /// CGDirectDisplayID of the last monitor (survives detach for reconnection).
+    pub last_display_id: Option<u32>,
     /// Whether this workspace is currently visible on some monitor.
     pub visible: bool,
 }
@@ -50,6 +52,7 @@ impl Workspace {
             focused: None,
             focus_history: Vec::new(),
             last_monitor: None,
+            last_display_id: None,
             visible: false,
         }
     }
