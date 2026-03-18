@@ -838,6 +838,18 @@ impl WmState {
             });
         if let Some(mi) = detected_mi {
             if mi != self.focused_monitor {
+                // Deactivate the previous monitor's focused window so its title
+                // bar goes inactive. Without this, macOS keeps the old window's
+                // title bar highlighted even after we activate a window on the
+                // new monitor (especially when both are the same app, e.g. WezTerm).
+                let old_ws_idx = self.monitors[self.focused_monitor].active_workspace;
+                if let Some(old_wid) = self.workspaces.get(old_ws_idx).focused {
+                    if let Some(ax_ref) = self.ax_refs.get(&old_wid) {
+                        let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
+                        let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, false);
+                    }
+                }
+
                 self.focused_monitor = mi;
                 self.ffm_last_window = None;
                 tracing::debug!(monitor = mi, "FFM detected monitor change");
