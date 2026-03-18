@@ -633,6 +633,12 @@ impl WmState {
             if mi != self.focused_monitor {
                 self.focused_monitor = mi;
                 self.ffm_last_window = None; // Reset so FFM re-evaluates
+                // Re-activate the workspace's focused window — macOS needs
+                // AXRaise/AXFrontmost even if our internal state already
+                // tracks it as focused (it lost OS-level focus on monitor switch).
+                if let Some(wid) = self.active_workspace().focused {
+                    self.focus_window(wid);
+                }
                 tracing::debug!(monitor = mi, "FFM detected monitor change");
             }
         }
@@ -1092,6 +1098,9 @@ impl WmState {
             }
         }
 
+        // Double-apply for cross-monitor moves
+        self.apply_layout();
+        std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
         if let Some(next) = self.active_workspace().focused {
             self.focus_window(next);
