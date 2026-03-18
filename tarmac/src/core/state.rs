@@ -482,7 +482,15 @@ impl WmState {
                 // Soft focus -- update internal tracking only, don't touch macOS.
             }
         }
-        self.active_workspace_mut().record_focus(id);
+        // Record focus on the workspace that CONTAINS this window,
+        // not the active workspace — during cross-monitor FFM the active
+        // workspace might be different from the window's workspace.
+        if let Some(ws_idx) = self.workspaces.find_window(id) {
+            self.workspaces.get_mut(ws_idx).record_focus(id);
+        } else {
+            // Fallback: window not in any workspace (shouldn't happen)
+            self.active_workspace_mut().record_focus(id);
+        }
         self.enforce_floating_levels();
         tracing::debug!(id, activate_app, "focused window");
     }
@@ -677,6 +685,19 @@ impl WmState {
                 .find(|(_, rect)| rect.contains_point(x, y))
                 .map(|(id, _)| *id)
         };
+
+        // Debug: log FFM state near boundary
+        if x.abs() < 50.0 || self.ffm_crossed_monitor {
+            tracing::debug!(
+                x = x as i32, y = y as i32,
+                mon = self.focused_monitor,
+                under = ?window_under,
+                crossed = self.ffm_crossed_monitor,
+                last = ?self.ffm_last_window,
+                ws_focused = ?self.active_workspace().focused,
+                "ffm_state"
+            );
+        }
 
         // Refocus when window under cursor changes
         if window_under != self.ffm_last_window {
