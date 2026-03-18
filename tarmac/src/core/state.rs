@@ -761,16 +761,18 @@ impl WmState {
             }
         } else {
             // Hide current workspace windows.
-            // Strategy: shrink to 1x1, then position using AeroSpace approach
-            // relative to the focused monitor's bottom edge. macOS keeps
-            // 1px on-screen but a 1x1 window is invisible.
-            let hide_rect = self.monitors[self.focused_monitor].frame;
-            let hide_y = hide_rect.y + hide_rect.height - 1.0;
+            // Keep full size — shrinking triggers macOS to relocate across
+            // monitors. Use AeroSpace approach: right edge at monitor.x + 1,
+            // y at monitor bottom - 1. Keeps window within the monitor's
+            // x range so macOS won't move it elsewhere.
+            let hide_frame = self.monitors[self.focused_monitor].frame;
+            let hide_y = hide_frame.y + hide_frame.height - 1.0;
             let current_ws = self.workspaces.get(current_idx);
             for wid in current_ws.all_window_ids() {
                 if let Some(ax_ref) = self.ax_refs.get(&wid) {
-                    let _ = ax_set_size(ax_ref, 1.0, 1.0);
-                    let _ = ax_set_position(ax_ref, hide_rect.x, hide_y);
+                    let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                    let hide_x = hide_frame.x + 1.0 - w;
+                    let _ = ax_set_position(ax_ref, hide_x, hide_y);
                 }
             }
             self.workspaces.get_mut(current_idx).visible = false;
@@ -1018,12 +1020,14 @@ impl WmState {
         }
         target_ws.record_focus(focused);
 
-        // If target is not visible, hide the window (shrink 1x1 + bottom edge)
+        // If target is not visible, hide the window (AeroSpace approach)
         if !self.workspaces.get(target_idx).visible {
             if let Some(ax_ref) = self.ax_refs.get(&focused) {
-                let hide_rect = self.monitors[self.focused_monitor].frame;
-                let _ = ax_set_size(ax_ref, 1.0, 1.0);
-                let _ = ax_set_position(ax_ref, hide_rect.x, hide_rect.y + hide_rect.height - 1.0);
+                let hide_frame = self.monitors[self.focused_monitor].frame;
+                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                let _ = ax_set_position(ax_ref,
+                    hide_frame.x + 1.0 - w,
+                    hide_frame.y + hide_frame.height - 1.0);
             }
         }
 
@@ -1286,11 +1290,13 @@ impl WmState {
             tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
 
             if !is_active {
-                // Hide the window (shrink 1x1 + bottom edge)
+                // Hide the window (AeroSpace approach per monitor)
                 if let Some(ax_ref) = self.ax_refs.get(id) {
-                    let hide_rect = self.monitors[self.focused_monitor].frame;
-                    let _ = ax_set_size(ax_ref, 1.0, 1.0);
-                    let _ = ax_set_position(ax_ref, hide_rect.x, hide_rect.y + hide_rect.height - 1.0);
+                    let hide_frame = self.monitors[self.focused_monitor].frame;
+                    let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
+                    let _ = ax_set_position(ax_ref,
+                        hide_frame.x + 1.0 - w,
+                        hide_frame.y + hide_frame.height - 1.0);
                 }
                 // Switch to the target workspace to follow the window
                 self.switch_workspace(ws_num);
