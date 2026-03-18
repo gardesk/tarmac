@@ -345,28 +345,14 @@ impl WmState {
                     None => break, // All windows fit or are settled
                 };
 
-                // Find best swap target: non-settled, non-oversized, large enough
+                // Find best swap target: non-settled, in a tile large enough.
+                // Don't pre-check the displaced window's size — ax_get_size returns
+                // its current rendered size (== its current tile), not its minimum.
+                // If the displaced window overflows after the swap, the next loop
+                // iteration will catch it (settled set prevents ping-pong).
                 let best_swap = geometries.iter()
                     .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
-                    .filter(|(wid, rect)| {
-                        // Target tile must fit the oversized window
-                        if rect.width < min_w - 1.0 || rect.height < min_h - 1.0 {
-                            return false;
-                        }
-                        // The displaced window must also fit in the oversized window's
-                        // current (small) tile, otherwise we just create a new overflow
-                        let displaced_ok = self.ax_refs.get(wid)
-                            .and_then(|ax| ax_get_size(ax).ok())
-                            .map(|(dw, dh)| {
-                                // Get the oversized window's current tile
-                                let ow_tile = geometries.iter()
-                                    .find(|(id, _)| *id == ow)
-                                    .map(|(_, r)| r);
-                                ow_tile.is_none_or(|t| dw <= t.width + 1.0 && dh <= t.height + 1.0)
-                            })
-                            .unwrap_or(true);
-                        displaced_ok
-                    })
+                    .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
                     .max_by(|(_, a), (_, b)| {
                         (a.width * a.height).partial_cmp(&(b.width * b.height))
                             .unwrap_or(std::cmp::Ordering::Equal)
@@ -1504,21 +1490,7 @@ impl WmState {
 
             let best_swap = geoms.iter()
                 .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
-                .filter(|(wid, rect)| {
-                    if rect.width < ow_min_w - 1.0 || rect.height < ow_min_h - 1.0 {
-                        return false;
-                    }
-                    // Verify displaced window fits in the small tile
-                    self.ax_refs.get(wid)
-                        .and_then(|ax| ax_get_size(ax).ok())
-                        .map(|(dw, dh)| {
-                            let ow_tile = geoms.iter()
-                                .find(|(id, _)| *id == ow)
-                                .map(|(_, r)| r);
-                            ow_tile.is_none_or(|t| dw <= t.width + 1.0 && dh <= t.height + 1.0)
-                        })
-                        .unwrap_or(true)
-                })
+                .filter(|(_, rect)| rect.width >= ow_min_w - 1.0 && rect.height >= ow_min_h - 1.0)
                 .max_by(|(_, a), (_, b)| {
                     (a.width * a.height).partial_cmp(&(b.width * b.height))
                         .unwrap_or(std::cmp::Ordering::Equal)
