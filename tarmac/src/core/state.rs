@@ -984,8 +984,7 @@ impl WmState {
                 && let Some(ax_ref) = self.ax_refs.get(&old_wid)
             {
                 let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
-                let _ =
-                    crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, false);
+                let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, false);
             }
 
             self.focused_monitor = mi;
