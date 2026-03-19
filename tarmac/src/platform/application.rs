@@ -106,6 +106,12 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
         let (x, y) = ax_get_position(&ax_win).unwrap_or((0.0, 0.0));
         let (width, height) = ax_get_size(&ax_win).unwrap_or((0.0, 0.0));
 
+        // Skip phantom windows (transient helpers, popovers, etc.)
+        if width < 50.0 || height < 50.0 {
+            tracing::debug!(id, app = %app.name, width, height, "skipping phantom window (too small)");
+            continue;
+        }
+
         result.push(WindowInfo {
             id,
             app_pid: app.pid,
