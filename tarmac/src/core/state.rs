@@ -304,10 +304,10 @@ impl WmState {
         let was_eui = app_ref
             .as_ref()
             .and_then(|app| crate::platform::accessibility::ax_get_bool(app, &eui_key).ok());
-        if was_eui == Some(true) {
-            if let Some(app) = &app_ref {
-                let _ = ax_set_bool(app, &eui_key, false);
-            }
+        if was_eui == Some(true)
+            && let Some(app) = &app_ref
+        {
+            let _ = ax_set_bool(app, &eui_key, false);
         }
 
         // Reassert visibility before and after geometry changes in case the
@@ -323,10 +323,10 @@ impl WmState {
         let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
 
         // Restore AXEnhancedUserInterface
-        if was_eui == Some(true) {
-            if let Some(app) = &app_ref {
-                let _ = ax_set_bool(app, &eui_key, true);
-            }
+        if was_eui == Some(true)
+            && let Some(app) = &app_ref
+        {
+            let _ = ax_set_bool(app, &eui_key, true);
         }
     }
 
@@ -972,33 +972,33 @@ impl WmState {
                 })
                 .map(|(i, _)| i)
         });
-        if let Some(mi) = detected_mi {
-            if mi != self.focused_monitor {
-                // Deactivate the previous monitor's focused window so its title
-                // bar goes inactive. Without this, macOS keeps the old window's
-                // title bar highlighted even after we activate a window on the
-                // new monitor (especially when both are the same app, e.g. WezTerm).
-                let old_ws_idx = self.monitors[self.focused_monitor].active_workspace;
-                if let Some(old_wid) = self.workspaces.get(old_ws_idx).focused {
-                    if let Some(ax_ref) = self.ax_refs.get(&old_wid) {
-                        let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
-                        let _ =
-                            crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, false);
-                    }
-                }
+        if let Some(mi) = detected_mi
+            && mi != self.focused_monitor
+        {
+            // Deactivate the previous monitor's focused window so its title
+            // bar goes inactive. Without this, macOS keeps the old window's
+            // title bar highlighted even after we activate a window on the
+            // new monitor (especially when both are the same app, e.g. WezTerm).
+            let old_ws_idx = self.monitors[self.focused_monitor].active_workspace;
+            if let Some(old_wid) = self.workspaces.get(old_ws_idx).focused
+                && let Some(ax_ref) = self.ax_refs.get(&old_wid)
+            {
+                let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
+                let _ =
+                    crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, false);
+            }
 
-                self.focused_monitor = mi;
-                self.ffm_last_window = None;
-                tracing::debug!(monitor = mi, "FFM detected monitor change");
+            self.focused_monitor = mi;
+            self.ffm_last_window = None;
+            tracing::debug!(monitor = mi, "FFM detected monitor change");
 
-                // If the new monitor's workspace is empty, deactivate all
-                // title bars so no window appears focused.
-                if self.active_workspace().tree.window_count() == 0
-                    && self.active_workspace().floating.is_empty()
-                {
-                    crate::platform::application::deactivate_all_windows();
-                    return;
-                }
+            // If the new monitor's workspace is empty, deactivate all
+            // title bars so no window appears focused.
+            if self.active_workspace().tree.window_count() == 0
+                && self.active_workspace().floating.is_empty()
+            {
+                crate::platform::application::deactivate_all_windows();
+                return;
             }
         }
 
@@ -2258,17 +2258,16 @@ impl WmState {
                     let (width, height) = (w.width, w.height);
                     self.registry.update_geometry(id, x, y, width, height);
                     // Update floating window geometry on its actual workspace
-                    if let Some(ws_idx) = self.workspaces.find_window(id) {
-                        if let Some(fw) = self
+                    if let Some(ws_idx) = self.workspaces.find_window(id)
+                        && let Some(fw) = self
                             .workspaces
                             .get_mut(ws_idx)
                             .floating
                             .iter_mut()
                             .find(|f| f.id == id)
-                        {
-                            fw.geometry.x = x;
-                            fw.geometry.y = y;
-                        }
+                    {
+                        fw.geometry.x = x;
+                        fw.geometry.y = y;
                     }
                 }
             }
@@ -2281,16 +2280,15 @@ impl WmState {
                         return;
                     }
                     self.registry.update_geometry(id, x, y, w, h);
-                    if let Some(ws_idx) = self.workspaces.find_window(id) {
-                        if let Some(fw) = self
+                    if let Some(ws_idx) = self.workspaces.find_window(id)
+                        && let Some(fw) = self
                             .workspaces
                             .get_mut(ws_idx)
                             .floating
                             .iter_mut()
                             .find(|f| f.id == id)
-                        {
-                            fw.geometry = Rect::new(x, y, w, h);
-                        }
+                    {
+                        fw.geometry = Rect::new(x, y, w, h);
                     }
                 }
             }
@@ -2313,9 +2311,6 @@ impl WmState {
                     && let Some(w) = self.registry.get_mut(id)
                 {
                     w.minimized = false;
-                    if self.is_window_hidden(id) {
-                        return;
-                    }
                 }
             }
         }

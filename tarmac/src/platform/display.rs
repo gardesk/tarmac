@@ -278,10 +278,10 @@ pub fn register_display_change_callback(callback: Box<dyn Fn()>) {
         {
             let mut last = LAST_FIRE.lock().unwrap();
             let now = Instant::now();
-            if let Some(t) = *last {
-                if now.duration_since(t).as_millis() < 500 {
-                    return;
-                }
+            if let Some(t) = *last
+                && now.duration_since(t).as_millis() < 500
+            {
+                return;
             }
             *last = Some(now);
         }
