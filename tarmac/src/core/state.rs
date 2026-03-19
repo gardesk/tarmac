@@ -739,6 +739,7 @@ impl WmState {
             tracing::debug!(focused, target, ?direction, "swap_direction");
             if self.active_workspace_mut().tree.swap(focused, target) {
                 self.apply_layout();
+                self.fix_oversized_windows();
             }
         } else {
             tracing::debug!(focused, ?direction, "swap: no adjacent window");
