@@ -84,7 +84,8 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
         }
     };
 
-    tracing::trace!(app = %app.name, ax_window_count = ax_windows.len(), "raw AX windows");
+    let ax_window_count = ax_windows.len();
+    tracing::trace!(app = %app.name, ax_window_count, "raw AX windows");
 
     let mut result = Vec::new();
     for ax_win in ax_windows {
@@ -109,6 +110,13 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
         // Skip phantom windows (transient helpers, popovers, etc.)
         if width < 50.0 || height < 50.0 {
             tracing::debug!(id, app = %app.name, width, height, "skipping phantom window (too small)");
+            continue;
+        }
+
+        // Skip empty-titled windows when the app has multiple AX windows.
+        // The real window has a title; phantoms (helpers, popovers) don't.
+        if title.is_empty() && ax_window_count > 1 {
+            tracing::debug!(id, app = %app.name, "skipping phantom window (empty title, multi-window app)");
             continue;
         }
 

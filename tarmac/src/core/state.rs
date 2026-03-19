@@ -2193,10 +2193,20 @@ impl WmState {
                 let title = ax_get_string(element, "AXTitle").unwrap_or_default();
                 let (x, y) = ax_get_position(element).unwrap_or((0.0, 0.0));
                 let (w, h) = ax_get_size(element).unwrap_or((0.0, 0.0));
-                // Reject phantom windows: zero/tiny size means the window
-                // isn't a real user-visible window (transient helper, popover, etc.)
+                // Reject phantom windows: zero/tiny size or empty-titled
+                // duplicate from an already-tracked app.
                 if w < 50.0 || h < 50.0 {
                     tracing::debug!(id, app = app_name, w, h, "skipping phantom window (too small)");
+                    return;
+                }
+                // Apps like Messages, Codex, WezTerm create invisible helper
+                // windows with AXStandardWindow subrole and valid sizes but
+                // empty titles. If the app already has a window in the registry,
+                // reject empty-titled new windows as phantoms.
+                if title.is_empty()
+                    && self.registry.all().any(|w| w.app_pid == *pid)
+                {
+                    tracing::debug!(id, app = app_name, "skipping phantom window (empty title, app already tracked)");
                     return;
                 }
                 tracing::info!(id, app = app_name, title = %title, "window created -> tiling");
