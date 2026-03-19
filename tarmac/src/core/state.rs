@@ -113,10 +113,14 @@ impl WmState {
         // If usable_frame.y == frame.y, the system didn't deduct a menu bar
         // for this monitor — apply bar_height for sketchybar/etc.
         // If usable_frame.y > frame.y, the system already reserved space.
-        let needs_bar = self.bar_height > 0.0
-            && (r.y - m.frame.y).abs() < 1.0;
+        let needs_bar = self.bar_height > 0.0 && (r.y - m.frame.y).abs() < 1.0;
         if needs_bar {
-            Rect::new(r.x, r.y + self.bar_height, r.width, r.height - self.bar_height)
+            Rect::new(
+                r.x,
+                r.y + self.bar_height,
+                r.width,
+                r.height - self.bar_height,
+            )
         } else {
             r
         }
@@ -129,7 +133,9 @@ impl WmState {
 
     /// Find which monitor index has a workspace visible, if any.
     fn monitor_showing_workspace(&self, ws_idx: usize) -> Option<usize> {
-        self.monitors.iter().position(|m| m.active_workspace == ws_idx)
+        self.monitors
+            .iter()
+            .position(|m| m.active_workspace == ws_idx)
     }
 
     pub fn discover_and_observe(&mut self) {
@@ -149,10 +155,12 @@ impl WmState {
         let (cx, cy) = crate::platform::display::get_cursor_position();
         tracing::info!(cursor_x = cx, cursor_y = cy, "cursor position at startup");
 
-        let cursor_mi = super::monitor::index_at_point(&self.monitors, cx, cy)
-            .unwrap_or(0);
+        let cursor_mi = super::monitor::index_at_point(&self.monitors, cx, cy).unwrap_or(0);
         self.focused_monitor = cursor_mi;
-        tracing::info!(monitor = cursor_mi, "focused monitor set to cursor location");
+        tracing::info!(
+            monitor = cursor_mi,
+            "focused monitor set to cursor location"
+        );
 
         // Assign workspaces: cursor's monitor gets workspace 0 (ws1),
         // then remaining monitors get 1, 2, etc. in left-to-right order.
@@ -228,6 +236,7 @@ impl WmState {
         for queued in events {
             self.handle_event(&queued.event, &queued.app_name, &queued.app_bundle);
         }
+        self.enforce_hidden_workspaces();
     }
 
     // --- Layout ---
@@ -236,56 +245,87 @@ impl WmState {
     /// Uses the yabai/AeroSpace pattern: disable AXEnhancedUserInterface,
     /// then size → position → size per window.
     pub fn apply_layout(&self) {
-        use crate::platform::accessibility::ax_set_bool;
-        let eui_key =
-            objc2_core_foundation::CFString::from_static_str("AXEnhancedUserInterface");
-
         for (mi, monitor) in self.monitors.iter().enumerate() {
             let ws = self.workspaces.get(monitor.active_workspace);
             let screen_rect = self.monitor_rect(mi);
             let geometries = ws.tree.calculate_geometries_with_gaps(
-                screen_rect, self.gap_inner, self.gap_outer, true,
+                screen_rect,
+                self.gap_inner,
+                self.gap_outer,
+                true,
             );
             tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
 
             for (wid, rect) in &geometries {
-                tracing::debug!(wid, x = rect.x, y = rect.y, w = rect.width, h = rect.height, "tile");
-                if let Some(ax_ref) = self.ax_refs.get(wid) {
-                    // Get the app-level AX element to toggle AXEnhancedUserInterface
-                    let app_ref = if let Some(w) = self.registry.get(*wid) {
-                        Some(unsafe { AXUIElement::new_application(w.app_pid) })
-                    } else {
-                        None
-                    };
+                tracing::debug!(
+                    wid,
+                    x = rect.x,
+                    y = rect.y,
+                    w = rect.width,
+                    h = rect.height,
+                    "tile"
+                );
+                self.show_window(*wid, *rect);
+            }
 
-                    // Disable AXEnhancedUserInterface (yabai/AeroSpace workaround).
-                    // This makes macOS more compliant with resize requests.
-                    let was_eui = app_ref.as_ref().and_then(|app| {
-                        crate::platform::accessibility::ax_get_bool(app, &eui_key).ok()
-                    });
-                    if was_eui == Some(true) {
-                        if let Some(app) = &app_ref {
-                            let _ = ax_set_bool(app, &eui_key, false);
-                        }
-                    }
+            for fw in &ws.floating {
+                tracing::debug!(
+                    wid = fw.id,
+                    x = fw.geometry.x,
+                    y = fw.geometry.y,
+                    w = fw.geometry.width,
+                    h = fw.geometry.height,
+                    "show floating"
+                );
+                self.show_window(fw.id, fw.geometry);
+                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+                set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+            }
+        }
+    }
 
-                    // Ensure window is visible (may have been hidden with alpha=0)
-                    crate::platform::skylight::set_window_alpha(*wid, 1.0);
+    fn show_window(&self, wid: WindowId, rect: Rect) {
+        use crate::platform::accessibility::ax_set_bool;
 
-                    // Size → Position → Size (yabai/AeroSpace order)
-                    let _ = ax_set_size(ax_ref, rect.width, rect.height);
-                    let _ = ax_set_position(ax_ref, rect.x, rect.y);
-                    let _ = ax_set_size(ax_ref, rect.width, rect.height);
+        let Some(ax_ref) = self.ax_refs.get(&wid) else {
+            return;
+        };
 
-                    // Restore AXEnhancedUserInterface
-                    if was_eui == Some(true) {
-                        if let Some(app) = &app_ref {
-                            let _ = ax_set_bool(app, &eui_key, true);
-                        }
-                    }
-                }
+        let eui_key = objc2_core_foundation::CFString::from_static_str("AXEnhancedUserInterface");
+        let app_ref = self
+            .registry
+            .get(wid)
+            .map(|w| unsafe { AXUIElement::new_application(w.app_pid) });
+
+        // Disable AXEnhancedUserInterface (yabai/AeroSpace workaround).
+        // This makes macOS more compliant with resize requests.
+        let was_eui = app_ref
+            .as_ref()
+            .and_then(|app| crate::platform::accessibility::ax_get_bool(app, &eui_key).ok());
+        if was_eui == Some(true) {
+            if let Some(app) = &app_ref {
+                let _ = ax_set_bool(app, &eui_key, false);
+            }
+        }
+
+        // Reassert visibility before and after geometry changes in case the
+        // app recreates backing surfaces while being shown again.
+        let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 1.0);
+        let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
+
+        // Size → Position → Size (yabai/AeroSpace order)
+        let _ = ax_set_size(ax_ref, rect.width, rect.height);
+        let _ = ax_set_position(ax_ref, rect.x, rect.y);
+        let _ = ax_set_size(ax_ref, rect.width, rect.height);
+        let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 1.0);
+        let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
+
+        // Restore AXEnhancedUserInterface
+        if was_eui == Some(true) {
+            if let Some(app) = &app_ref {
+                let _ = ax_set_bool(app, &eui_key, true);
             }
         }
     }
@@ -314,7 +354,8 @@ impl WmState {
             }
 
             // Determine the screen rect for this workspace's layout.
-            let screen_rect = self.monitor_showing_workspace(ws_idx)
+            let screen_rect = self
+                .monitor_showing_workspace(ws_idx)
                 .map(|mi| self.monitor_rect(mi))
                 .unwrap_or_else(|| self.focused_rect());
 
@@ -332,16 +373,27 @@ impl WmState {
                     // Geometries are computed from the BSP tree (cheap, no AX).
                     // After batched swaps, tree geometry reflects the new layout
                     // even before apply_layout sends AX commands.
-                    let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
-                        screen_rect, self.gap_inner, self.gap_outer, true,
-                    );
-                    if geometries.is_empty() { break; }
+                    let geometries = self
+                        .workspaces
+                        .get(ws_idx)
+                        .tree
+                        .calculate_geometries_with_gaps(
+                            screen_rect,
+                            self.gap_inner,
+                            self.gap_outer,
+                            true,
+                        );
+                    if geometries.is_empty() {
+                        break;
+                    }
 
                     // Find the first oversized window (skip settled and no-swap).
                     // Use the pre-swap ax_get_size (actual minimum) against the
                     // BSP-computed tile rect to decide if a swap is needed.
                     let oversized = geometries.iter().find_map(|(wid, rect)| {
-                        if settled.contains(wid) || no_swap.contains(wid) { return None; }
+                        if settled.contains(wid) || no_swap.contains(wid) {
+                            return None;
+                        }
                         let ax_ref = self.ax_refs.get(wid)?;
                         let (aw, ah) = ax_get_size(ax_ref).ok()?;
                         if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
@@ -356,19 +408,23 @@ impl WmState {
                         None => break,
                     };
 
-                    let best_swap = geometries.iter()
+                    let best_swap = geometries
+                        .iter()
                         .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
                         .filter(|(_, rect)| rect.width >= min_w - 1.0 && rect.height >= min_h - 1.0)
                         .max_by(|(_, a), (_, b)| {
-                            (a.width * a.height).partial_cmp(&(b.width * b.height))
+                            (a.width * a.height)
+                                .partial_cmp(&(b.width * b.height))
                                 .unwrap_or(std::cmp::Ordering::Equal)
                         })
                         .map(|(wid, _)| *wid);
 
                     if let Some(swap_target) = best_swap {
                         tracing::info!(
-                            oversized = ow, target = swap_target,
-                            ws = ws_idx + 1, "swapping oversized window into larger tile"
+                            oversized = ow,
+                            target = swap_target,
+                            ws = ws_idx + 1,
+                            "swapping oversized window into larger tile"
                         );
                         // Swap in BSP tree only — no apply_layout yet
                         self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
@@ -395,16 +451,27 @@ impl WmState {
             // The recursive pass will handle any overflow on the target workspace.
             let mut evict_search_from = ws_idx + 1;
             loop {
-                let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
-                    screen_rect, self.gap_inner, self.gap_outer, true,
-                );
-                if geometries.is_empty() { break; }
+                let geometries = self
+                    .workspaces
+                    .get(ws_idx)
+                    .tree
+                    .calculate_geometries_with_gaps(
+                        screen_rect,
+                        self.gap_inner,
+                        self.gap_outer,
+                        true,
+                    );
+                if geometries.is_empty() {
+                    break;
+                }
 
                 // A single window alone on a workspace can never truly overflow —
                 // it gets the full screen. ax_get_size may return a stale size from
                 // a previous tile, not the actual minimum. Skip overflow detection
                 // for solo windows.
-                if geometries.len() <= 1 { break; }
+                if geometries.len() <= 1 {
+                    break;
+                }
 
                 let oversized = geometries.iter().find_map(|(wid, rect)| {
                     let ax_ref = self.ax_refs.get(wid)?;
@@ -438,9 +505,8 @@ impl WmState {
                 evict_search_from = next_ws + 1;
 
                 // Check if we've wrapped all the way around.
-                let hit_limit = first_overflow_ws.is_some_and(|first| {
-                    processed.contains(&next_ws) || next_ws == first
-                });
+                let hit_limit = first_overflow_ws
+                    .is_some_and(|first| processed.contains(&next_ws) || next_ws == first);
 
                 if hit_limit {
                     self.float_oversized_on_workspace(ws_idx, screen_rect);
@@ -452,8 +518,11 @@ impl WmState {
                 }
 
                 tracing::info!(
-                    id = oversized_wid, min_w, min_h,
-                    from_ws = ws_idx + 1, to_ws = next_ws + 1,
+                    id = oversized_wid,
+                    min_w,
+                    min_h,
+                    from_ws = ws_idx + 1,
+                    to_ws = next_ws + 1,
                     "evicting oversized window to next workspace"
                 );
 
@@ -468,17 +537,26 @@ impl WmState {
                 // Hide and re-layout the SOURCE workspace (without the evicted window).
                 // Do this BEFORE inserting into the target so apply_layout
                 // can't accidentally restore alpha=1.0 on the evicted window.
-                self.hide_window(oversized_wid);
+                let source_monitor = self.monitor_showing_workspace(ws_idx).unwrap_or(
+                    self.focused_monitor
+                        .min(self.monitors.len().saturating_sub(1)),
+                );
+                let source_frame = self.monitors[source_monitor].frame;
+                self.hide_window_on_frame(oversized_wid, source_frame, Some(source_monitor));
+                self.log_hidden_window_diagnostics(oversized_wid, "post-evict-hide");
                 self.apply_layout();
 
                 // Now insert into target workspace (already hidden)
-                let target_rect = self.monitor_showing_workspace(next_ws)
+                let target_rect = self
+                    .monitor_showing_workspace(next_ws)
                     .map(|tmi| self.monitor_rect(tmi))
                     .unwrap_or(screen_rect);
                 let target_ws = self.workspaces.get_or_create(next_ws);
-                target_ws.tree.insert_with_rect(
-                    oversized_wid, target_ws.focused, target_rect,
-                );
+                target_ws.last_monitor = Some(source_monitor);
+                target_ws.last_display_id = Some(self.monitors[source_monitor].id);
+                target_ws
+                    .tree
+                    .insert_with_rect(oversized_wid, target_ws.focused, target_rect);
                 target_ws.record_focus(oversized_wid);
 
                 // Only queue VISIBLE target workspaces for overflow checking.
@@ -507,10 +585,15 @@ impl WmState {
             }
             let wids = self.workspaces.get(ws_idx).all_window_ids();
             if !wids.is_empty() {
-                tracing::info!(ws = ws_idx + 1, count = wids.len(), "safety net hiding non-visible workspace");
+                tracing::info!(
+                    ws = ws_idx + 1,
+                    count = wids.len(),
+                    "safety net hiding non-visible workspace"
+                );
             }
             for wid in wids {
                 self.hide_window(wid);
+                self.log_hidden_window_diagnostics(wid, "post-safety-hide");
             }
         }
     }
@@ -519,10 +602,14 @@ impl WmState {
     /// Only called when every workspace has been tried and overflow persists.
     fn float_oversized_on_workspace(&mut self, ws_idx: usize, screen_rect: Rect) {
         loop {
-            let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
-                screen_rect, self.gap_inner, self.gap_outer, true,
-            );
-            if geometries.is_empty() { break; }
+            let geometries = self
+                .workspaces
+                .get(ws_idx)
+                .tree
+                .calculate_geometries_with_gaps(screen_rect, self.gap_inner, self.gap_outer, true);
+            if geometries.is_empty() {
+                break;
+            }
 
             let oversized = geometries.iter().find_map(|(wid, rect)| {
                 let ax_ref = self.ax_refs.get(wid)?;
@@ -540,10 +627,15 @@ impl WmState {
             };
 
             tracing::warn!(
-                id = oversized_wid, min_w, min_h, ws = ws_idx + 1,
+                id = oversized_wid,
+                min_w,
+                min_h,
+                ws = ws_idx + 1,
                 "last-resort float: all workspaces exhausted"
             );
-            self.workspaces.get_mut(ws_idx).toggle_float(oversized_wid, screen_rect);
+            self.workspaces
+                .get_mut(ws_idx)
+                .toggle_float(oversized_wid, screen_rect);
             if let Some(ax_ref) = self.ax_refs.get(&oversized_wid) {
                 let fx = screen_rect.x + (screen_rect.width - min_w) / 2.0;
                 let fy = screen_rect.y + (screen_rect.height - min_h) / 2.0;
@@ -567,7 +659,9 @@ impl WmState {
 
         // Try intra-workspace navigation first (only if we have a focused window)
         if let Some(from) = focused {
-            let geoms = ws.tree.calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+            let geoms =
+                ws.tree
+                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
             if let Some(target) = Node::find_adjacent(&geoms, from, direction) {
                 self.focus_window(target);
                 if self.mouse_follows_focus
@@ -587,18 +681,26 @@ impl WmState {
             return;
         }
         let new_mi = match direction {
-            Direction::Right => super::monitor::next_index_nowrap(&self.monitors, self.focused_monitor),
-            Direction::Left => super::monitor::prev_index_nowrap(&self.monitors, self.focused_monitor),
+            Direction::Right => {
+                super::monitor::next_index_nowrap(&self.monitors, self.focused_monitor)
+            }
+            Direction::Left => {
+                super::monitor::prev_index_nowrap(&self.monitors, self.focused_monitor)
+            }
             _ => None,
         };
         if let Some(new_mi) = new_mi {
             self.focused_monitor = new_mi;
             let target_sr = self.focused_rect();
-            let target_geoms = self.active_workspace().tree
-                .calculate_geometries_with_gaps(target_sr, self.gap_inner, self.gap_outer, true);
+            let target_geoms = self.active_workspace().tree.calculate_geometries_with_gaps(
+                target_sr,
+                self.gap_inner,
+                self.gap_outer,
+                true,
+            );
 
-            if let Some(wid) = Node::nearest_to_edge(&target_geoms, direction)
-                .or(self.active_workspace().focused)
+            if let Some(wid) =
+                Node::nearest_to_edge(&target_geoms, direction).or(self.active_workspace().focused)
             {
                 // Target has windows — focus the nearest one
                 self.focus_window(wid);
@@ -606,9 +708,8 @@ impl WmState {
                     if let Some((_, rect)) = target_geoms.iter().find(|(id, _)| *id == wid) {
                         warp_mouse_to_center(rect);
                     }
-                    self.ffm_cooldown_until = Some(
-                        std::time::Instant::now() + std::time::Duration::from_millis(200),
-                    );
+                    self.ffm_cooldown_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
                     self.ffm_last_window = Some(wid);
                 }
             } else {
@@ -618,9 +719,8 @@ impl WmState {
                 self.ffm_last_window = None;
                 if self.mouse_follows_focus {
                     warp_mouse_to_center(&target_sr);
-                    self.ffm_cooldown_until = Some(
-                        std::time::Instant::now() + std::time::Duration::from_millis(200),
-                    );
+                    self.ffm_cooldown_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
                 }
             }
             tracing::debug!(monitor = new_mi, "crossed to adjacent monitor");
@@ -636,12 +736,7 @@ impl WmState {
         let sr = self.focused_rect();
         let geoms = ws.tree.calculate_geometries(sr);
         if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
-            tracing::debug!(
-                focused,
-                target,
-                ?direction,
-                "swap_direction"
-            );
+            tracing::debug!(focused, target, ?direction, "swap_direction");
             if self.active_workspace_mut().tree.swap(focused, target) {
                 self.apply_layout();
             }
@@ -692,9 +787,8 @@ impl WmState {
                     };
                     let frontmost_key =
                         objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                    let _ = crate::platform::accessibility::ax_set_bool(
-                        &app_ref, &frontmost_key, true,
-                    );
+                    let _ =
+                        crate::platform::accessibility::ax_set_bool(&app_ref, &frontmost_key, true);
                     crate::platform::application::activate_app(w.app_pid);
                 }
                 let _ = ax_perform_action(ax_ref, "AXRaise");
@@ -724,7 +818,8 @@ impl WmState {
     /// Start a move drag on a floating window (Cmd+LeftClick).
     pub fn begin_move_drag(&mut self, x: f64, y: f64) {
         // Find which floating window is under the cursor
-        let hit = self.active_workspace()
+        let hit = self
+            .active_workspace()
             .floating
             .iter()
             .rev()
@@ -743,7 +838,8 @@ impl WmState {
 
     /// Start a resize drag on a floating window (Cmd+RightClick).
     pub fn begin_resize_drag(&mut self, x: f64, y: f64) {
-        let hit = self.active_workspace()
+        let hit = self
+            .active_workspace()
             .floating
             .iter()
             .rev()
@@ -865,16 +961,17 @@ impl WmState {
         // to a different display so FFM checks the correct workspace.
         // Use exact hit test first, fall back to nearest monitor by x distance
         // (handles cases where cursor is at a Y position outside a shorter monitor).
-        let detected_mi = super::monitor::index_at_point(&self.monitors, x, y)
-            .or_else(|| {
-                // Nearest monitor by x distance
-                self.monitors.iter().enumerate()
-                    .min_by_key(|(_, m)| {
-                        let cx = m.frame.x + m.frame.width / 2.0;
-                        ((x - cx).abs() * 1000.0) as i64
-                    })
-                    .map(|(i, _)| i)
-            });
+        let detected_mi = super::monitor::index_at_point(&self.monitors, x, y).or_else(|| {
+            // Nearest monitor by x distance
+            self.monitors
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, m)| {
+                    let cx = m.frame.x + m.frame.width / 2.0;
+                    ((x - cx).abs() * 1000.0) as i64
+                })
+                .map(|(i, _)| i)
+        });
         if let Some(mi) = detected_mi {
             if mi != self.focused_monitor {
                 // Deactivate the previous monitor's focused window so its title
@@ -885,7 +982,8 @@ impl WmState {
                 if let Some(old_wid) = self.workspaces.get(old_ws_idx).focused {
                     if let Some(ax_ref) = self.ax_refs.get(&old_wid) {
                         let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
-                        let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, false);
+                        let _ =
+                            crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, false);
                     }
                 }
 
@@ -943,7 +1041,6 @@ impl WmState {
                 self.focus_window(id);
             }
         }
-
     }
 
     pub fn toggle_float(&mut self) {
@@ -1021,7 +1118,9 @@ impl WmState {
         let target_idx = (num as usize).saturating_sub(1);
         let current_idx = self.monitors[self.focused_monitor].active_workspace;
 
-        if target_idx == current_idx { return; }
+        if target_idx == current_idx {
+            return;
+        }
 
         tracing::info!(from = current_idx + 1, to = num, "switching workspace");
 
@@ -1034,20 +1133,25 @@ impl WmState {
                 // Warp to the focused WINDOW center (not monitor center)
                 if self.mouse_follows_focus {
                     let sr = self.focused_rect();
-                    let geoms = self.workspaces.get(target_idx).tree
+                    let geoms = self
+                        .workspaces
+                        .get(target_idx)
+                        .tree
                         .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
                     if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                         warp_mouse_to_center(rect);
                     } else {
                         warp_mouse_to_center(&sr);
                     }
-                    self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                    self.ffm_cooldown_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
                     self.ffm_last_window = Some(wid);
                 }
             } else if self.mouse_follows_focus {
                 let rect = self.focused_rect();
                 warp_mouse_to_center(&rect);
-                self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.ffm_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
             }
             tracing::info!(ws = num, monitor = other_mi, "jumped to visible workspace");
             return;
@@ -1080,7 +1184,8 @@ impl WmState {
         self.monitors[show_on_monitor].active_workspace = target_idx;
         self.workspaces.get_mut(target_idx).visible = true;
         self.workspaces.get_mut(target_idx).last_monitor = Some(show_on_monitor);
-        self.workspaces.get_mut(target_idx).last_display_id = Some(self.monitors[show_on_monitor].id);
+        self.workspaces.get_mut(target_idx).last_display_id =
+            Some(self.monitors[show_on_monitor].id);
         self.focused_monitor = show_on_monitor;
 
         // Apply layout with double-apply for cross-monitor moves
@@ -1093,62 +1198,186 @@ impl WmState {
             self.focus_window(wid);
             if self.mouse_follows_focus {
                 let sr = self.focused_rect();
-                let geoms = self.workspaces.get(target_idx).tree
+                let geoms = self
+                    .workspaces
+                    .get(target_idx)
+                    .tree
                     .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
                 if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                     warp_mouse_to_center(rect);
                 } else {
                     warp_mouse_to_center(&sr);
                 }
-                self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.ffm_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
                 self.ffm_last_window = Some(wid);
             }
         } else if self.mouse_follows_focus {
             let rect = self.focused_rect();
             warp_mouse_to_center(&rect);
-            self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+            self.ffm_cooldown_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
         }
         tracing::info!(ws = num, monitor = show_on_monitor, "switched workspace");
     }
 
-    /// Hide all windows on a workspace by positioning them below their monitor.
-    /// This is the proven approach from AeroSpace — macOS clamps AX positions
-    /// to the window's current monitor, so positioning just below the monitor's
-    /// bottom edge keeps the window fully off-screen on THAT monitor.
+    /// Hide all windows on a workspace by positioning them below the monitor
+    /// that is currently showing that workspace. macOS clamps AX moves to the
+    /// window's current monitor; keeping the full-size window anchored to that
+    /// monitor avoids the large visible strip that appears when a resize is
+    /// rejected and only the y-position is clamped.
     fn hide_workspace_windows(&self, ws_idx: usize, monitor_idx: usize) {
         let hide_frame = self.monitors[monitor_idx].frame;
-        let hide_y = hide_frame.y + hide_frame.height + 5000.0;
         let ws = self.workspaces.get(ws_idx);
         for wid in ws.all_window_ids() {
-            if let Some(ax_ref) = self.ax_refs.get(&wid) {
-                let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-                let hide_x = hide_frame.x + 1.0 - w;
-                let _ = ax_set_position(ax_ref, hide_x, hide_y);
+            self.hide_window_on_frame(wid, hide_frame, Some(monitor_idx));
+        }
+    }
+
+    /// Hide all windows on a workspace without relying on a monitor-specific
+    /// AX hide position. Works even after monitor detach.
+    fn hide_workspace_windows_immediate(&self, ws_idx: usize) {
+        let ws = self.workspaces.get(ws_idx);
+        for wid in ws.all_window_ids() {
+            let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 0.0);
+            let _ = crate::platform::skylight::set_window_group_alpha(wid, 0.0);
+        }
+    }
+
+    /// Hide a single window using its workspace's monitor affinity.
+    /// Keep the window full-size and use the same per-monitor coordinates that
+    /// previously worked for workspace switching: right edge at monitor.x + 1,
+    /// y well below the monitor bottom so macOS clamps it just off-screen.
+    fn hide_window(&self, wid: WindowId) {
+        let (hide_frame, monitor_idx) = self.hide_anchor_frame(wid);
+        self.hide_window_on_frame(wid, hide_frame, monitor_idx);
+    }
+
+    fn hide_window_on_frame(&self, wid: WindowId, hide_frame: Rect, monitor_idx: Option<usize>) {
+        let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 0.0);
+        let _ = crate::platform::skylight::set_window_group_alpha(wid, 0.0);
+
+        let ax_ref = self.ax_refs.get(&wid);
+        let width = ax_ref
+            .and_then(|ax_ref| ax_get_size(ax_ref).ok().map(|(w, _)| w))
+            .or_else(|| self.registry.get(wid).map(|window| window.width))
+            .unwrap_or(2048.0);
+        let (hide_x, hide_y) =
+            hide_target_for_frame(hide_frame, width, monitor_idx, &self.monitors);
+
+        if let Some(window) = self.registry.get(wid)
+            && window.app_name == "Music"
+        {
+            tracing::info!(
+                wid,
+                anchor_x = hide_frame.x,
+                anchor_y = hide_frame.y,
+                anchor_w = hide_frame.width,
+                anchor_h = hide_frame.height,
+                hide_x,
+                hide_y,
+                hide_monitor = monitor_idx,
+                "hidden window target"
+            );
+        }
+
+        if let Some(ax_ref) = ax_ref {
+            let _ = ax_set_position(ax_ref, hide_x, hide_y);
+        } else {
+            let _ = crate::platform::skylight::move_window(wid, hide_x, hide_y);
+        }
+
+        // Reassert opacity after the move in case the app redraws itself.
+        let _ = crate::platform::skylight::set_window_group_alpha(wid, 0.0);
+        let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 0.0);
+    }
+
+    fn hide_anchor_frame(&self, wid: WindowId) -> (Rect, Option<usize>) {
+        if self.monitors.is_empty() {
+            return (Rect::new(-32_000.0, -32_000.0, 1.0, 1.0), None);
+        }
+
+        if let Some(ws_idx) = self.workspaces.find_window(wid) {
+            if let Some(mi) = self.monitor_showing_workspace(ws_idx) {
+                return (self.monitors[mi].frame, Some(mi));
+            }
+
+            let ws = self.workspaces.get(ws_idx);
+            if let Some(mi) = ws.last_monitor.filter(|&mi| mi < self.monitors.len()) {
+                return (self.monitors[mi].frame, Some(mi));
+            }
+            if let Some(display_id) = ws.last_display_id
+                && let Some((mi, monitor)) = self
+                    .monitors
+                    .iter()
+                    .enumerate()
+                    .find(|(_, monitor)| monitor.id == display_id)
+            {
+                return (monitor.frame, Some(mi));
+            }
+        }
+
+        let fallback_monitor = self.focused_monitor.min(self.monitors.len() - 1);
+        (
+            self.monitors[fallback_monitor].frame,
+            Some(fallback_monitor),
+        )
+    }
+
+    fn enforce_hidden_workspaces(&self) {
+        for ws_idx in 0..self.workspaces.count() {
+            if self.workspaces.get(ws_idx).visible {
+                continue;
+            }
+            for wid in self.workspaces.get(ws_idx).all_window_ids() {
+                self.hide_window(wid);
             }
         }
     }
 
-    /// Hide all windows on a workspace immediately using WindowServer alpha.
-    /// Does not need a valid monitor frame — works even after monitor detach.
-    fn hide_workspace_windows_immediate(&self, ws_idx: usize) {
-        let ws = self.workspaces.get(ws_idx);
-        for wid in ws.all_window_ids() {
-            crate::platform::skylight::set_window_alpha(wid, 0.0);
+    fn log_hidden_window_diagnostics(&self, wid: WindowId, phase: &'static str) {
+        let Some(window) = self.registry.get(wid) else {
+            return;
+        };
+        if window.app_name != "Music" {
+            return;
         }
-    }
 
-    /// Hide a single window after eviction. Uses alpha=0 plus AX position
-    /// below the focused monitor. The AX position goes through the same
-    /// channel as apply_layout, so the app processes it after any prior
-    /// positioning commands.
-    fn hide_window(&self, wid: super::window::WindowId) {
-        crate::platform::skylight::set_window_alpha(wid, 0.0);
-        if let Some(ax_ref) = self.ax_refs.get(&wid) {
-            let hide_frame = self.monitors[self.focused_monitor].frame;
-            let (w, _) = ax_get_size(ax_ref).unwrap_or((2048.0, 1400.0));
-            let hide_x = hide_frame.x + 1.0 - w;
-            let hide_y = hide_frame.y + hide_frame.height + 5000.0;
-            let _ = ax_set_position(ax_ref, hide_x, hide_y);
+        let ws_idx = self.workspaces.find_window(wid);
+        let group_ids = crate::platform::skylight::window_group_ids(wid);
+        let on_screen: Vec<_> = crate::platform::application::get_cg_window_list_all_layers()
+            .into_iter()
+            .filter(|cg| cg.pid == window.app_pid || group_ids.contains(&cg.wid))
+            .collect();
+
+        tracing::info!(
+            phase,
+            wid,
+            pid = window.app_pid,
+            app = %window.app_name,
+            workspace = ws_idx.map(|idx| idx + 1),
+            workspace_visible = ws_idx.map(|idx| self.workspaces.get(idx).visible),
+            group_ids = ?group_ids,
+            on_screen_count = on_screen.len(),
+            "hidden window diagnostics"
+        );
+
+        for cg in on_screen {
+            tracing::info!(
+                phase,
+                root_wid = wid,
+                cg_wid = cg.wid,
+                pid = cg.pid,
+                owner = %cg.owner,
+                title = %cg.title,
+                layer = cg.layer,
+                alpha = cg.alpha,
+                x = cg.x,
+                y = cg.y,
+                w = cg.width,
+                h = cg.height,
+                "hidden window cg state"
+            );
         }
     }
 
@@ -1173,7 +1402,9 @@ impl WmState {
     }
 
     pub fn focus_monitor_next(&mut self) {
-        if self.monitors.len() <= 1 { return; }
+        if self.monitors.len() <= 1 {
+            return;
+        }
         let next = super::monitor::next_index(&self.monitors, self.focused_monitor);
         self.focused_monitor = next;
         self.apply_layout();
@@ -1181,26 +1412,34 @@ impl WmState {
             self.focus_window(wid);
             if self.mouse_follows_focus {
                 let sr = self.focused_rect();
-                let geoms = self.active_workspace().tree
-                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+                let geoms = self.active_workspace().tree.calculate_geometries_with_gaps(
+                    sr,
+                    self.gap_inner,
+                    self.gap_outer,
+                    true,
+                );
                 if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                     warp_mouse_to_center(rect);
                 } else {
                     warp_mouse_to_center(&sr);
                 }
-                self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.ffm_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
                 self.ffm_last_window = Some(wid);
             }
         } else if self.mouse_follows_focus {
             let sr = self.focused_rect();
             warp_mouse_to_center(&sr);
-            self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+            self.ffm_cooldown_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
         }
         tracing::info!(monitor = next, ws = %self.active_workspace().id, "focused monitor");
     }
 
     pub fn focus_monitor_prev(&mut self) {
-        if self.monitors.len() <= 1 { return; }
+        if self.monitors.len() <= 1 {
+            return;
+        }
         let prev = super::monitor::prev_index(&self.monitors, self.focused_monitor);
         self.focused_monitor = prev;
         self.apply_layout();
@@ -1208,26 +1447,34 @@ impl WmState {
             self.focus_window(wid);
             if self.mouse_follows_focus {
                 let sr = self.focused_rect();
-                let geoms = self.active_workspace().tree
-                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+                let geoms = self.active_workspace().tree.calculate_geometries_with_gaps(
+                    sr,
+                    self.gap_inner,
+                    self.gap_outer,
+                    true,
+                );
                 if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                     warp_mouse_to_center(rect);
                 } else {
                     warp_mouse_to_center(&sr);
                 }
-                self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                self.ffm_cooldown_until =
+                    Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
                 self.ffm_last_window = Some(wid);
             }
         } else if self.mouse_follows_focus {
             let sr = self.focused_rect();
             warp_mouse_to_center(&sr);
-            self.ffm_cooldown_until = Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+            self.ffm_cooldown_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
         }
         tracing::info!(monitor = prev, ws = %self.active_workspace().id, "focused monitor");
     }
 
     pub fn move_to_monitor_next(&mut self) {
-        if self.monitors.len() <= 1 { return; }
+        if self.monitors.len() <= 1 {
+            return;
+        }
         let next = super::monitor::next_index(&self.monitors, self.focused_monitor);
         if next != self.focused_monitor {
             self.move_window_to_monitor(next);
@@ -1235,7 +1482,9 @@ impl WmState {
     }
 
     pub fn move_to_monitor_prev(&mut self) {
-        if self.monitors.len() <= 1 { return; }
+        if self.monitors.len() <= 1 {
+            return;
+        }
         let prev = super::monitor::prev_index(&self.monitors, self.focused_monitor);
         if prev != self.focused_monitor {
             self.move_window_to_monitor(prev);
@@ -1314,11 +1563,7 @@ impl WmState {
         self.focused_monitor = target_mi;
         self.focus_window(focused);
 
-        tracing::info!(
-            id = focused,
-            monitor = target_mi,
-            "moved window to monitor"
-        );
+        tracing::info!(id = focused, monitor = target_mi, "moved window to monitor");
     }
 
     /// Re-discover displays and reassign workspaces. Called on hotplug.
@@ -1332,18 +1577,14 @@ impl WmState {
         });
 
         let old_count = self.monitors.len();
-        let old_focused_display_id = self
-            .monitors
-            .get(self.focused_monitor)
-            .map(|m| m.id);
+        let old_focused_display_id = self.monitors.get(self.focused_monitor).map(|m| m.id);
 
         // Collect old display IDs for orphan detection
         let old_display_ids: Vec<u32> = self.monitors.iter().map(|m| m.id).collect();
         let new_display_ids: Vec<u32> = new_displays.iter().map(|d| d.id).collect();
 
         // --- Phase 1: Match new displays to old by CGDirectDisplayID ---
-        let mut new_monitors: Vec<super::monitor::Monitor> =
-            Vec::with_capacity(new_displays.len());
+        let mut new_monitors: Vec<super::monitor::Monitor> = Vec::with_capacity(new_displays.len());
         let mut used_ws: Vec<bool> = vec![false; self.workspaces.count()];
 
         for nd in &new_displays {
@@ -1404,8 +1645,7 @@ impl WmState {
                 .or_else(|| {
                     // Second preference: first invisible workspace
                     (0..self.workspaces.count()).find(|&i| {
-                        !used_ws.get(i).copied().unwrap_or(false)
-                            && !self.workspaces.get(i).visible
+                        !used_ws.get(i).copied().unwrap_or(false) && !self.workspaces.get(i).visible
                     })
                 })
                 .unwrap_or_else(|| {
@@ -1448,7 +1688,11 @@ impl WmState {
                 self.ffm_last_window = None;
                 self.ffm_cooldown_until = None;
                 tracing::info!("focused monitor detached, recovering focus to monitor 0");
-                if let Some(wid) = self.workspaces.get(self.monitors[0].active_workspace).focused {
+                if let Some(wid) = self
+                    .workspaces
+                    .get(self.monitors[0].active_workspace)
+                    .focused
+                {
                     self.focus_window(wid);
                 }
                 let sr = self.monitor_rect(0);
@@ -1464,13 +1708,19 @@ impl WmState {
         self.apply_layout();
         self.fix_oversized_windows();
 
-        tracing::info!(old_count, new_count = self.monitors.len(), "monitors refreshed");
+        tracing::info!(
+            old_count,
+            new_count = self.monitors.len(),
+            "monitors refreshed"
+        );
     }
 
     pub fn move_to_workspace(&mut self, num: u8) {
         let target_idx = (num as usize).saturating_sub(1);
         let current_idx = self.active_ws_idx();
-        if target_idx == current_idx { return; }
+        if target_idx == current_idx {
+            return;
+        }
 
         let focused = match self.active_workspace().focused {
             Some(f) => f,
@@ -1487,22 +1737,30 @@ impl WmState {
         }
         current_ws.focus_history.retain(|id| *id != focused);
         if current_ws.focused == Some(focused) {
-            current_ws.focused = current_ws.focus_history.last().copied()
+            current_ws.focused = current_ws
+                .focus_history
+                .last()
+                .copied()
                 .or(current_ws.tree.first_window());
         }
 
         // Insert into target workspace
-        let target_rect = self.monitor_showing_workspace(target_idx)
+        let target_rect = self
+            .monitor_showing_workspace(target_idx)
             .map(|mi| self.monitor_rect(mi))
             .unwrap_or(self.focused_rect());
         let target_ws = self.workspaces.get_or_create(target_idx);
+        target_ws.last_monitor = Some(self.focused_monitor);
+        target_ws.last_display_id = Some(self.monitors[self.focused_monitor].id);
         if was_floating {
             target_ws.floating.push(super::workspace::FloatingWindow {
                 id: focused,
                 geometry: Rect::new(target_rect.x + 50.0, target_rect.y + 50.0, 800.0, 600.0),
             });
         } else {
-            target_ws.tree.insert_with_rect(focused, target_ws.focused, target_rect);
+            target_ws
+                .tree
+                .insert_with_rect(focused, target_ws.focused, target_rect);
         }
         target_ws.record_focus(focused);
 
@@ -1542,13 +1800,17 @@ impl WmState {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Check if the moved window actually overflows
-        let geometries = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
-            screen_rect, self.gap_inner, self.gap_outer, true,
-        );
+        let geometries = self
+            .workspaces
+            .get(ws_idx)
+            .tree
+            .calculate_geometries_with_gaps(screen_rect, self.gap_inner, self.gap_outer, true);
 
         let (_min_w, _min_h) = match geometries.iter().find(|(wid, _)| *wid == moved_wid) {
             Some((_, rect)) => {
-                let (aw, ah) = self.ax_refs.get(&moved_wid)
+                let (aw, ah) = self
+                    .ax_refs
+                    .get(&moved_wid)
                     .and_then(|ax| ax_get_size(ax).ok())
                     .unwrap_or((0.0, 0.0));
                 if aw <= rect.width + 1.0 && ah <= rect.height + 1.0 {
@@ -1562,14 +1824,20 @@ impl WmState {
         // Try swaps with settled-set logic (same as fix_oversized_windows phase 1)
         let mut settled: Vec<super::window::WindowId> = Vec::new();
         loop {
-            let geoms = self.workspaces.get(ws_idx).tree.calculate_geometries_with_gaps(
-                screen_rect, self.gap_inner, self.gap_outer, true,
-            );
-            if geoms.is_empty() { break; }
+            let geoms = self
+                .workspaces
+                .get(ws_idx)
+                .tree
+                .calculate_geometries_with_gaps(screen_rect, self.gap_inner, self.gap_outer, true);
+            if geoms.is_empty() {
+                break;
+            }
 
             // Find first unsettled oversized window
             let oversized = geoms.iter().find_map(|(wid, rect)| {
-                if settled.contains(wid) { return None; }
+                if settled.contains(wid) {
+                    return None;
+                }
                 let ax_ref = self.ax_refs.get(wid)?;
                 let (aw, ah) = ax_get_size(ax_ref).ok()?;
                 if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
@@ -1584,19 +1852,23 @@ impl WmState {
                 None => return, // All fixed by swaps
             };
 
-            let best_swap = geoms.iter()
+            let best_swap = geoms
+                .iter()
                 .filter(|(wid, _)| *wid != ow && !settled.contains(wid))
                 .filter(|(_, rect)| rect.width >= ow_min_w - 1.0 && rect.height >= ow_min_h - 1.0)
                 .max_by(|(_, a), (_, b)| {
-                    (a.width * a.height).partial_cmp(&(b.width * b.height))
+                    (a.width * a.height)
+                        .partial_cmp(&(b.width * b.height))
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
                 .map(|(wid, _)| *wid);
 
             if let Some(swap_target) = best_swap {
                 tracing::info!(
-                    oversized = ow, target = swap_target,
-                    ws = ws_idx + 1, "swapping oversized window into larger tile"
+                    oversized = ow,
+                    target = swap_target,
+                    ws = ws_idx + 1,
+                    "swapping oversized window into larger tile"
                 );
                 self.workspaces.get_mut(ws_idx).tree.swap(ow, swap_target);
                 self.apply_layout();
@@ -1604,10 +1876,15 @@ impl WmState {
             } else {
                 // No swap possible — float this window centered
                 tracing::info!(
-                    id = ow, min_w = ow_min_w, min_h = ow_min_h,
-                    ws = ws_idx + 1, "floating oversized window on target workspace"
+                    id = ow,
+                    min_w = ow_min_w,
+                    min_h = ow_min_h,
+                    ws = ws_idx + 1,
+                    "floating oversized window on target workspace"
                 );
-                self.workspaces.get_mut(ws_idx).toggle_float(ow, screen_rect);
+                self.workspaces
+                    .get_mut(ws_idx)
+                    .toggle_float(ow, screen_rect);
                 if let Some(ax_ref) = self.ax_refs.get(&ow) {
                     let fx = screen_rect.x + (screen_rect.width - ow_min_w) / 2.0;
                     let fy = screen_rect.y + (screen_rect.height - ow_min_h) / 2.0;
@@ -1857,7 +2134,8 @@ impl WmState {
         if let Some(ws_num) = rule_workspace {
             let target_idx = (ws_num as usize).saturating_sub(1);
             let is_active = target_idx == self.active_ws_idx();
-            let target_rect = self.monitor_showing_workspace(target_idx)
+            let target_rect = self
+                .monitor_showing_workspace(target_idx)
                 .map(|mi| self.monitor_rect(mi))
                 .unwrap_or(self.focused_rect());
 
@@ -1959,6 +2237,9 @@ impl WmState {
                 if let Ok(id) = ax_get_window_id(element)
                     && self.registry.contains(id)
                 {
+                    if self.is_window_hidden(id) {
+                        return;
+                    }
                     // Record on the workspace that contains this window,
                     // not the active workspace (same fix as focus_window_impl)
                     if let Some(ws_idx) = self.workspaces.find_window(id) {
@@ -1971,12 +2252,16 @@ impl WmState {
                     && let Ok((x, y)) = ax_get_position(element)
                     && let Some(w) = self.registry.get(id)
                 {
+                    if self.is_window_hidden(id) {
+                        return;
+                    }
                     let (width, height) = (w.width, w.height);
                     self.registry.update_geometry(id, x, y, width, height);
                     // Update floating window geometry on its actual workspace
                     if let Some(ws_idx) = self.workspaces.find_window(id) {
                         if let Some(fw) = self
-                            .workspaces.get_mut(ws_idx)
+                            .workspaces
+                            .get_mut(ws_idx)
                             .floating
                             .iter_mut()
                             .find(|f| f.id == id)
@@ -1992,10 +2277,14 @@ impl WmState {
                     && let (Ok((x, y)), Ok((w, h))) =
                         (ax_get_position(element), ax_get_size(element))
                 {
+                    if self.is_window_hidden(id) {
+                        return;
+                    }
                     self.registry.update_geometry(id, x, y, w, h);
                     if let Some(ws_idx) = self.workspaces.find_window(id) {
                         if let Some(fw) = self
-                            .workspaces.get_mut(ws_idx)
+                            .workspaces
+                            .get_mut(ws_idx)
                             .floating
                             .iter_mut()
                             .find(|f| f.id == id)
@@ -2024,6 +2313,9 @@ impl WmState {
                     && let Some(w) = self.registry.get_mut(id)
                 {
                     w.minimized = false;
+                    if self.is_window_hidden(id) {
+                        return;
+                    }
                 }
             }
         }
@@ -2091,7 +2383,6 @@ fn should_auto_float(subrole: &str, _width: f64, _height: f64) -> bool {
     )
 }
 
-/// Compute a hide position for a window that's off-screen on ALL monitors.
 /// Warp the mouse cursor to the center of a rect.
 fn warp_mouse_to_center(rect: &Rect) {
     let (cx, cy) = rect.center();
@@ -2121,5 +2412,205 @@ fn match_string_or_regex(pattern: &str, haystack: &str) -> bool {
     } else {
         // Simple case-insensitive substring
         haystack.contains(&pattern.to_lowercase())
+    }
+}
+
+fn hide_target_for_frame(
+    frame: Rect,
+    width: f64,
+    monitor_idx: Option<usize>,
+    monitors: &[super::monitor::Monitor],
+) -> (f64, f64) {
+    let hide_y = frame.y + frame.height + 5000.0;
+
+    let Some(monitor_idx) = monitor_idx.filter(|&idx| idx < monitors.len()) else {
+        return (frame.x + 1.0 - width, hide_y);
+    };
+
+    let global_min_x = monitors
+        .iter()
+        .map(|monitor| monitor.frame.x)
+        .fold(f64::INFINITY, f64::min);
+    let global_max_x = monitors
+        .iter()
+        .map(|monitor| monitor.frame.x + monitor.frame.width)
+        .fold(f64::NEG_INFINITY, f64::max);
+
+    let frame_max_x = frame.x + frame.width;
+    let left_distance = frame.x - global_min_x;
+    let right_distance = global_max_x - frame_max_x;
+
+    let hide_x = if left_distance <= right_distance {
+        frame.x + 1.0 - width
+    } else {
+        frame_max_x - 1.0
+    };
+
+    let _ = monitor_idx;
+    (hide_x, hide_y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::monitor::Monitor;
+
+    #[test]
+    fn hide_anchor_frame_defaults_without_monitors() {
+        let state = WmState::new();
+        let (hide_frame, monitor_idx) = state.hide_anchor_frame(42);
+        assert_eq!((hide_frame.x, hide_frame.y), (-32_000.0, -32_000.0));
+        assert_eq!(monitor_idx, None);
+    }
+
+    #[test]
+    fn hide_anchor_frame_prefers_visible_workspace_monitor() {
+        let mut state = WmState::new();
+        state.monitors = vec![
+            Monitor {
+                id: 10,
+                frame: Rect::new(-1920.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(-1920.0, 33.0, 1920.0, 1047.0),
+                is_primary: false,
+                active_workspace: 1,
+            },
+            Monitor {
+                id: 20,
+                frame: Rect::new(0.0, 0.0, 1728.0, 1117.0),
+                usable_frame: Rect::new(0.0, 33.0, 1728.0, 1084.0),
+                is_primary: true,
+                active_workspace: 0,
+            },
+        ];
+        state.workspaces.get_mut(1).visible = true;
+        state.workspaces.get_mut(1).last_monitor = Some(0);
+        state.monitors[0].active_workspace = 1;
+        state.registry.add(WindowState {
+            id: 99,
+            app_pid: 1,
+            app_name: "Test".to_string(),
+            app_bundle_id: "test.bundle".to_string(),
+            title: String::new(),
+            role: "AXWindow".to_string(),
+            subrole: "AXStandardWindow".to_string(),
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            floating: false,
+            minimized: false,
+        });
+        state
+            .workspaces
+            .get_mut(1)
+            .tree
+            .insert_with_rect(99, None, state.monitors[0].usable_frame);
+
+        let (hide_frame, monitor_idx) = state.hide_anchor_frame(99);
+        assert_eq!(monitor_idx, Some(0));
+        assert_eq!(hide_frame, state.monitors[0].frame);
+    }
+
+    #[test]
+    fn hide_anchor_frame_uses_last_display_id_for_hidden_workspace() {
+        let mut state = WmState::new();
+        state.monitors = vec![
+            Monitor {
+                id: 10,
+                frame: Rect::new(-1920.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(-1920.0, 33.0, 1920.0, 1047.0),
+                is_primary: false,
+                active_workspace: 1,
+            },
+            Monitor {
+                id: 20,
+                frame: Rect::new(0.0, 0.0, 1728.0, 1117.0),
+                usable_frame: Rect::new(0.0, 33.0, 1728.0, 1084.0),
+                is_primary: true,
+                active_workspace: 0,
+            },
+        ];
+        state.focused_monitor = 0;
+        state.workspaces.get_mut(2).last_display_id = Some(20);
+        state.registry.add(WindowState {
+            id: 77,
+            app_pid: 1,
+            app_name: "Test".to_string(),
+            app_bundle_id: "test.bundle".to_string(),
+            title: String::new(),
+            role: "AXWindow".to_string(),
+            subrole: "AXStandardWindow".to_string(),
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            floating: false,
+            minimized: false,
+        });
+        state
+            .workspaces
+            .get_mut(2)
+            .tree
+            .insert_with_rect(77, None, state.monitors[1].usable_frame);
+
+        let (hide_frame, monitor_idx) = state.hide_anchor_frame(77);
+        assert_eq!(monitor_idx, Some(1));
+        assert_eq!(hide_frame, state.monitors[1].frame);
+    }
+
+    #[test]
+    fn hide_target_for_frame_keeps_right_edge_one_point_inside_monitor() {
+        let monitors = vec![
+            Monitor {
+                id: 10,
+                frame: Rect::new(-1920.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(-1920.0, 33.0, 1920.0, 1047.0),
+                is_primary: false,
+                active_workspace: 1,
+            },
+            Monitor {
+                id: 20,
+                frame: Rect::new(0.0, 0.0, 1710.0, 1107.0),
+                usable_frame: Rect::new(0.0, 33.0, 1710.0, 1074.0),
+                is_primary: true,
+                active_workspace: 0,
+            },
+        ];
+        let frame = monitors[0].frame;
+        let (hide_x, hide_y) = hide_target_for_frame(frame, 980.0, Some(0), &monitors);
+        assert_eq!(hide_x, -2899.0);
+        assert_eq!(hide_y, 6080.0);
+    }
+
+    #[test]
+    fn hide_target_for_frame_uses_monitor_origin_for_positive_x_displays() {
+        let monitors = vec![
+            Monitor {
+                id: 10,
+                frame: Rect::new(-1920.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(-1920.0, 33.0, 1920.0, 1047.0),
+                is_primary: false,
+                active_workspace: 1,
+            },
+            Monitor {
+                id: 20,
+                frame: Rect::new(0.0, 0.0, 1710.0, 1107.0),
+                usable_frame: Rect::new(0.0, 33.0, 1710.0, 1074.0),
+                is_primary: true,
+                active_workspace: 0,
+            },
+        ];
+        let frame = monitors[1].frame;
+        let (hide_x, hide_y) = hide_target_for_frame(frame, 980.0, Some(1), &monitors);
+        assert_eq!(hide_x, 1709.0);
+        assert_eq!(hide_y, 6107.0);
+    }
+
+    #[test]
+    fn hide_target_for_frame_falls_back_without_monitor_affinity() {
+        let frame = Rect::new(0.0, 0.0, 1710.0, 1107.0);
+        let (hide_x, hide_y) = hide_target_for_frame(frame, 980.0, None, &[]);
+        assert_eq!(hide_x, -979.0);
+        assert_eq!(hide_y, 6107.0);
     }
 }
