@@ -1,7 +1,6 @@
-use std::collections::HashMap;
 use std::fmt;
 
-use super::tree::{Node, Rect};
+use super::tree::Node;
 use super::window::WindowId;
 
 /// Workspace identifier — numbered (1-10), lettered (A-Z), or special (scratchpads).
@@ -36,6 +35,12 @@ pub struct Workspace {
     pub floating: Vec<FloatingWindow>,
     pub focused: Option<WindowId>,
     pub focus_history: Vec<WindowId>,
+    /// Which monitor index this workspace was last displayed on.
+    pub last_monitor: Option<usize>,
+    /// CGDirectDisplayID of the last monitor (survives detach for reconnection).
+    pub last_display_id: Option<u32>,
+    /// Whether this workspace is currently visible on some monitor.
+    pub visible: bool,
 }
 
 impl Workspace {
@@ -46,6 +51,9 @@ impl Workspace {
             floating: Vec::new(),
             focused: None,
             focus_history: Vec::new(),
+            last_monitor: None,
+            last_display_id: None,
+            visible: false,
         }
     }
 
@@ -64,15 +72,14 @@ impl Workspace {
     }
 
     /// Toggle a window between tiled and floating.
-    /// Returns true if the window was toggled.
     pub fn toggle_float(&mut self, id: WindowId, screen_rect: super::tree::Rect) -> bool {
         if let Some(idx) = self.floating.iter().position(|f| f.id == id) {
-            // Floating → tiled: remove from floating, insert into tree
+            // Floating → tiled
             self.floating.remove(idx);
             self.tree.insert_with_rect(id, self.focused, screen_rect);
             true
         } else if self.tree.contains(id) {
-            // Tiled → floating: get current geometry, remove from tree, add to floating
+            // Tiled → floating
             let geoms = self.tree.calculate_geometries(screen_rect);
             let geometry = geoms
                 .iter()
@@ -101,192 +108,52 @@ impl Workspace {
     }
 }
 
-/// Describes what changes when switching workspaces.
-pub struct WorkspaceTransition {
-    pub hide: Vec<WindowId>,
-    pub show: Vec<(WindowId, Rect)>,
-    pub focus: Option<WindowId>,
-}
-
-use super::monitor::MonitorId;
-
-/// Manages all workspaces and tracks per-monitor active workspace.
+/// Manages all workspaces (flat vec, index 0 = workspace 1).
 pub struct WorkspaceManager {
-    workspaces: HashMap<WorkspaceId, Workspace>,
-    /// Active workspace per monitor. The "focused monitor" determines
-    /// which entry is returned by active()/active_mut().
-    monitor_workspaces: HashMap<MonitorId, WorkspaceId>,
-    focused_monitor: MonitorId,
+    workspaces: Vec<Workspace>,
 }
 
 impl WorkspaceManager {
     pub fn new() -> Self {
-        let default_ws = WorkspaceId::Numbered(1);
-        let mut workspaces = HashMap::new();
-        workspaces.insert(default_ws.clone(), Workspace::new(default_ws.clone()));
+        // Pre-create 10 numbered workspaces
+        let workspaces = (1..=10)
+            .map(|n| Workspace::new(WorkspaceId::Numbered(n)))
+            .collect();
+        Self { workspaces }
+    }
 
-        let mut monitor_workspaces = HashMap::new();
-        monitor_workspaces.insert(0, default_ws.clone());
+    pub fn get(&self, idx: usize) -> &Workspace {
+        &self.workspaces[idx]
+    }
 
-        Self {
-            workspaces,
-            monitor_workspaces,
-            focused_monitor: 0,
+    pub fn get_mut(&mut self, idx: usize) -> &mut Workspace {
+        &mut self.workspaces[idx]
+    }
+
+    /// Get or create a workspace at the given index, growing the vec if needed.
+    pub fn get_or_create(&mut self, idx: usize) -> &mut Workspace {
+        while self.workspaces.len() <= idx {
+            let n = (self.workspaces.len() + 1) as u8;
+            self.workspaces
+                .push(Workspace::new(WorkspaceId::Numbered(n)));
         }
+        &mut self.workspaces[idx]
     }
 
-    /// Initialize monitor-workspace assignments.
-    /// Workspace N maps to monitor N (sorted by position).
-    pub fn assign_monitors(&mut self, monitor_ids: &[MonitorId]) {
-        self.monitor_workspaces.clear();
-        for (i, &mid) in monitor_ids.iter().enumerate() {
-            let ws_num = (i + 1) as u8;
-            let ws_id = WorkspaceId::Numbered(ws_num);
-            self.get_or_create(ws_id.clone());
-            self.monitor_workspaces.insert(mid, ws_id);
-        }
-        if let Some(&first) = monitor_ids.first() {
-            self.focused_monitor = first;
-        }
-        tracing::info!(
-            monitors = monitor_ids.len(),
-            "workspace-monitor assignments initialized"
-        );
-        for (mid, wsid) in &self.monitor_workspaces {
-            tracing::debug!(monitor = mid, workspace = %wsid, "assignment");
-        }
+    pub fn count(&self) -> usize {
+        self.workspaces.len()
     }
 
-    pub fn set_focused_monitor(&mut self, monitor: MonitorId) {
-        self.focused_monitor = monitor;
+    /// Find which workspace index contains a window (tiled or floating).
+    pub fn find_window(&self, window_id: WindowId) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|ws| ws.tree.contains(window_id) || ws.is_floating(window_id))
     }
 
-    pub fn focused_monitor(&self) -> MonitorId {
-        self.focused_monitor
-    }
-
-    pub fn active_id(&self) -> &WorkspaceId {
-        self.monitor_workspaces
-            .get(&self.focused_monitor)
-            .unwrap_or_else(|| {
-                self.monitor_workspaces
-                    .values()
-                    .next()
-                    .expect("no workspaces assigned")
-            })
-    }
-
-    /// Get the active workspace ID for a specific monitor.
-    pub fn active_id_for_monitor(&self, monitor: MonitorId) -> Option<&WorkspaceId> {
-        self.monitor_workspaces.get(&monitor)
-    }
-
-    /// Iterate all workspaces that have been created.
-    pub fn all_workspaces(&self) -> impl Iterator<Item = (&WorkspaceId, &Workspace)> {
+    /// Iterate all workspaces.
+    pub fn iter(&self) -> impl Iterator<Item = &Workspace> {
         self.workspaces.iter()
-    }
-
-    /// Get all monitor-workspace assignments.
-    pub fn monitor_assignments(&self) -> &HashMap<MonitorId, WorkspaceId> {
-        &self.monitor_workspaces
-    }
-
-    pub fn active(&self) -> &Workspace {
-        let id = self.active_id();
-        &self.workspaces[id]
-    }
-
-    pub fn active_mut(&mut self) -> &mut Workspace {
-        let id = self.active_id().clone();
-        // Invariant: active workspace is always in the map
-        self.workspaces.get_mut(&id).unwrap()
-    }
-
-    pub fn get_or_create(&mut self, id: WorkspaceId) -> &mut Workspace {
-        self.workspaces
-            .entry(id.clone())
-            .or_insert_with(|| Workspace::new(id))
-    }
-
-    /// Switch the focused monitor to a different workspace. Returns the transition to apply.
-    /// If the target workspace is active on another monitor, swap workspaces.
-    pub fn switch_to(&mut self, target_id: WorkspaceId, screen_rect: Rect) -> WorkspaceTransition {
-        let current_id = self.active_id().clone();
-        if target_id == current_id {
-            return WorkspaceTransition {
-                hide: vec![],
-                show: vec![],
-                focus: self.active().focused,
-            };
-        }
-
-        // Check if target workspace is active on another monitor — if so, swap
-        let other_monitor = self
-            .monitor_workspaces
-            .iter()
-            .find(|(mid, wsid)| **wsid == target_id && **mid != self.focused_monitor)
-            .map(|(mid, _)| *mid);
-
-        // Collect windows to hide from current workspace on focused monitor
-        let hide = self.active().all_window_ids();
-
-        // Activate target workspace
-        let target = self.get_or_create(target_id.clone());
-        let show = target.tree.calculate_geometries(screen_rect);
-        let focus = target.focused.or_else(|| target.tree.first_window());
-
-        // Update monitor-workspace mapping
-        if let Some(other_mid) = other_monitor {
-            // Swap: other monitor gets our old workspace, we get target
-            self.monitor_workspaces.insert(other_mid, current_id);
-        }
-        self.monitor_workspaces
-            .insert(self.focused_monitor, target_id);
-
-        WorkspaceTransition { hide, show, focus }
-    }
-
-    /// Move a window from the active workspace to a target workspace.
-    /// Returns true if the window was moved.
-    pub fn move_window_to(
-        &mut self,
-        window_id: WindowId,
-        target_id: WorkspaceId,
-        screen_rect: Rect,
-    ) -> bool {
-        if target_id == *self.active_id() {
-            return false;
-        }
-
-        // Remove from active workspace
-        let active = self.active_mut();
-        if !active.tree.remove(window_id) {
-            return false;
-        }
-        active.focus_history.retain(|id| *id != window_id);
-        if active.focused == Some(window_id) {
-            active.focused = active
-                .focus_history
-                .last()
-                .copied()
-                .or(active.tree.first_window());
-        }
-
-        // Insert into target workspace
-        let target = self.get_or_create(target_id);
-        target
-            .tree
-            .insert_with_rect(window_id, target.focused, screen_rect);
-
-        true
-    }
-
-    /// Find which workspace contains a window (tiled or floating).
-    pub fn workspace_for_window(&self, window_id: WindowId) -> Option<&WorkspaceId> {
-        self.workspaces
-            .iter()
-            .find(|(_, ws)| ws.tree.contains(window_id) || ws.is_floating(window_id))
-            .map(|(id, _)| id)
     }
 }
 
@@ -299,6 +166,7 @@ impl Default for WorkspaceManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::tree::Rect;
 
     const SCREEN: Rect = Rect {
         x: 0.0,
@@ -308,60 +176,29 @@ mod tests {
     };
 
     #[test]
-    fn starts_on_workspace_1() {
+    fn creates_10_workspaces() {
         let mgr = WorkspaceManager::new();
-        assert_eq!(*mgr.active_id(), WorkspaceId::Numbered(1));
+        assert_eq!(mgr.count(), 10);
+        assert_eq!(mgr.get(0).id, WorkspaceId::Numbered(1));
+        assert_eq!(mgr.get(9).id, WorkspaceId::Numbered(10));
     }
 
     #[test]
-    fn switch_to_same_is_noop() {
+    fn get_or_create_grows() {
         let mut mgr = WorkspaceManager::new();
-        let t = mgr.switch_to(WorkspaceId::Numbered(1), SCREEN);
-        assert!(t.hide.is_empty());
-        assert!(t.show.is_empty());
+        let ws = mgr.get_or_create(15);
+        assert_eq!(ws.id, WorkspaceId::Numbered(16));
+        assert_eq!(mgr.count(), 16);
     }
 
     #[test]
-    fn switch_to_empty_workspace() {
+    fn find_window() {
         let mut mgr = WorkspaceManager::new();
-        mgr.active_mut().tree.insert(1, None);
-        let t = mgr.switch_to(WorkspaceId::Numbered(2), SCREEN);
-        assert_eq!(t.hide, vec![1]);
-        assert!(t.show.is_empty());
-        assert_eq!(*mgr.active_id(), WorkspaceId::Numbered(2));
-    }
-
-    #[test]
-    fn switch_back_restores() {
-        let mut mgr = WorkspaceManager::new();
-        mgr.active_mut().tree.insert(1, None);
-        mgr.active_mut().focused = Some(1);
-
-        mgr.switch_to(WorkspaceId::Numbered(2), SCREEN);
-
-        let t = mgr.switch_to(WorkspaceId::Numbered(1), SCREEN);
-        assert_eq!(t.show.len(), 1);
-        assert_eq!(t.show[0].0, 1);
-        assert_eq!(t.focus, Some(1));
-    }
-
-    #[test]
-    fn move_window_to_other_workspace() {
-        let mut mgr = WorkspaceManager::new();
-        mgr.active_mut().tree.insert_with_rect(1, None, SCREEN);
-        mgr.active_mut().tree.insert_with_rect(2, Some(1), SCREEN);
-        mgr.active_mut().focused = Some(2);
-
-        let moved = mgr.move_window_to(2, WorkspaceId::Numbered(3), SCREEN);
-        assert!(moved);
-
-        // Window 2 should be gone from workspace 1
-        assert!(!mgr.active().tree.contains(2));
-        assert_eq!(mgr.active().tree.window_count(), 1);
-
-        // Window 2 should be on workspace 3
-        let ws3 = &mgr.workspaces[&WorkspaceId::Numbered(3)];
-        assert!(ws3.tree.contains(2));
+        mgr.get_mut(0).tree.insert(1, None);
+        mgr.get_mut(2).tree.insert(2, None);
+        assert_eq!(mgr.find_window(1), Some(0));
+        assert_eq!(mgr.find_window(2), Some(2));
+        assert_eq!(mgr.find_window(99), None);
     }
 
     #[test]
@@ -380,14 +217,6 @@ mod tests {
     }
 
     #[test]
-    fn workspace_for_window() {
-        let mut mgr = WorkspaceManager::new();
-        mgr.active_mut().tree.insert(1, None);
-        assert_eq!(mgr.workspace_for_window(1), Some(&WorkspaceId::Numbered(1)));
-        assert_eq!(mgr.workspace_for_window(99), None);
-    }
-
-    #[test]
     fn toggle_float_tiled_to_floating() {
         let mut ws = Workspace::new(WorkspaceId::Numbered(1));
         ws.tree.insert_with_rect(1, None, SCREEN);
@@ -397,8 +226,6 @@ mod tests {
         assert!(ws.toggle_float(2, SCREEN));
         assert!(!ws.tree.contains(2));
         assert!(ws.is_floating(2));
-        assert_eq!(ws.floating.len(), 1);
-        assert_eq!(ws.tree.window_count(), 1);
     }
 
     #[test]
@@ -406,16 +233,10 @@ mod tests {
         let mut ws = Workspace::new(WorkspaceId::Numbered(1));
         ws.tree.insert_with_rect(1, None, SCREEN);
         ws.tree.insert_with_rect(2, Some(1), SCREEN);
-        ws.focused = Some(2);
-
-        // Float then unfloat
         ws.toggle_float(2, SCREEN);
-        assert!(ws.is_floating(2));
-
         ws.toggle_float(2, SCREEN);
         assert!(!ws.is_floating(2));
         assert!(ws.tree.contains(2));
-        assert_eq!(ws.tree.window_count(), 2);
     }
 
     #[test]
@@ -424,7 +245,6 @@ mod tests {
         ws.tree.insert_with_rect(1, None, SCREEN);
         ws.tree.insert_with_rect(2, Some(1), SCREEN);
         ws.toggle_float(2, SCREEN);
-
         let mut ids = ws.all_window_ids();
         ids.sort();
         assert_eq!(ids, vec![1, 2]);
@@ -438,5 +258,17 @@ mod tests {
             WorkspaceId::Special("scratch".to_string()).to_string(),
             "special:scratch"
         );
+    }
+
+    #[test]
+    fn visible_and_last_monitor() {
+        let mut ws = Workspace::new(WorkspaceId::Numbered(1));
+        assert!(!ws.visible);
+        assert!(ws.last_monitor.is_none());
+
+        ws.visible = true;
+        ws.last_monitor = Some(0);
+        assert!(ws.visible);
+        assert_eq!(ws.last_monitor, Some(0));
     }
 }

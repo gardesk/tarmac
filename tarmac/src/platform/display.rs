@@ -96,6 +96,19 @@ struct CGSize {
     height: f64,
 }
 
+/// Get the current mouse cursor position in CG screen coordinates (top-left origin).
+pub fn get_cursor_position() -> (f64, f64) {
+    unsafe {
+        let event = CGEventCreate(std::ptr::null());
+        if event.is_null() {
+            return (0.0, 0.0);
+        }
+        let loc = CGEventGetLocation(event);
+        CFRelease(event as *const std::ffi::c_void);
+        (loc.x, loc.y)
+    }
+}
+
 /// Warp the mouse cursor to a specific screen position.
 pub fn warp_mouse(x: f64, y: f64) {
     unsafe {
@@ -154,6 +167,7 @@ pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
             frame,
             usable_frame,
             is_primary: did == main_id,
+            active_workspace: 0,
         });
     }
 
@@ -187,10 +201,34 @@ fn find_nsscreen_for_display(
         let frame = screen.frame();
         let visible = screen.visibleFrame();
 
+        tracing::debug!(
+            ns_idx = i,
+            ns_frame_x = frame.origin.x,
+            ns_frame_y = frame.origin.y,
+            ns_frame_w = frame.size.width,
+            ns_frame_h = frame.size.height,
+            ns_vis_x = visible.origin.x,
+            ns_vis_y = visible.origin.y,
+            ns_vis_w = visible.size.width,
+            ns_vis_h = visible.size.height,
+            cg_x,
+            cg_width,
+            "NSScreen candidate"
+        );
+
         // Match by x position and width (NSScreen frame origin is bottom-left)
         if (frame.origin.x - cg_x).abs() < 1.0 && (frame.size.width - cg_width).abs() < 1.0 {
             // Convert visible frame from bottom-left to top-left origin
             let top_y = main_height - visible.origin.y - visible.size.height;
+            tracing::debug!(
+                ns_idx = i,
+                converted_x = visible.origin.x,
+                converted_y = top_y,
+                converted_w = visible.size.width,
+                converted_h = visible.size.height,
+                main_height,
+                "NSScreen matched → usable_frame"
+            );
             return Some(Rect::new(
                 visible.origin.x,
                 top_y,
@@ -199,6 +237,11 @@ fn find_nsscreen_for_display(
             ));
         }
     }
+    tracing::warn!(
+        cg_x,
+        cg_width,
+        "no NSScreen match found — falling back to CG bounds"
+    );
     None
 }
 
@@ -220,11 +263,29 @@ pub fn register_display_change_callback(callback: Box<dyn Fn()>) {
         _flags: u32,
         _user_info: *mut std::ffi::c_void,
     ) {
+        use std::sync::Mutex as StdMutex;
+        use std::time::Instant;
+        static LAST_FIRE: StdMutex<Option<Instant>> = StdMutex::new(None);
+
         // Only react to "done" events (after reconfiguration is complete)
         let begin_flag = 1u32 << 0;
         if _flags & begin_flag != 0 {
             return; // Skip "begin" events
         }
+
+        // Debounce: macOS fires multiple "done" events per reconfiguration.
+        // Skip if last fire was <500ms ago.
+        {
+            let mut last = LAST_FIRE.lock().unwrap();
+            let now = Instant::now();
+            if let Some(t) = *last {
+                if now.duration_since(t).as_millis() < 500 {
+                    return;
+                }
+            }
+            *last = Some(now);
+        }
+
         if let Ok(guard) = CALLBACK.lock()
             && let Some(cb) = guard.as_ref()
         {
@@ -253,4 +314,7 @@ unsafe extern "C" {
         >,
         user_info: *mut std::ffi::c_void,
     ) -> i32;
+    fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
+    fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+    fn CFRelease(cf: *const std::ffi::c_void);
 }

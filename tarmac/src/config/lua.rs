@@ -375,6 +375,8 @@ fn parse_key_name(name: &str) -> Result<Key, &'static str> {
         "right" => Ok(Key::Right),
         "up" => Ok(Key::Up),
         "down" => Ok(Key::Down),
+        "comma" | "," => Ok(Key::Comma),
+        "period" | "." => Ok(Key::Period),
         _ => Err("unknown key name"),
     }
 }

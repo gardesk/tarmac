@@ -9,6 +9,8 @@ pub struct Settings {
     pub mouse_follows_focus: bool,
     pub mod_key: Modifiers,
     pub terminal_command: String,
+    /// Height of an external bar (e.g. sketchybar) to reserve at top of each display.
+    pub bar_height: f64,
 }
 
 impl Default for Settings {
@@ -20,6 +22,7 @@ impl Default for Settings {
             mouse_follows_focus: true,
             mod_key: Modifiers::COMMAND,
             terminal_command: "open -na WezTerm".to_string(),
+            bar_height: 0.0,
         }
     }
 }
@@ -56,6 +59,11 @@ impl Settings {
             }
             "terminal" => {
                 self.terminal_command = value.to_string();
+            }
+            "bar_height" => {
+                if let Ok(v) = value.parse() {
+                    self.bar_height = v;
+                }
             }
             _ => {
                 tracing::trace!(key, value, "unknown setting (ignored)");

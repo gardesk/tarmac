@@ -342,27 +342,108 @@ impl Node {
                 }
             })
             .min_by(|(_, a), (_, b)| {
-                let (acx, acy) = a.center();
-                let (bcx, bcy) = b.center();
-                let dist_a = match direction {
-                    Direction::Left | Direction::Right => {
-                        (acy - from_cy).abs() * 100.0 + (acx - from_cx).abs()
-                    }
-                    Direction::Up | Direction::Down => {
-                        (acx - from_cx).abs() * 100.0 + (acy - from_cy).abs()
-                    }
-                };
-                let dist_b = match direction {
-                    Direction::Left | Direction::Right => {
-                        (bcy - from_cy).abs() * 100.0 + (bcx - from_cx).abs()
-                    }
-                    Direction::Up | Direction::Down => {
-                        (bcx - from_cx).abs() * 100.0 + (bcy - from_cy).abs()
-                    }
-                };
+                let dist_a = Self::adjacent_distance(&from_rect, a, direction);
+                let dist_b = Self::adjacent_distance(&from_rect, b, direction);
                 dist_a
                     .partial_cmp(&dist_b)
                     .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(w, _)| *w)
+    }
+
+    /// Distance metric for focus navigation that uses edge distances and
+    /// vertical/horizontal overlap instead of center-to-center distance.
+    ///
+    /// For Left/Right: prefer the closest window whose vertical extent
+    /// overlaps with the source. Ties broken by horizontal gap.
+    /// For Up/Down: prefer the closest window whose horizontal extent
+    /// overlaps with the source. Ties broken by vertical gap.
+    fn adjacent_distance(from: &Rect, to: &Rect, direction: Direction) -> f64 {
+        match direction {
+            Direction::Left | Direction::Right => {
+                // Horizontal gap: edge-to-edge distance
+                let h_gap = if matches!(direction, Direction::Right) {
+                    (to.x - (from.x + from.width)).abs()
+                } else {
+                    (from.x - (to.x + to.width)).abs()
+                };
+
+                // Vertical overlap: how much the two windows share vertically.
+                // Positive = overlapping, negative = gap between them.
+                let overlap_top = from.y.max(to.y);
+                let overlap_bot = (from.y + from.height).min(to.y + to.height);
+                let v_overlap = overlap_bot - overlap_top;
+
+                if v_overlap > 0.0 {
+                    // Windows share vertical space — prefer closer horizontally.
+                    // Subtract overlap as a bonus (more overlap = lower distance).
+                    // Tiebreaker: prefer center closer to source center vertically.
+                    let (_, from_cy) = from.center();
+                    let (_, to_cy) = to.center();
+                    let center_dist = (to_cy - from_cy).abs() * 0.001;
+                    h_gap - v_overlap * 0.01 + center_dist
+                } else {
+                    // No vertical overlap — penalize the vertical gap heavily.
+                    let v_gap = -v_overlap;
+                    h_gap + v_gap * 100.0
+                }
+            }
+            Direction::Up | Direction::Down => {
+                let v_gap = if matches!(direction, Direction::Down) {
+                    (to.y - (from.y + from.height)).abs()
+                } else {
+                    (from.y - (to.y + to.height)).abs()
+                };
+
+                let overlap_left = from.x.max(to.x);
+                let overlap_right = (from.x + from.width).min(to.x + to.width);
+                let h_overlap = overlap_right - overlap_left;
+
+                if h_overlap > 0.0 {
+                    let (from_cx, _) = from.center();
+                    let (to_cx, _) = to.center();
+                    let center_dist = (to_cx - from_cx).abs() * 0.001;
+                    v_gap - h_overlap * 0.01 + center_dist
+                } else {
+                    let h_gap = -h_overlap;
+                    v_gap + h_gap * 100.0
+                }
+            }
+        }
+    }
+
+    /// Find the window nearest to the entry edge when crossing monitors.
+    /// When entering from the Left (pressing Right), picks the window with smallest center-x.
+    /// When entering from the Right (pressing Left), picks the window with largest center-x.
+    pub fn nearest_to_edge(
+        geometries: &[(WindowId, Rect)],
+        direction: Direction,
+    ) -> Option<WindowId> {
+        if geometries.is_empty() {
+            return None;
+        }
+        geometries
+            .iter()
+            .min_by(|(_, a), (_, b)| {
+                let (acx, _) = a.center();
+                let (bcx, _) = b.center();
+                match direction {
+                    // Pressing Right → entering target from left → want leftmost (smallest x)
+                    Direction::Right => acx.partial_cmp(&bcx).unwrap_or(std::cmp::Ordering::Equal),
+                    // Pressing Left → entering target from right → want rightmost (largest x)
+                    Direction::Left => bcx.partial_cmp(&acx).unwrap_or(std::cmp::Ordering::Equal),
+                    // Up/Down: use y instead
+                    Direction::Down => {
+                        let (_, acy) = a.center();
+                        let (_, bcy) = b.center();
+                        acy.partial_cmp(&bcy).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                    Direction::Up => {
+                        let (_, acy) = a.center();
+                        let (_, bcy) = b.center();
+                        bcy.partial_cmp(&acy).unwrap_or(std::cmp::Ordering::Equal)
+                    }
+                }
             })
             .map(|(w, _)| *w)
     }
@@ -882,15 +963,58 @@ mod tests {
         // │  1   ├──┬───┤
         // │      │ 3│ 4 │
         // └──────┴──┴───┘
-        // Win1 center=(480,540), Win2 center=(1440,270),
-        // Win3 center=(1200,810), Win4 center=(1680,810)
-        // From 1 going right: 3 is more aligned vertically (closer y) than 2
-        assert_eq!(Node::find_adjacent(&geoms, 1, Direction::Right), Some(3));
+        // Win1 is full-height left column. Win2 and Win3 both share an edge
+        // and equal vertical overlap. Tiebreaker: center closest to source
+        // center (y=540). Win2 center y=270 (dist=270) < Win3 center y=810 (dist=270).
+        // Equal tiebreaker, but Win2 comes first → picks 2.
+        assert_eq!(Node::find_adjacent(&geoms, 1, Direction::Right), Some(2));
         assert_eq!(Node::find_adjacent(&geoms, 2, Direction::Left), Some(1));
         assert_eq!(Node::find_adjacent(&geoms, 2, Direction::Down), Some(3));
         assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Up), Some(2));
         assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Right), Some(4));
         assert_eq!(Node::find_adjacent(&geoms, 4, Direction::Left), Some(3));
+    }
+
+    // --- Nearest to edge tests ---
+
+    #[test]
+    fn nearest_to_edge_picks_leftmost_on_right_cross() {
+        // Simulate 4-window layout
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+        let geoms = tree.calculate_geometries(SCREEN);
+        // Pressing Right to enter this monitor → want leftmost window
+        // Win1 is at x=0 (leftmost)
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Right), Some(1));
+    }
+
+    #[test]
+    fn nearest_to_edge_picks_rightmost_on_left_cross() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+        let geoms = tree.calculate_geometries(SCREEN);
+        // Pressing Left to enter this monitor → want rightmost window
+        // Win4 center=(1680,810) is rightmost
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Left), Some(4));
+    }
+
+    #[test]
+    fn nearest_to_edge_empty() {
+        let geoms: Vec<(WindowId, Rect)> = vec![];
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Right), None);
+    }
+
+    #[test]
+    fn nearest_to_edge_single_window() {
+        let geoms = vec![(1, Rect::new(0.0, 0.0, 1920.0, 1080.0))];
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Right), Some(1));
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Left), Some(1));
     }
 
     // --- Gap tests ---

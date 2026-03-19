@@ -230,8 +230,53 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
     all_windows
 }
 
+/// Activate an application by PID using NSRunningApplication.
+/// Tries both activation methods for reliability across macOS versions.
+pub fn activate_app(pid: i32) {
+    let Some(target) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) else {
+        return;
+    };
+
+    // Try both methods — activateWithOptions is deprecated on macOS 14+
+    // but still works for some cases. activateFromApplication is the
+    // replacement but requires a valid caller app.
+    #[allow(deprecated)]
+    let opts = objc2_app_kit::NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+
+    let ok = target.activateWithOptions(opts);
+    if !ok {
+        // Fallback: try from tarmac's perspective
+        let tarmac_pid = std::process::id() as i32;
+        if let Some(caller) =
+            NSRunningApplication::runningApplicationWithProcessIdentifier(tarmac_pid)
+        {
+            target.activateFromApplication_options(&caller, opts);
+        }
+    }
+}
+
+/// Deactivate all windows by making tarmac (which has no windows) the frontmost app.
+/// This causes all other apps' title bars to appear inactive.
+pub fn deactivate_all_windows() {
+    let pid = std::process::id() as i32;
+    if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
+        #[allow(deprecated)]
+        let opts = objc2_app_kit::NSApplicationActivationOptions::ActivateIgnoringOtherApps;
+        app.activateWithOptions(opts);
+    }
+}
+
 /// Get all on-screen layer-0 windows from CGWindowList.
 pub fn get_cg_window_list() -> Vec<CgWindowInfo> {
+    get_cg_window_list_with_filter(true)
+}
+
+/// Get all on-screen windows from CGWindowList, including non-layer-0 entries.
+pub fn get_cg_window_list_all_layers() -> Vec<CgWindowInfo> {
+    get_cg_window_list_with_filter(false)
+}
+
+fn get_cg_window_list_with_filter(layer_zero_only: bool) -> Vec<CgWindowInfo> {
     let mut result = Vec::new();
     unsafe {
         let info = CGWindowListCopyWindowInfo(
@@ -250,7 +295,7 @@ pub fn get_cg_window_list() -> Vec<CgWindowInfo> {
             }
 
             let layer = cg_dict_get_i32(dict, kCGWindowLayer);
-            if layer != 0 {
+            if layer_zero_only && layer != 0 {
                 continue; // Skip menu bar, dock, overlays
             }
 
@@ -258,12 +303,20 @@ pub fn get_cg_window_list() -> Vec<CgWindowInfo> {
             let wid = cg_dict_get_i32(dict, kCGWindowNumber) as u32;
             let owner = cg_dict_get_string(dict, kCGWindowOwnerName);
             let title = cg_dict_get_string(dict, kCGWindowName);
+            let alpha = cg_dict_get_f64(dict, kCGWindowAlpha);
+            let (x, y, width, height) = cg_dict_get_rect(dict, kCGWindowBounds);
 
             result.push(CgWindowInfo {
                 wid,
                 pid,
                 owner,
                 title,
+                layer,
+                alpha,
+                x,
+                y,
+                width,
+                height,
             });
         }
 
@@ -279,6 +332,12 @@ pub struct CgWindowInfo {
     pub pid: i32,
     pub owner: String,
     pub title: String,
+    pub layer: i32,
+    pub alpha: f64,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
 }
 
 // CGWindowList FFI
@@ -301,11 +360,38 @@ mod cg_ffi {
         pub static kCGWindowLayer: *const c_void;
         pub static kCGWindowOwnerName: *const c_void;
         pub static kCGWindowName: *const c_void;
+        pub static kCGWindowAlpha: *const c_void;
+        pub static kCGWindowBounds: *const c_void;
 
         pub fn CFDictionaryGetValue(dict: *const c_void, key: *const c_void) -> *const c_void;
         pub fn CFNumberGetValue(number: *const c_void, r#type: i32, value_ptr: *mut c_void)
         -> bool;
         pub fn CFStringGetCStringPtr(string: *const c_void, encoding: u32) -> *const i8;
+        pub fn CGRectMakeWithDictionaryRepresentation(
+            dict: *const c_void,
+            rect: *mut CGRect,
+        ) -> bool;
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct CGPoint {
+        pub x: f64,
+        pub y: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct CGSize {
+        pub width: f64,
+        pub height: f64,
+    }
+
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct CGRect {
+        pub origin: CGPoint,
+        pub size: CGSize,
     }
 }
 use cg_ffi::*;
@@ -337,5 +423,42 @@ fn cg_dict_get_string(dict: *const c_void, key: *const c_void) -> String {
             return String::new();
         }
         std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string()
+    }
+}
+
+fn cg_dict_get_f64(dict: *const c_void, key: *const c_void) -> f64 {
+    unsafe {
+        let val = CFDictionaryGetValue(dict, key);
+        if val.is_null() {
+            return 0.0;
+        }
+        let mut result: f64 = 0.0;
+        CFNumberGetValue(
+            val,
+            6, // kCFNumberFloat64Type
+            (&mut result as *mut f64).cast::<c_void>(),
+        );
+        result
+    }
+}
+
+fn cg_dict_get_rect(dict: *const c_void, key: *const c_void) -> (f64, f64, f64, f64) {
+    unsafe {
+        let val = CFDictionaryGetValue(dict, key);
+        if val.is_null() {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+
+        let mut rect = cg_ffi::CGRect::default();
+        if !CGRectMakeWithDictionaryRepresentation(val, &mut rect) {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+
+        (
+            rect.origin.x,
+            rect.origin.y,
+            rect.size.width,
+            rect.size.height,
+        )
     }
 }
