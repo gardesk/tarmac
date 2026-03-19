@@ -134,7 +134,8 @@ impl WorkspaceManager {
     pub fn get_or_create(&mut self, idx: usize) -> &mut Workspace {
         while self.workspaces.len() <= idx {
             let n = (self.workspaces.len() + 1) as u8;
-            self.workspaces.push(Workspace::new(WorkspaceId::Numbered(n)));
+            self.workspaces
+                .push(Workspace::new(WorkspaceId::Numbered(n)));
         }
         &mut self.workspaces[idx]
     }
@@ -145,9 +146,9 @@ impl WorkspaceManager {
 
     /// Find which workspace index contains a window (tiled or floating).
     pub fn find_window(&self, window_id: WindowId) -> Option<usize> {
-        self.workspaces.iter().position(|ws| {
-            ws.tree.contains(window_id) || ws.is_floating(window_id)
-        })
+        self.workspaces
+            .iter()
+            .position(|ws| ws.tree.contains(window_id) || ws.is_floating(window_id))
     }
 
     /// Iterate all workspaces.
