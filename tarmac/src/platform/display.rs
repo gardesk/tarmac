@@ -237,7 +237,11 @@ fn find_nsscreen_for_display(
             ));
         }
     }
-    tracing::warn!(cg_x, cg_width, "no NSScreen match found — falling back to CG bounds");
+    tracing::warn!(
+        cg_x,
+        cg_width,
+        "no NSScreen match found — falling back to CG bounds"
+    );
     None
 }
 
