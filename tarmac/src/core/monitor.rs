@@ -57,18 +57,12 @@ pub fn next_index_nowrap(monitors: &[Monitor], from: usize) -> Option<usize> {
 pub fn prev_index_nowrap(monitors: &[Monitor], from: usize) -> Option<usize> {
     let sorted = sorted_indices(monitors);
     let pos = sorted.iter().position(|&i| i == from).unwrap_or(0);
-    if pos > 0 {
-        Some(sorted[pos - 1])
-    } else {
-        None
-    }
+    if pos > 0 { Some(sorted[pos - 1]) } else { None }
 }
 
 /// Find which monitor index contains a screen point.
 pub fn index_at_point(monitors: &[Monitor], x: f64, y: f64) -> Option<usize> {
-    monitors
-        .iter()
-        .position(|m| m.frame.contains_point(x, y))
+    monitors.iter().position(|m| m.frame.contains_point(x, y))
 }
 
 #[cfg(test)]
