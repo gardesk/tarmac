@@ -370,6 +370,12 @@ fn process_ipc_command(
 ) -> tarmac::ipc::protocol::Response {
     use tarmac::ipc::protocol::Response;
 
+    // reload borrows WM_STATE internally — handle it outside the borrow
+    if request.command == "reload" {
+        reload_config();
+        return Response::ok_empty();
+    }
+
     WM_STATE.with(|s| {
         let mut state_ref = s.borrow_mut();
         let Some(state) = state_ref.as_mut() else {
@@ -510,6 +516,89 @@ fn process_ipc_command(
                 } else {
                     Response::err("usage: exec <command>")
                 }
+            }
+            "get-monitors" => {
+                let monitors: Vec<serde_json::Value> = state
+                    .monitors
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        serde_json::json!({
+                            "id": m.id,
+                            "index": i,
+                            "frame": {
+                                "x": m.frame.x, "y": m.frame.y,
+                                "width": m.frame.width, "height": m.frame.height,
+                            },
+                            "usable_frame": {
+                                "x": m.usable_frame.x, "y": m.usable_frame.y,
+                                "width": m.usable_frame.width, "height": m.usable_frame.height,
+                            },
+                            "is_primary": m.is_primary,
+                            "active_workspace": m.active_workspace + 1,
+                            "focused": i == state.focused_monitor,
+                        })
+                    })
+                    .collect();
+                Response::ok(serde_json::json!({ "monitors": monitors }))
+            }
+            "get-tree" => {
+                let ws_idx =
+                    if let Some(n) = request.args.first().and_then(|a| a.parse::<u8>().ok()) {
+                        (n as usize).saturating_sub(1)
+                    } else {
+                        state.active_ws_idx()
+                    };
+                let ws = state.workspaces.get(ws_idx);
+                let sr = state
+                    .monitor_showing_workspace(ws_idx)
+                    .map(|mi| state.monitor_rect(mi))
+                    .unwrap_or_else(|| state.focused_rect());
+                let geoms = ws.tree.calculate_geometries_with_gaps(
+                    sr,
+                    state.gap_inner,
+                    state.gap_outer,
+                    true,
+                );
+                let windows: Vec<serde_json::Value> = geoms
+                    .iter()
+                    .map(|(wid, rect)| {
+                        let app_name = state
+                            .registry
+                            .get(*wid)
+                            .map(|w| w.app_name.clone())
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "id": wid,
+                            "app_name": app_name,
+                            "x": rect.x, "y": rect.y,
+                            "width": rect.width, "height": rect.height,
+                        })
+                    })
+                    .collect();
+                let floating: Vec<serde_json::Value> = ws
+                    .floating
+                    .iter()
+                    .map(|fw| {
+                        let app_name = state
+                            .registry
+                            .get(fw.id)
+                            .map(|w| w.app_name.clone())
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "id": fw.id,
+                            "app_name": app_name,
+                            "x": fw.geometry.x, "y": fw.geometry.y,
+                            "width": fw.geometry.width, "height": fw.geometry.height,
+                            "floating": true,
+                        })
+                    })
+                    .collect();
+                Response::ok(serde_json::json!({
+                    "workspace": ws.id.to_string(),
+                    "tiled": windows,
+                    "floating": floating,
+                }))
             }
             other => Response::err(format!("unknown command: {}", other)),
         }

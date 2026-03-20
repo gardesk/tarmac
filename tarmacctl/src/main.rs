@@ -41,9 +41,12 @@ fn main() {
         eprintln!("  workspace <1-10>              Switch workspace");
         eprintln!("  move-to-workspace <1-10>      Move window to workspace");
         eprintln!("  toggle-floating               Toggle floating state");
+        eprintln!("  reload                        Hot reload config");
         eprintln!("  get-workspaces                Get workspace info");
         eprintln!("  get-focused                   Get focused window info");
         eprintln!("  get-windows                   Get all window info");
+        eprintln!("  get-monitors                  Get monitor info");
+        eprintln!("  get-tree [workspace]           Get layout tree for workspace");
         eprintln!("  exec <command>                Execute shell command");
         std::process::exit(1);
     }

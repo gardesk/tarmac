@@ -107,7 +107,7 @@ impl WmState {
     /// Usable frame for a monitor, adjusted for bar_height.
     /// Only applies bar_height on monitors where macOS didn't already
     /// deduct a system menu bar (i.e., non-primary / external monitors).
-    fn monitor_rect(&self, mi: usize) -> Rect {
+    pub fn monitor_rect(&self, mi: usize) -> Rect {
         let m = &self.monitors[mi];
         let r = m.usable_frame;
         // If usable_frame.y == frame.y, the system didn't deduct a menu bar
@@ -127,12 +127,12 @@ impl WmState {
     }
 
     /// Usable frame for focused monitor.
-    fn focused_rect(&self) -> Rect {
+    pub fn focused_rect(&self) -> Rect {
         self.monitor_rect(self.focused_monitor)
     }
 
     /// Find which monitor index has a workspace visible, if any.
-    fn monitor_showing_workspace(&self, ws_idx: usize) -> Option<usize> {
+    pub fn monitor_showing_workspace(&self, ws_idx: usize) -> Option<usize> {
         self.monitors
             .iter()
             .position(|m| m.active_workspace == ws_idx)
