@@ -104,6 +104,18 @@ impl WmState {
         self.workspaces.get(self.active_ws_idx())
     }
 
+    /// The effective focused window, checking the active special workspace first.
+    fn effective_focused(&self) -> Option<WindowId> {
+        let mi = self.focused_monitor;
+        if mi < self.active_specials.len()
+            && let Some(special_idx) = self.active_specials[mi]
+            && let Some(wid) = self.workspaces.get(special_idx).focused
+        {
+            return Some(wid);
+        }
+        self.active_workspace().focused
+    }
+
     /// Active workspace (mutable).
     pub fn active_workspace_mut(&mut self) -> &mut super::workspace::Workspace {
         let idx = self.active_ws_idx();
@@ -934,7 +946,7 @@ impl WmState {
     }
 
     pub fn close_focused(&mut self) {
-        let focused = match self.active_workspace().focused {
+        let focused = match self.effective_focused() {
             Some(f) => f,
             None => return,
         };
@@ -1685,7 +1697,7 @@ impl WmState {
 
     /// Move the focused window from the current monitor's workspace to the target monitor's workspace.
     fn move_window_to_monitor(&mut self, target_mi: usize) {
-        let focused = match self.active_workspace().focused {
+        let focused = match self.effective_focused() {
             Some(f) => f,
             None => return,
         };
@@ -1696,8 +1708,14 @@ impl WmState {
         // Get target monitor's screen rect for layout
         let target_rect = self.monitor_rect(target_mi);
 
+        // Find which workspace the window is actually on
+        let current_idx = match self.workspaces.find_window(focused) {
+            Some(idx) => idx,
+            None => return,
+        };
+
         // Remove from current workspace
-        let current_ws = self.active_workspace_mut();
+        let current_ws = self.workspaces.get_mut(current_idx);
         let was_floating = current_ws.is_floating(focused);
         if was_floating {
             current_ws.floating.retain(|f| f.id != focused);
@@ -1909,15 +1927,38 @@ impl WmState {
 
     pub fn move_to_workspace(&mut self, num: u8) {
         let target_idx = (num as usize).saturating_sub(1);
-        let current_idx = self.active_ws_idx();
+
+        let focused = match self.effective_focused() {
+            Some(f) => f,
+            None => return,
+        };
+
+        // Find which workspace the window is actually on
+        let current_idx = match self.workspaces.find_window(focused) {
+            Some(idx) => idx,
+            None => return,
+        };
         if target_idx == current_idx {
             return;
         }
 
-        let focused = match self.active_workspace().focused {
-            Some(f) => f,
-            None => return,
-        };
+        // If removing from a special workspace, dismiss the overlay
+        let mi = self.focused_monitor;
+        if mi < self.active_specials.len()
+            && let Some(special_idx) = self.active_specials[mi]
+            && current_idx == special_idx
+        {
+            // Dismiss the special workspace since we're taking its window
+            self.active_specials[mi] = None;
+            self.workspaces.get_mut(special_idx).visible = false;
+            // Hide any remaining windows on the special workspace
+            let remaining = self.workspaces.get(special_idx).all_window_ids();
+            for wid in remaining {
+                if wid != focused {
+                    self.hide_window(wid);
+                }
+            }
+        }
 
         // Remove from current workspace
         let current_ws = self.workspaces.get_mut(current_idx);
