@@ -1020,39 +1020,101 @@ impl WmState {
             }
         }
 
-        let ws = self.active_workspace();
-
-        // Check floating windows first -- they're visually on top
-        let floating_under = ws
-            .floating
-            .iter()
-            .rev() // Check most recently focused first
-            .find(|fw| fw.geometry.contains_point(x, y))
-            .map(|fw| fw.id);
-
-        let window_under = if floating_under.is_some() {
-            floating_under
+        // If a special workspace is active on this monitor, FFM only
+        // interacts with special workspace windows — the underlying
+        // workspace is visually present but should not capture focus.
+        let mi = self.focused_monitor;
+        let special_ws_idx = if mi < self.active_specials.len() {
+            self.active_specials[mi]
         } else {
-            // Check tiled windows using gap-aware geometry matching actual layout
-            let geoms = ws.tree.calculate_geometries_with_gaps(
-                self.focused_rect(),
-                self.gap_inner,
-                self.gap_outer,
-                true,
-            );
-            geoms
+            None
+        };
+
+        let window_under = if let Some(special_idx) = special_ws_idx {
+            let sr = self.monitor_rect(mi);
+            let ws = self.workspaces.get(special_idx);
+
+            // Look up config for this special workspace's overlay rect
+            let special_name = match &ws.id {
+                super::workspace::WorkspaceId::Special(name) => name.clone(),
+                _ => String::new(),
+            };
+            let cfg = self
+                .special_configs
                 .iter()
-                .find(|(_, rect)| rect.contains_point(x, y))
-                .map(|(id, _)| *id)
+                .find(|c| c.name == special_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    crate::config::lua::SpecialWorkspaceConfig::default_for(&special_name)
+                });
+
+            let overlay_w = sr.width * cfg.width;
+            let overlay_h = sr.height * cfg.height;
+            let (overlay_x, overlay_y) = match cfg.position.as_str() {
+                "top" => (sr.x + (sr.width - overlay_w) / 2.0, sr.y),
+                "bottom" => (
+                    sr.x + (sr.width - overlay_w) / 2.0,
+                    sr.y + sr.height - overlay_h,
+                ),
+                _ => (
+                    sr.x + (sr.width - overlay_w) / 2.0,
+                    sr.y + (sr.height - overlay_h) / 2.0,
+                ),
+            };
+            let overlay_rect = Rect::new(overlay_x, overlay_y, overlay_w, overlay_h);
+
+            // Check floating windows on special workspace
+            let floating_hit = ws
+                .floating
+                .iter()
+                .rev()
+                .find(|fw| fw.geometry.contains_point(x, y))
+                .map(|fw| fw.id);
+
+            if floating_hit.is_some() {
+                floating_hit
+            } else {
+                // Check tiled windows within the overlay rect
+                let geoms = ws.tree.calculate_geometries_with_gaps(
+                    overlay_rect,
+                    self.gap_inner,
+                    self.gap_outer,
+                    true,
+                );
+                geoms
+                    .iter()
+                    .find(|(_, rect)| rect.contains_point(x, y))
+                    .map(|(id, _)| *id)
+            }
+        } else {
+            let ws = self.active_workspace();
+
+            // Check floating windows first -- they're visually on top
+            let floating_under = ws
+                .floating
+                .iter()
+                .rev()
+                .find(|fw| fw.geometry.contains_point(x, y))
+                .map(|fw| fw.id);
+
+            if floating_under.is_some() {
+                floating_under
+            } else {
+                // Check tiled windows using gap-aware geometry matching actual layout
+                let geoms = ws.tree.calculate_geometries_with_gaps(
+                    self.focused_rect(),
+                    self.gap_inner,
+                    self.gap_outer,
+                    true,
+                );
+                geoms
+                    .iter()
+                    .find(|(_, rect)| rect.contains_point(x, y))
+                    .map(|(id, _)| *id)
+            }
         };
 
         // Refocus when window under cursor changes.
-        // The outer guard (window_under != ffm_last_window) is the only
-        // dedup we need — it fires once per window crossing.  No inner
-        // "need_focus" guard: ws.focused can drift from macOS's actual
-        // focus (keyboard nav, click, queued events), so always issue
-        // the full AX activation sequence.  enforce_floating_levels()
-        // inside focus_window keeps floating z-order correct.
         if window_under != self.ffm_last_window {
             self.ffm_last_window = window_under;
             if let Some(id) = window_under {
