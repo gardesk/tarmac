@@ -60,6 +60,8 @@ pub struct WmState {
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
+    /// Overlay sizing config per special workspace name.
+    pub special_configs: Vec<crate::config::lua::SpecialWorkspaceConfig>,
 }
 
 impl Default for WmState {
@@ -88,6 +90,7 @@ impl WmState {
             gap_outer: 0.0,
             rules: Vec::new(),
             active_specials: Vec::new(),
+            special_configs: Vec::new(),
         }
     }
 
@@ -1457,22 +1460,39 @@ impl WmState {
                 return;
             }
 
-            // Compute overlay rect (70% of screen, centered)
-            let overlay_w = sr.width * 0.7;
-            let overlay_h = sr.height * 0.7;
-            let overlay_x = sr.x + (sr.width - overlay_w) / 2.0;
-            let overlay_y = sr.y + (sr.height - overlay_h) / 2.0;
+            // Look up overlay config (or use defaults)
+            let cfg = self
+                .special_configs
+                .iter()
+                .find(|c| c.name == name)
+                .cloned()
+                .unwrap_or_else(|| crate::config::lua::SpecialWorkspaceConfig::default_for(name));
+
+            let overlay_w = sr.width * cfg.width;
+            let overlay_h = sr.height * cfg.height;
+            let (overlay_x, overlay_y) = match cfg.position.as_str() {
+                "top" => (sr.x + (sr.width - overlay_w) / 2.0, sr.y),
+                "bottom" => (
+                    sr.x + (sr.width - overlay_w) / 2.0,
+                    sr.y + sr.height - overlay_h,
+                ),
+                _ => (
+                    // "center" (default)
+                    sr.x + (sr.width - overlay_w) / 2.0,
+                    sr.y + (sr.height - overlay_h) / 2.0,
+                ),
+            };
             let overlay_rect = Rect::new(overlay_x, overlay_y, overlay_w, overlay_h);
 
             // Compute geometries and collect data before calling self methods
             let geoms = ws.tree.calculate_geometries_with_gaps(
-                overlay_rect, self.gap_inner, self.gap_outer, true,
+                overlay_rect,
+                self.gap_inner,
+                self.gap_outer,
+                true,
             );
-            let floating_data: Vec<(WindowId, Rect)> = ws
-                .floating
-                .iter()
-                .map(|fw| (fw.id, fw.geometry))
-                .collect();
+            let floating_data: Vec<(WindowId, Rect)> =
+                ws.floating.iter().map(|fw| (fw.id, fw.geometry)).collect();
             let focus_target = ws.focused.or_else(|| geoms.first().map(|(id, _)| *id));
 
             // Now show windows (no workspace borrow held)
@@ -1493,7 +1513,12 @@ impl WmState {
             if let Some(wid) = focus_target {
                 self.focus_window(wid);
             }
-            tracing::info!(name, ws = special_idx + 1, windows = geoms.len(), "special workspace shown");
+            tracing::info!(
+                name,
+                ws = special_idx + 1,
+                windows = geoms.len(),
+                "special workspace shown"
+            );
         }
     }
 
@@ -1538,7 +1563,9 @@ impl WmState {
                 geometry: Rect::new(sr.x + 50.0, sr.y + 50.0, 800.0, 600.0),
             });
         } else {
-            special_ws.tree.insert_with_rect(focused, special_ws.focused, sr);
+            special_ws
+                .tree
+                .insert_with_rect(focused, special_ws.focused, sr);
         }
         special_ws.record_focus(focused);
 
@@ -1559,7 +1586,11 @@ impl WmState {
             self.focus_window(next);
         }
 
-        tracing::info!(id = focused, special = name, "moved window to special workspace");
+        tracing::info!(
+            id = focused,
+            special = name,
+            "moved window to special workspace"
+        );
     }
 
     pub fn focus_monitor_next(&mut self) {
@@ -2241,7 +2272,7 @@ impl WmState {
 
         // Check window rules for matching (case-insensitive, supports regex via /pattern/)
         let mut rule_float: Option<bool> = None;
-        let mut rule_workspace: Option<u8> = None;
+        let mut rule_workspace: Option<String> = None;
         let mut rule_geometry: Option<(f64, f64, f64, f64)> = None;
         let app_lower = app_name.to_lowercase();
         let title_lower = title.to_lowercase();
@@ -2263,8 +2294,8 @@ impl WmState {
                 if let Some(f) = rule.floating {
                     rule_float = Some(f);
                 }
-                if let Some(w) = rule.workspace {
-                    rule_workspace = Some(w);
+                if let Some(ref w) = rule.workspace {
+                    rule_workspace = Some(w.clone());
                 }
                 if let Some(g) = rule.geometry {
                     rule_geometry = Some(g);
@@ -2292,33 +2323,59 @@ impl WmState {
         self.ax_refs.insert(*id, ax_ref);
 
         // Determine target workspace (rule override or active)
-        if let Some(ws_num) = rule_workspace {
-            let target_idx = (ws_num as usize).saturating_sub(1);
-            let is_active = target_idx == self.active_ws_idx();
-            let target_rect = self
-                .monitor_showing_workspace(target_idx)
-                .map(|mi| self.monitor_rect(mi))
-                .unwrap_or(self.focused_rect());
-
-            let ws = self.workspaces.get_or_create(target_idx);
-            if should_float {
-                let geom = rule_geometry
-                    .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
-                    .unwrap_or_else(|| Rect::new(x, y, width, height));
-                ws.floating.push(super::workspace::FloatingWindow {
-                    id: *id,
-                    geometry: geom,
-                });
-            } else {
-                ws.tree.insert_with_rect(*id, ws.focused, target_rect);
-            }
-            ws.record_focus(*id);
-            tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
-
-            if !is_active {
+        if let Some(ref ws_str) = rule_workspace {
+            if let Some(special_name) = ws_str.strip_prefix("special:") {
+                // Special workspace rule — send directly to scratchpad
+                let special_idx = self.workspaces.special_index(special_name);
+                let sr = self.focused_rect();
+                let ws = self.workspaces.get_mut(special_idx);
+                if should_float {
+                    let geom = rule_geometry
+                        .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
+                        .unwrap_or_else(|| Rect::new(x, y, width, height));
+                    ws.floating.push(super::workspace::FloatingWindow {
+                        id: *id,
+                        geometry: geom,
+                    });
+                } else {
+                    ws.tree.insert_with_rect(*id, ws.focused, sr);
+                }
+                ws.record_focus(*id);
                 self.hide_window(*id);
-                // Switch to the target workspace to follow the window
-                self.switch_workspace(ws_num);
+                tracing::info!(
+                    id,
+                    app_name,
+                    special_name,
+                    "window assigned to special workspace by rule"
+                );
+            } else if let Ok(ws_num) = ws_str.parse::<u8>() {
+                // Numbered workspace rule
+                let target_idx = (ws_num as usize).saturating_sub(1);
+                let is_active = target_idx == self.active_ws_idx();
+                let target_rect = self
+                    .monitor_showing_workspace(target_idx)
+                    .map(|mi| self.monitor_rect(mi))
+                    .unwrap_or(self.focused_rect());
+
+                let ws = self.workspaces.get_or_create(target_idx);
+                if should_float {
+                    let geom = rule_geometry
+                        .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
+                        .unwrap_or_else(|| Rect::new(x, y, width, height));
+                    ws.floating.push(super::workspace::FloatingWindow {
+                        id: *id,
+                        geometry: geom,
+                    });
+                } else {
+                    ws.tree.insert_with_rect(*id, ws.focused, target_rect);
+                }
+                ws.record_focus(*id);
+                tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
+
+                if !is_active {
+                    self.hide_window(*id);
+                    self.switch_workspace(ws_num);
+                }
             }
         } else {
             let sr = self.focused_rect();
@@ -2358,17 +2415,25 @@ impl WmState {
                 // Reject phantom windows: zero/tiny size or empty-titled
                 // duplicate from an already-tracked app.
                 if w < 50.0 || h < 50.0 {
-                    tracing::debug!(id, app = app_name, w, h, "skipping phantom window (too small)");
+                    tracing::debug!(
+                        id,
+                        app = app_name,
+                        w,
+                        h,
+                        "skipping phantom window (too small)"
+                    );
                     return;
                 }
                 // Apps like Messages, Codex, WezTerm create invisible helper
                 // windows with AXStandardWindow subrole and valid sizes but
                 // empty titles. If the app already has a window in the registry,
                 // reject empty-titled new windows as phantoms.
-                if title.is_empty()
-                    && self.registry.all().any(|w| w.app_pid == *pid)
-                {
-                    tracing::debug!(id, app = app_name, "skipping phantom window (empty title, app already tracked)");
+                if title.is_empty() && self.registry.all().any(|w| w.app_pid == *pid) {
+                    tracing::debug!(
+                        id,
+                        app = app_name,
+                        "skipping phantom window (empty title, app already tracked)"
+                    );
                     return;
                 }
                 tracing::info!(id, app = app_name, title = %title, "window created -> tiling");

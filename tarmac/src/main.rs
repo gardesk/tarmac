@@ -57,6 +57,7 @@ fn main() {
     state.gap_outer = config.settings.gap_outer;
     state.bar_height = config.settings.bar_height;
     state.rules = config.rules.clone();
+    state.special_configs = config.special_configs.clone();
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
@@ -124,9 +125,7 @@ fn main() {
                     state.on_window_closed(wid);
                 }
             });
-            publish_event(tarmac::ipc::events::WmEvent::WindowClosed {
-                window_id: wid,
-            });
+            publish_event(tarmac::ipc::events::WmEvent::WindowClosed { window_id: wid });
         }),
         Box::new(move |pid| {
             WM_STATE.with(|s| {
@@ -176,7 +175,9 @@ fn handle_action(action: Action) {
                     if let Some(id) = state.active_workspace().focused {
                         let id_str = id.to_string();
                         fire_lua_event("window_focused", &[&id_str]);
-                        let app_name = state.registry.get(id)
+                        let app_name = state
+                            .registry
+                            .get(id)
                             .map(|w| w.app_name.clone())
                             .unwrap_or_default();
                         publish_event(tarmac::ipc::events::WmEvent::WindowFocused {
@@ -194,7 +195,8 @@ fn handle_action(action: Action) {
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
                     publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
-                        old: old.clone(), new: new.clone(),
+                        old: old.clone(),
+                        new: new.clone(),
                     });
                 }
                 Action::MoveToWorkspace(num) => state.move_to_workspace(num),
@@ -204,7 +206,8 @@ fn handle_action(action: Action) {
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
                     publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
-                        old: old.clone(), new: new.clone(),
+                        old: old.clone(),
+                        new: new.clone(),
                     });
                 }
                 Action::WorkspacePrev => {
@@ -213,7 +216,8 @@ fn handle_action(action: Action) {
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
                     publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
-                        old: old.clone(), new: new.clone(),
+                        old: old.clone(),
+                        new: new.clone(),
                     });
                 }
                 Action::ToggleFloat => state.toggle_float(),
@@ -751,6 +755,7 @@ fn reload_config() {
             state.gap_outer = config.settings.gap_outer;
             state.bar_height = config.settings.bar_height;
             state.rules = config.rules.clone();
+            state.special_configs = config.special_configs.clone();
             // Reapply layout with potentially new gap/bar values
             state.apply_layout();
         }

@@ -14,7 +14,8 @@ pub struct WindowRule {
     pub app_bundle: Option<String>,
     pub title: Option<String>,
     pub floating: Option<bool>,
-    pub workspace: Option<u8>,
+    /// Workspace assignment: numeric ("1"-"10") or special ("special:terminal").
+    pub workspace: Option<String>,
     pub geometry: Option<(f64, f64, f64, f64)>, // x, y, width, height
 }
 
@@ -24,6 +25,29 @@ pub struct LuaKeybind {
     pub modifiers: Modifiers,
     pub key: Key,
     pub action: Action,
+}
+
+/// Configuration for a special (scratchpad) workspace overlay.
+#[derive(Debug, Clone)]
+pub struct SpecialWorkspaceConfig {
+    pub name: String,
+    /// "center", "top", "bottom"
+    pub position: String,
+    /// Width as fraction of screen (0.0 - 1.0)
+    pub width: f64,
+    /// Height as fraction of screen (0.0 - 1.0)
+    pub height: f64,
+}
+
+impl SpecialWorkspaceConfig {
+    pub fn default_for(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            position: "center".to_string(),
+            width: 0.7,
+            height: 0.7,
+        }
+    }
 }
 
 /// A registered event callback (holds a Lua registry key for the function).
@@ -37,6 +61,7 @@ pub struct LuaConfig {
     pub settings: Settings,
     pub keybinds: Vec<LuaKeybind>,
     pub rules: Vec<WindowRule>,
+    pub special_configs: Vec<SpecialWorkspaceConfig>,
     pub lua: Option<Lua>,
     pub callbacks: Vec<EventCallback>,
 }
@@ -47,6 +72,8 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
     let keybinds: Rc<RefCell<Vec<LuaKeybind>>> = Rc::new(RefCell::new(Vec::new()));
     let rules: Rc<RefCell<Vec<WindowRule>>> = Rc::new(RefCell::new(Vec::new()));
     let callbacks: Rc<RefCell<Vec<EventCallback>>> = Rc::new(RefCell::new(Vec::new()));
+    let special_configs: Rc<RefCell<Vec<SpecialWorkspaceConfig>>> =
+        Rc::new(RefCell::new(Vec::new()));
 
     if !path.exists() {
         tracing::warn!(?path, "no config file found, using defaults");
@@ -55,6 +82,7 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
             settings: s,
             keybinds: default_keybinds(&Settings::default()),
             rules: Vec::new(),
+            special_configs: Vec::new(),
             lua: None,
             callbacks: Vec::new(),
         };
@@ -69,6 +97,7 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
         Rc::clone(&keybinds),
         Rc::clone(&rules),
         Rc::clone(&callbacks),
+        Rc::clone(&special_configs),
     ) {
         tracing::error!(err = %e, "failed to register gar API");
         let s = settings.borrow().clone();
@@ -76,6 +105,7 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
             settings: s,
             keybinds: default_keybinds(&Settings::default()),
             rules: Vec::new(),
+            special_configs: Vec::new(),
             lua: None,
             callbacks: Vec::new(),
         };
@@ -104,6 +134,7 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
     }
 
     let r = rules.borrow().clone();
+    let sc = special_configs.borrow().clone();
     let cbs = callbacks.borrow_mut().drain(..).collect::<Vec<_>>();
     tracing::info!(rules = r.len(), callbacks = cbs.len(), "config loaded");
 
@@ -111,6 +142,7 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
         settings: s,
         keybinds: binds,
         rules: r,
+        special_configs: sc,
         lua: Some(lua),
         callbacks: cbs,
     }
@@ -122,6 +154,7 @@ fn register_gar_api(
     keybinds: Rc<RefCell<Vec<LuaKeybind>>>,
     rules: Rc<RefCell<Vec<WindowRule>>>,
     callbacks: Rc<RefCell<Vec<EventCallback>>>,
+    special_configs: Rc<RefCell<Vec<SpecialWorkspaceConfig>>>,
 ) -> LuaResult<()> {
     let gar = lua.create_table()?;
 
@@ -216,7 +249,12 @@ fn register_gar_api(
                 let app_name = app_name.or_else(|| match_table.get("class").ok());
 
                 let floating: Option<bool> = actions_table.get("floating").ok();
-                let workspace: Option<u8> = actions_table.get("workspace").ok();
+                // Workspace: accept number (1-10) or string ("special:terminal")
+                let workspace: Option<String> = actions_table
+                    .get::<u8>("workspace")
+                    .ok()
+                    .map(|n| n.to_string())
+                    .or_else(|| actions_table.get::<String>("workspace").ok());
 
                 // Parse geometry table if present
                 let geometry: Option<(f64, f64, f64, f64)> =
@@ -256,6 +294,35 @@ fn register_gar_api(
                 event,
                 func_key: key,
             });
+            Ok(())
+        })?,
+    )?;
+
+    // gar.special_workspace("name", { position = "center", width = 0.8, height = 0.5 })
+    let specials_clone = Rc::clone(&special_configs);
+    gar.set(
+        "special_workspace",
+        lua.create_function(move |_, (name, opts): (String, Option<mlua::Table>)| {
+            let mut cfg = SpecialWorkspaceConfig::default_for(&name);
+            if let Some(t) = opts {
+                if let Ok(p) = t.get::<String>("position") {
+                    cfg.position = p;
+                }
+                if let Ok(w) = t.get::<f64>("width") {
+                    cfg.width = w.clamp(0.1, 1.0);
+                }
+                if let Ok(h) = t.get::<f64>("height") {
+                    cfg.height = h.clamp(0.1, 1.0);
+                }
+            }
+            tracing::debug!(
+                name = cfg.name,
+                pos = cfg.position,
+                w = cfg.width,
+                h = cfg.height,
+                "gar.special_workspace"
+            );
+            specials_clone.borrow_mut().push(cfg);
             Ok(())
         })?,
     )?;

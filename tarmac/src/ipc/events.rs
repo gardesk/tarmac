@@ -1,35 +1,18 @@
 use serde::Serialize;
-use std::sync::mpsc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 
 /// Events emitted by the window manager for IPC subscribers.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", content = "data")]
 pub enum WmEvent {
-    WorkspaceChanged {
-        old: String,
-        new: String,
-    },
-    WindowFocused {
-        window_id: u32,
-        app_name: String,
-    },
-    WindowCreated {
-        window_id: u32,
-        app_name: String,
-    },
-    WindowClosed {
-        window_id: u32,
-    },
-    MonitorChanged {
-        index: usize,
-    },
-    LayoutChanged {
-        workspace: String,
-    },
-    ModeChanged {
-        mode: String,
-    },
+    WorkspaceChanged { old: String, new: String },
+    WindowFocused { window_id: u32, app_name: String },
+    WindowCreated { window_id: u32, app_name: String },
+    WindowClosed { window_id: u32 },
+    MonitorChanged { index: usize },
+    LayoutChanged { workspace: String },
+    ModeChanged { mode: String },
 }
 
 impl WmEvent {

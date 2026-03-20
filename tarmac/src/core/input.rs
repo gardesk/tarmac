@@ -178,19 +178,19 @@ pub enum Action {
     Swap(Direction),
     Resize(Direction),
     Equalize,
-    Workspace(u8),            // Switch to workspace 1-10
-    MoveToWorkspace(u8),      // Move focused window to workspace 1-10
-    WorkspaceNext,            // Cycle to next workspace
-    WorkspacePrev,            // Cycle to previous workspace
-    ToggleFloat,              // Toggle focused window between tiled and floating
-    ToggleSpecial(String),    // Toggle scratchpad by name
-    MoveToSpecial(String),    // Move focused window to scratchpad
-    FocusMonitorNext,         // Focus next monitor
-    FocusMonitorPrev,         // Focus previous monitor
-    MoveToMonitorNext,        // Move window to next monitor
-    MoveToMonitorPrev,        // Move window to previous monitor
-    Reload,                   // Hot reload config
-    Exit,                     // Clean exit
+    Workspace(u8),         // Switch to workspace 1-10
+    MoveToWorkspace(u8),   // Move focused window to workspace 1-10
+    WorkspaceNext,         // Cycle to next workspace
+    WorkspacePrev,         // Cycle to previous workspace
+    ToggleFloat,           // Toggle focused window between tiled and floating
+    ToggleSpecial(String), // Toggle scratchpad by name
+    MoveToSpecial(String), // Move focused window to scratchpad
+    FocusMonitorNext,      // Focus next monitor
+    FocusMonitorPrev,      // Focus previous monitor
+    MoveToMonitorNext,     // Move window to next monitor
+    MoveToMonitorPrev,     // Move window to previous monitor
+    Reload,                // Hot reload config
+    Exit,                  // Clean exit
 }
 
 /// A keybinding: modifier+key → action.

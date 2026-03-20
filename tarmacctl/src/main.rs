@@ -47,7 +47,9 @@ fn main() {
         eprintln!("  get-windows                   Get all window info");
         eprintln!("  get-monitors                  Get monitor info");
         eprintln!("  get-tree [workspace]           Get layout tree for workspace");
-        eprintln!("  subscribe [event_types...]    Stream events (workspace_changed, window_focused, etc.)");
+        eprintln!(
+            "  subscribe [event_types...]    Stream events (workspace_changed, window_focused, etc.)"
+        );
         eprintln!("  exec <command>                Execute shell command");
         std::process::exit(1);
     }

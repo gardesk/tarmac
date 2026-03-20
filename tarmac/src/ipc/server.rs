@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 
 use super::events::EventBus;
 use super::protocol::{Request, Response, socket_path};
