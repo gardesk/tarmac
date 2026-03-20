@@ -1,5 +1,6 @@
 pub mod accessibility;
 pub mod application;
+pub mod border;
 pub mod display;
 pub mod event_tap;
 pub mod hotkey;

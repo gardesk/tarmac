@@ -22,7 +22,7 @@ unsafe extern "C" {
     fn SLSSetWindowLevel(cid: CGSConnectionID, wid: u32, level: c_int) -> CGError;
     fn SLSSetWindowAlpha(cid: CGSConnectionID, wid: u32, alpha: f32) -> CGError;
     fn SLSMoveWindowWithGroup(cid: CGSConnectionID, wid: u32, point: *const CGPoint) -> CGError;
-    fn SLSMoveWindow(cid: CGSConnectionID, wid: u32, point: *const CGPoint) -> CGError;
+    pub fn SLSMoveWindow(cid: CGSConnectionID, wid: u32, point: *const CGPoint) -> CGError;
     fn SLSCopyAssociatedWindows(cid: CGSConnectionID, wid: u32) -> *const CFArray<CFNumber>;
     fn SLSReassociateWindowsSpacesByGeometry(
         cid: CGSConnectionID,
@@ -39,9 +39,9 @@ unsafe extern "C" {
 }
 
 #[repr(C)]
-struct CGPoint {
-    x: f64,
-    y: f64,
+pub struct CGPoint {
+    pub x: f64,
+    pub y: f64,
 }
 
 /// Set a window's opacity in the WindowServer (0.0 = invisible, 1.0 = opaque).
