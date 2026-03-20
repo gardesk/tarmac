@@ -11,6 +11,14 @@ pub struct Settings {
     pub terminal_command: String,
     /// Height of an external bar (e.g. sketchybar) to reserve at top of each display.
     pub bar_height: f64,
+    /// Border width in pixels (0 = disabled).
+    pub border_width: f64,
+    /// Focused window border color as hex (#RRGGBB).
+    pub border_color_focused: String,
+    /// Unfocused window border color as hex (#RRGGBB).
+    pub border_color_unfocused: String,
+    /// Border corner radius in pixels.
+    pub border_radius: f64,
 }
 
 impl Default for Settings {
@@ -23,6 +31,10 @@ impl Default for Settings {
             mod_key: Modifiers::COMMAND,
             terminal_command: "open -na WezTerm".to_string(),
             bar_height: 0.0,
+            border_width: 0.0,
+            border_color_focused: "#5294e2".to_string(),
+            border_color_unfocused: "#2d2d2d".to_string(),
+            border_radius: 10.0,
         }
     }
 }
@@ -63,6 +75,22 @@ impl Settings {
             "bar_height" => {
                 if let Ok(v) = value.parse() {
                     self.bar_height = v;
+                }
+            }
+            "border_width" => {
+                if let Ok(v) = value.parse() {
+                    self.border_width = v;
+                }
+            }
+            "border_color_focused" => {
+                self.border_color_focused = value.to_string();
+            }
+            "border_color_unfocused" => {
+                self.border_color_unfocused = value.to_string();
+            }
+            "border_radius" => {
+                if let Ok(v) = value.parse() {
+                    self.border_radius = v;
                 }
             }
             _ => {
