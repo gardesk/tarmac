@@ -14,6 +14,7 @@ thread_local! {
     static WORKSPACE_POLLER: RefCell<Option<WorkspacePollingObserver>> = const { RefCell::new(None) };
     static WM_STATE: RefCell<Option<WmState>> = const { RefCell::new(None) };
     static IPC_RX: RefCell<Option<std::sync::mpsc::Receiver<tarmac::ipc::server::IpcCommand>>> = const { RefCell::new(None) };
+    static EVENT_BUS: RefCell<Option<std::sync::Arc<tarmac::ipc::events::EventBus>>> = const { RefCell::new(None) };
     static LUA_CONFIG: RefCell<Option<tarmac::config::lua::LuaConfig>> = const { RefCell::new(None) };
     static HOTKEY_MGR: RefCell<Option<HotkeyManager>> = const { RefCell::new(None) };
     static CONFIG_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
@@ -123,6 +124,9 @@ fn main() {
                     state.on_window_closed(wid);
                 }
             });
+            publish_event(tarmac::ipc::events::WmEvent::WindowClosed {
+                window_id: wid,
+            });
         }),
         Box::new(move |pid| {
             WM_STATE.with(|s| {
@@ -142,7 +146,9 @@ fn main() {
     WORKSPACE_POLLER.with(|p| *p.borrow_mut() = Some(poller));
 
     // Start IPC server
-    let ipc_rx = tarmac::ipc::server::start_server();
+    let event_bus = std::sync::Arc::new(tarmac::ipc::events::EventBus::new());
+    EVENT_BUS.with(|r| *r.borrow_mut() = Some(event_bus.clone()));
+    let ipc_rx = tarmac::ipc::server::start_server(event_bus);
     IPC_RX.with(|r| *r.borrow_mut() = Some(ipc_rx));
 
     // Register display hotplug callback
@@ -170,6 +176,13 @@ fn handle_action(action: Action) {
                     if let Some(id) = state.active_workspace().focused {
                         let id_str = id.to_string();
                         fire_lua_event("window_focused", &[&id_str]);
+                        let app_name = state.registry.get(id)
+                            .map(|w| w.app_name.clone())
+                            .unwrap_or_default();
+                        publish_event(tarmac::ipc::events::WmEvent::WindowFocused {
+                            window_id: id,
+                            app_name,
+                        });
                     }
                 }
                 Action::Swap(dir) => state.swap_direction(dir),
@@ -180,6 +193,9 @@ fn handle_action(action: Action) {
                     state.switch_workspace(num);
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
+                    publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
+                        old: old.clone(), new: new.clone(),
+                    });
                 }
                 Action::MoveToWorkspace(num) => state.move_to_workspace(num),
                 Action::WorkspaceNext => {
@@ -187,23 +203,35 @@ fn handle_action(action: Action) {
                     state.workspace_next();
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
+                    publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
+                        old: old.clone(), new: new.clone(),
+                    });
                 }
                 Action::WorkspacePrev => {
                     let old = state.active_workspace().id.to_string();
                     state.workspace_prev();
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
+                    publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
+                        old: old.clone(), new: new.clone(),
+                    });
                 }
                 Action::ToggleFloat => state.toggle_float(),
                 Action::FocusMonitorNext => {
                     state.focus_monitor_next();
                     let mid = state.focused_monitor.to_string();
                     fire_lua_event("monitor_focused", &[&mid]);
+                    publish_event(tarmac::ipc::events::WmEvent::MonitorChanged {
+                        index: state.focused_monitor,
+                    });
                 }
                 Action::FocusMonitorPrev => {
                     state.focus_monitor_prev();
                     let mid = state.focused_monitor.to_string();
                     fire_lua_event("monitor_focused", &[&mid]);
+                    publish_event(tarmac::ipc::events::WmEvent::MonitorChanged {
+                        index: state.focused_monitor,
+                    });
                 }
                 Action::MoveToMonitorNext => state.move_to_monitor_next(),
                 Action::MoveToMonitorPrev => state.move_to_monitor_prev(),
@@ -723,6 +751,14 @@ fn fire_lua_event(event: &str, args: &[&str]) {
     LUA_CONFIG.with(|c| {
         if let Some(config) = c.borrow().as_ref() {
             config.fire_event(event, args);
+        }
+    });
+}
+
+fn publish_event(event: tarmac::ipc::events::WmEvent) {
+    EVENT_BUS.with(|r| {
+        if let Some(bus) = r.borrow().as_ref() {
+            bus.publish(event);
         }
     });
 }

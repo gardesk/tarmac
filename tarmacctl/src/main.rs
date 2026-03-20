@@ -47,6 +47,7 @@ fn main() {
         eprintln!("  get-windows                   Get all window info");
         eprintln!("  get-monitors                  Get monitor info");
         eprintln!("  get-tree [workspace]           Get layout tree for workspace");
+        eprintln!("  subscribe [event_types...]    Stream events (workspace_changed, window_focused, etc.)");
         eprintln!("  exec <command>                Execute shell command");
         std::process::exit(1);
     }
@@ -69,14 +70,19 @@ fn main() {
         }
     };
 
+    let is_subscribe = request.command == "subscribe";
+
     let mut writer = &stream;
     let json = serde_json::to_string(&request).expect("serialize request");
     writer.write_all(json.as_bytes()).expect("write request");
     writer.write_all(b"\n").expect("write newline");
     writer.flush().expect("flush");
 
-    // Shut down write side so server knows we're done sending
-    stream.shutdown(std::net::Shutdown::Write).ok();
+    // For subscribe, keep connection open for streaming.
+    // For regular commands, shut down write side.
+    if !is_subscribe {
+        stream.shutdown(std::net::Shutdown::Write).ok();
+    }
 
     let reader = BufReader::new(&stream);
     for line in reader.lines() {
@@ -86,6 +92,13 @@ fn main() {
         };
 
         if line.trim().is_empty() {
+            continue;
+        }
+
+        if is_subscribe {
+            // In subscribe mode, print each event line directly.
+            // The first line is the ack response, then streaming events.
+            println!("{}", line);
             continue;
         }
 
