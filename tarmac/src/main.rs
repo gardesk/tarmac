@@ -165,6 +165,12 @@ fn main() {
 }
 
 fn handle_action(action: Action) {
+    // Reload borrows WM_STATE internally — handle outside the borrow
+    if matches!(action, Action::Reload) {
+        reload_config();
+        return;
+    }
+
     WM_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             match action {
@@ -241,9 +247,7 @@ fn handle_action(action: Action) {
                 }
                 Action::MoveToMonitorNext => state.move_to_monitor_next(),
                 Action::MoveToMonitorPrev => state.move_to_monitor_prev(),
-                Action::Reload => {
-                    reload_config();
-                }
+                Action::Reload => unreachable!("handled above"),
                 Action::Exit => {
                     tracing::info!("exit requested");
                     cleanup_socket();
