@@ -764,8 +764,13 @@ fn reload_config() {
     // Re-register hotkeys (drops old ones, registers new)
     register_hotkeys_from_config(&config);
 
-    // Update Lua config for event callbacks
-    LUA_CONFIG.with(|c| *c.borrow_mut() = Some(config));
+    // Update Lua config for event callbacks.
+    // Drop old config first to avoid RefCell borrow conflict during Lua state cleanup.
+    LUA_CONFIG.with(|c| {
+        let old = c.borrow_mut().take();
+        drop(old);
+        *c.borrow_mut() = Some(config);
+    });
 
     tracing::info!("config reloaded successfully");
 }

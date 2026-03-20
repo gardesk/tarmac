@@ -489,11 +489,11 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
         "move_to_monitor_prev" => Ok(Action::MoveToMonitorPrev),
         "reload" => Ok(Action::Reload),
         "exit" => Ok(Action::Exit),
-        _ if parts[0] == "toggle_special" => {
+        "toggle_special" => {
             let name = parts.get(1).ok_or("toggle_special requires a name")?;
             Ok(Action::ToggleSpecial(name.to_string()))
         }
-        _ if parts[0] == "move_to_special" => {
+        "move_to_special" => {
             let name = parts.get(1).ok_or("move_to_special requires a name")?;
             Ok(Action::MoveToSpecial(name.to_string()))
         }
