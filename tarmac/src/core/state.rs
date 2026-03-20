@@ -58,6 +58,8 @@ pub struct WmState {
     pub gap_inner: f64,
     pub gap_outer: f64,
     pub rules: Vec<crate::config::lua::WindowRule>,
+    /// Active special workspace overlay per monitor (None = no overlay).
+    active_specials: Vec<Option<usize>>,
 }
 
 impl Default for WmState {
@@ -85,6 +87,7 @@ impl WmState {
             gap_inner: 0.0,
             gap_outer: 0.0,
             rules: Vec::new(),
+            active_specials: Vec::new(),
         }
     }
 
@@ -1399,6 +1402,164 @@ impl WmState {
         };
         let prev = if current <= 1 { 10 } else { current - 1 };
         self.switch_workspace(prev);
+    }
+
+    // --- Special workspaces (scratchpads) ---
+
+    /// Toggle a special workspace overlay on the focused monitor.
+    /// If hidden → show as centered overlays on top of the current workspace.
+    /// If shown → hide all windows and dismiss the overlay.
+    pub fn toggle_special(&mut self, name: &str) {
+        let special_idx = self.workspaces.special_index(name);
+
+        // Ensure active_specials vec covers all monitors
+        while self.active_specials.len() < self.monitors.len() {
+            self.active_specials.push(None);
+        }
+
+        let mi = self.focused_monitor;
+        if self.active_specials[mi] == Some(special_idx) {
+            // Currently shown → hide
+            self.active_specials[mi] = None;
+            let wids = self.workspaces.get(special_idx).all_window_ids();
+            self.workspaces.get_mut(special_idx).visible = false;
+            for wid in wids {
+                self.hide_window(wid);
+            }
+            // Refocus the underlying workspace
+            if let Some(wid) = self.active_workspace().focused {
+                self.focus_window(wid);
+            }
+            tracing::info!(name, ws = special_idx + 1, "special workspace hidden");
+        } else {
+            // Dismiss any other active special on this monitor first
+            if let Some(old_idx) = self.active_specials[mi] {
+                let old_wids = self.workspaces.get(old_idx).all_window_ids();
+                self.workspaces.get_mut(old_idx).visible = false;
+                for wid in old_wids {
+                    self.hide_window(wid);
+                }
+            }
+
+            // Mark the special workspace as visible
+            self.active_specials[mi] = Some(special_idx);
+            {
+                let ws = self.workspaces.get_mut(special_idx);
+                ws.visible = true;
+                ws.last_monitor = Some(mi);
+            }
+
+            let sr = self.monitor_rect(mi);
+            let ws = self.workspaces.get(special_idx);
+
+            if ws.tree.window_count() == 0 && ws.floating.is_empty() {
+                tracing::info!(name, "special workspace is empty");
+                return;
+            }
+
+            // Compute overlay rect (70% of screen, centered)
+            let overlay_w = sr.width * 0.7;
+            let overlay_h = sr.height * 0.7;
+            let overlay_x = sr.x + (sr.width - overlay_w) / 2.0;
+            let overlay_y = sr.y + (sr.height - overlay_h) / 2.0;
+            let overlay_rect = Rect::new(overlay_x, overlay_y, overlay_w, overlay_h);
+
+            // Compute geometries and collect data before calling self methods
+            let geoms = ws.tree.calculate_geometries_with_gaps(
+                overlay_rect, self.gap_inner, self.gap_outer, true,
+            );
+            let floating_data: Vec<(WindowId, Rect)> = ws
+                .floating
+                .iter()
+                .map(|fw| (fw.id, fw.geometry))
+                .collect();
+            let focus_target = ws.focused.or_else(|| geoms.first().map(|(id, _)| *id));
+
+            // Now show windows (no workspace borrow held)
+            for (wid, rect) in &geoms {
+                self.show_window(*wid, *rect);
+                crate::platform::skylight::set_window_level(
+                    *wid,
+                    crate::platform::skylight::K_CG_FLOATING_WINDOW_LEVEL,
+                );
+            }
+            for (wid, rect) in &floating_data {
+                self.show_window(*wid, *rect);
+                crate::platform::skylight::set_window_level(
+                    *wid,
+                    crate::platform::skylight::K_CG_FLOATING_WINDOW_LEVEL,
+                );
+            }
+            if let Some(wid) = focus_target {
+                self.focus_window(wid);
+            }
+            tracing::info!(name, ws = special_idx + 1, windows = geoms.len(), "special workspace shown");
+        }
+    }
+
+    /// Move the focused window to a special workspace.
+    /// If the special workspace is currently visible, the window appears there.
+    /// If hidden, the window disappears.
+    pub fn move_to_special(&mut self, name: &str) {
+        let focused = match self.active_workspace().focused {
+            Some(f) => f,
+            None => return,
+        };
+
+        let current_idx = self.active_ws_idx();
+        let special_idx = self.workspaces.special_index(name);
+        if current_idx == special_idx {
+            return; // Already on this special workspace
+        }
+
+        // Remove from current workspace
+        let current_ws = self.workspaces.get_mut(current_idx);
+        let was_floating = current_ws.is_floating(focused);
+        if was_floating {
+            current_ws.floating.retain(|f| f.id != focused);
+        } else {
+            current_ws.tree.remove(focused);
+        }
+        current_ws.focus_history.retain(|id| *id != focused);
+        if current_ws.focused == Some(focused) {
+            current_ws.focused = current_ws
+                .focus_history
+                .last()
+                .copied()
+                .or(current_ws.tree.first_window());
+        }
+
+        // Insert into special workspace
+        let sr = self.focused_rect();
+        let special_ws = self.workspaces.get_mut(special_idx);
+        if was_floating {
+            special_ws.floating.push(super::workspace::FloatingWindow {
+                id: focused,
+                geometry: Rect::new(sr.x + 50.0, sr.y + 50.0, 800.0, 600.0),
+            });
+        } else {
+            special_ws.tree.insert_with_rect(focused, special_ws.focused, sr);
+        }
+        special_ws.record_focus(focused);
+
+        // If the special workspace isn't visible, hide the window
+        while self.active_specials.len() < self.monitors.len() {
+            self.active_specials.push(None);
+        }
+        let is_visible = self.active_specials[self.focused_monitor] == Some(special_idx);
+        if !is_visible {
+            self.hide_window(focused);
+        }
+
+        // Retile the source workspace
+        self.apply_layout();
+
+        // Focus next window on source workspace
+        if let Some(next) = self.active_workspace().focused {
+            self.focus_window(next);
+        }
+
+        tracing::info!(id = focused, special = name, "moved window to special workspace");
     }
 
     pub fn focus_monitor_next(&mut self) {

@@ -217,6 +217,8 @@ fn handle_action(action: Action) {
                     });
                 }
                 Action::ToggleFloat => state.toggle_float(),
+                Action::ToggleSpecial(ref name) => state.toggle_special(name),
+                Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
                     state.focus_monitor_next();
                     let mid = state.focused_monitor.to_string();
@@ -463,6 +465,22 @@ fn process_ipc_command(
                 state.toggle_float();
                 Response::ok_empty()
             }
+            "toggle-special" => {
+                if let Some(name) = request.args.first() {
+                    state.toggle_special(name);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: toggle-special <name>")
+                }
+            }
+            "move-to-special" => {
+                if let Some(name) = request.args.first() {
+                    state.move_to_special(name);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: move-to-special <name>")
+                }
+            }
             "get-workspaces" => {
                 let active_id = state.active_workspace().id.to_string();
                 let mut ws_list: Vec<serde_json::Value> = state
@@ -707,7 +725,7 @@ fn register_hotkeys_from_config(config: &tarmac::config::lua::LuaConfig) {
     };
 
     for kb in &config.keybinds {
-        mgr.register(kb.modifiers, kb.key, kb.action);
+        mgr.register(kb.modifiers, kb.key, kb.action.clone());
     }
     tracing::info!(registered = config.keybinds.len(), "hotkeys registered");
 

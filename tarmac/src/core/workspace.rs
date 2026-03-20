@@ -155,6 +155,17 @@ impl WorkspaceManager {
     pub fn iter(&self) -> impl Iterator<Item = &Workspace> {
         self.workspaces.iter()
     }
+
+    /// Find or create a special workspace by name. Returns its index.
+    pub fn special_index(&mut self, name: &str) -> usize {
+        let id = WorkspaceId::Special(name.to_string());
+        if let Some(idx) = self.workspaces.iter().position(|ws| ws.id == id) {
+            return idx;
+        }
+        let idx = self.workspaces.len();
+        self.workspaces.push(Workspace::new(id));
+        idx
+    }
 }
 
 impl Default for WorkspaceManager {

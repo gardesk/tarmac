@@ -194,12 +194,14 @@ impl HotkeyManager {
 
         // Register the action mapping in the callback context
         unsafe {
-            (*self._callback_ctx).id_to_action.insert(id, action);
+            (*self._callback_ctx)
+                .id_to_action
+                .insert(id, action.clone());
         }
 
+        tracing::debug!(?key, ?modifiers, ?action, id, "hotkey registered");
         self.hotkeys
             .insert(id, RegisteredHotKey { carbon_ref, action });
-        tracing::debug!(?key, ?modifiers, ?action, id, "hotkey registered");
         true
     }
 
@@ -319,7 +321,7 @@ unsafe extern "C" fn hotkey_event_handler(
 
     if let Some(action) = ctx.id_to_action.get(&hot_key_id.id) {
         tracing::debug!(?action, id = hot_key_id.id, "hotkey fired");
-        (ctx.callback)(*action);
+        (ctx.callback)(action.clone());
     }
 
     NO_ERR
