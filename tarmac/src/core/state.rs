@@ -62,6 +62,8 @@ pub struct WmState {
     active_specials: Vec<Option<usize>>,
     /// Overlay sizing config per special workspace name.
     pub special_configs: Vec<crate::config::lua::SpecialWorkspaceConfig>,
+    /// Border overlay manager for focused/unfocused window borders.
+    pub borders: crate::platform::border::BorderManager,
 }
 
 impl Default for WmState {
@@ -91,6 +93,7 @@ impl WmState {
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
+            borders: crate::platform::border::BorderManager::new(),
         }
     }
 
@@ -239,6 +242,7 @@ impl WmState {
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
         self.fix_oversized_windows();
+        self.update_borders();
         self.install_observers_for_all();
 
         tracing::info!(observers = self.observers.len(), "observers installed");
@@ -300,6 +304,27 @@ impl WmState {
                 self.show_window(fw.id, fw.geometry);
                 use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
                 set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+            }
+        }
+    }
+
+    /// Update border overlays for all visible windows.
+    pub fn update_borders(&mut self) {
+        if !self.borders.is_enabled() {
+            return;
+        }
+
+        for (mi, monitor) in self.monitors.iter().enumerate() {
+            let ws = self.workspaces.get(monitor.active_workspace);
+            let sr = self.monitor_rect(mi);
+            let geoms = ws.tree.calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+            let focused = ws.focused;
+
+            for (wid, rect) in &geoms {
+                self.borders.update_border(*wid, *rect, focused == Some(*wid));
+            }
+            for fw in &ws.floating {
+                self.borders.update_border(fw.id, fw.geometry, focused == Some(fw.id));
             }
         }
     }
@@ -822,13 +847,39 @@ impl WmState {
         // Record focus on the workspace that CONTAINS this window,
         // not the active workspace — during cross-monitor FFM the active
         // workspace might be different from the window's workspace.
-        if let Some(ws_idx) = self.workspaces.find_window(id) {
+        let old_focused = if let Some(ws_idx) = self.workspaces.find_window(id) {
+            let old = self.workspaces.get(ws_idx).focused;
             self.workspaces.get_mut(ws_idx).record_focus(id);
+            old
         } else {
-            // Fallback: window not in any workspace (shouldn't happen)
+            let old = self.active_workspace().focused;
             self.active_workspace_mut().record_focus(id);
-        }
+            old
+        };
         self.enforce_floating_levels();
+
+        // Update border colors on focus change
+        if self.borders.is_enabled() && old_focused != Some(id) {
+            // Get rects for old and new focused windows from registry
+            let old_rect = old_focused.and_then(|oid| {
+                self.registry
+                    .get(oid)
+                    .map(|w| Rect::new(w.x, w.y, w.width, w.height))
+            });
+            let new_rect = self
+                .registry
+                .get(id)
+                .map(|w| Rect::new(w.x, w.y, w.width, w.height));
+            if let Some(rect) = old_rect
+                && let Some(oid) = old_focused
+            {
+                self.borders.update_border(oid, rect, false);
+            }
+            if let Some(rect) = new_rect {
+                self.borders.update_border(id, rect, true);
+            }
+        }
+
         tracing::debug!(id, activate_app, "focused window");
     }
 
@@ -2249,6 +2300,7 @@ impl WmState {
             return;
         }
         tracing::info!(id, "window closed -> retiling");
+        self.borders.remove_border(id);
         self.registry.remove(id);
         self.ax_refs.remove(&id);
 

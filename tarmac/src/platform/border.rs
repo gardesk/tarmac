@@ -6,9 +6,8 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 
-use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{msg_send, msg_send_id};
+use objc2::msg_send;
 
 use crate::core::tree::Rect;
 
@@ -50,6 +49,7 @@ pub struct BorderManager {
 }
 
 impl BorderManager {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
             overlays: HashMap::new(),
@@ -132,15 +132,15 @@ impl BorderManager {
             return;
         }
 
-        if let Some(old) = old_focused {
-            if let Some(rect) = get_rect(old) {
-                self.update_border(old, rect, false);
-            }
+        if let Some(old) = old_focused
+            && let Some(rect) = get_rect(old)
+        {
+            self.update_border(old, rect, false);
         }
-        if let Some(new) = new_focused {
-            if let Some(rect) = get_rect(new) {
-                self.update_border(new, rect, true);
-            }
+        if let Some(new) = new_focused
+            && let Some(rect) = get_rect(new)
+        {
+            self.update_border(new, rect, true);
         }
     }
 }
@@ -170,11 +170,13 @@ unsafe extern "C" {
     // Core Graphics drawing
     fn CGContextSetRGBStrokeColor(ctx: *mut c_void, r: f64, g: f64, b: f64, a: f64);
     fn CGContextSetLineWidth(ctx: *mut c_void, width: f64);
-    fn CGContextAddRoundedRect(ctx: *mut c_void, rect: CGRect, rx: f64, ry: f64);
     fn CGContextClearRect(ctx: *mut c_void, rect: CGRect);
+    fn CGContextAddPath(ctx: *mut c_void, path: *const c_void);
     fn CGContextStrokePath(ctx: *mut c_void);
     fn CGContextFlush(ctx: *mut c_void);
     fn CGContextRelease(ctx: *mut c_void);
+    fn CGPathCreateWithRoundedRect(rect: CGRect, rx: f64, ry: f64, transform: *const c_void) -> *const c_void;
+    fn CGPathRelease(path: *const c_void);
 
     fn CGSNewRegionWithRect(rect: *const CGRect, region: *mut *const c_void) -> i32;
 }
@@ -299,7 +301,11 @@ fn draw_border(
     unsafe {
         CGContextSetRGBStrokeColor(ctx, color.r, color.g, color.b, color.a);
         CGContextSetLineWidth(ctx, bw * scale);
-        CGContextAddRoundedRect(ctx, border, radius * scale, radius * scale);
+        let path = CGPathCreateWithRoundedRect(border, radius * scale, radius * scale, std::ptr::null());
+        if !path.is_null() {
+            CGContextAddPath(ctx, path);
+            CGPathRelease(path);
+        }
         CGContextStrokePath(ctx);
         CGContextFlush(ctx);
         CGContextRelease(ctx);

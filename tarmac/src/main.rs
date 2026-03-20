@@ -58,6 +58,12 @@ fn main() {
     state.bar_height = config.settings.bar_height;
     state.rules = config.rules.clone();
     state.special_configs = config.special_configs.clone();
+    state.borders.border_width = config.settings.border_width;
+    state.borders.focused_color =
+        tarmac::platform::border::BorderColor::from_hex(&config.settings.border_color_focused);
+    state.borders.unfocused_color =
+        tarmac::platform::border::BorderColor::from_hex(&config.settings.border_color_unfocused);
+    state.borders.radius = config.settings.border_radius;
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
@@ -760,8 +766,17 @@ fn reload_config() {
             state.bar_height = config.settings.bar_height;
             state.rules = config.rules.clone();
             state.special_configs = config.special_configs.clone();
+            state.borders.border_width = config.settings.border_width;
+            state.borders.focused_color = tarmac::platform::border::BorderColor::from_hex(
+                &config.settings.border_color_focused,
+            );
+            state.borders.unfocused_color = tarmac::platform::border::BorderColor::from_hex(
+                &config.settings.border_color_unfocused,
+            );
+            state.borders.radius = config.settings.border_radius;
             // Reapply layout with potentially new gap/bar values
             state.apply_layout();
+            state.update_borders();
         }
     });
 
