@@ -164,6 +164,10 @@ unsafe extern "C" {
     fn SLSSetWindowLevel(cid: i32, wid: u32, level: i32) -> i32;
     fn SLSOrderWindow(cid: i32, wid: u32, mode: i32, relative_to: u32) -> i32;
     fn SLSSetWindowResolution(cid: i32, wid: u32, resolution: f64) -> i32;
+    fn SLSSetWindowOpacity(cid: i32, wid: u32, opaque: i32) -> i32;
+    fn SLSSetWindowBackgroundBlurRadius(cid: i32, wid: u32, radius: i32) -> i32;
+    fn SLSSetWindowTags(cid: i32, wid: u32, tags: *const u64, tag_size: i32) -> i32;
+    fn SLSClearWindowTags(cid: i32, wid: u32, tags: *const u64, tag_size: i32) -> i32;
 
     fn CGWindowContextCreate(cid: i32, wid: u32, options: *const c_void) -> *mut c_void;
 
@@ -214,10 +218,23 @@ fn create_overlay(rect: Rect, color: BorderColor, bw: f64, radius: f64) -> Optio
         return None;
     }
 
-    // Set window above all normal windows (level 20 = above floating)
     unsafe {
+        // Make the overlay transparent (non-opaque) so CGContextClearRect works
+        SLSSetWindowOpacity(cid, wid, 0);
+        // Above floating windows
         SLSSetWindowLevel(cid, wid, 20);
-        SLSOrderWindow(cid, wid, 1, 0); // kCGWindowAbove
+        SLSOrderWindow(cid, wid, 1, 0);
+        SLSSetWindowBackgroundBlurRadius(cid, wid, 0);
+
+        // Set tags: ignore mouse events (click-through) + sticky (all spaces)
+        // Tag bit 0x2 = kCGSIgnoreForEvents (click-through)
+        // Tag bit 0x800 = kCGSStickyWindow (visible on all spaces)
+        let tags: u64 = 0x2 | 0x800;
+        SLSSetWindowTags(cid, wid, &tags, 64);
+
+        // Clear shadow tag
+        let shadow_tag: u64 = 0x4; // kCGSHasShadow
+        SLSClearWindowTags(cid, wid, &shadow_tag, 64);
     }
 
     // Get Retina scale factor
