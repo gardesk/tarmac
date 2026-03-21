@@ -61,39 +61,15 @@ impl BorderManager {
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.border_width > 0.0
+        // TODO: SkyLight overlay approach is broken (wrong coordinates,
+        // no transparency, phantom tiles). Disabled until we implement
+        // proper NSWindow overlays or integrate with JankyBorders.
+        false
     }
 
     /// Create or update the border overlay for a window.
-    pub fn update_border(&mut self, wid: WindowId, rect: Rect, focused: bool) {
-        if !self.is_enabled() {
-            return;
-        }
-
-        let color = if focused {
-            self.focused_color
-        } else {
-            self.unfocused_color
-        };
-
-        let bw = self.border_width;
-        // Border frame is slightly larger than the window
-        let border_rect = Rect::new(
-            rect.x - bw,
-            rect.y - bw,
-            rect.width + 2.0 * bw,
-            rect.height + 2.0 * bw,
-        );
-
-        if let Some(&overlay_wid) = self.overlays.get(&wid) {
-            // Update existing overlay position/size and redraw
-            update_overlay(overlay_wid, border_rect, color, bw, self.radius);
-        } else {
-            // Create new overlay
-            if let Some(overlay_wid) = create_overlay(border_rect, color, bw, self.radius) {
-                self.overlays.insert(wid, overlay_wid);
-            }
-        }
+    pub fn update_border(&mut self, _wid: WindowId, _rect: Rect, _focused: bool) {
+        // Disabled — see is_enabled()
     }
 
     /// Hide the border for a window.
