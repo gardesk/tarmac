@@ -1066,6 +1066,38 @@ fn build_settings_snapshot(
         focus_follows_mouse: state.focus_follows_mouse,
         mouse_follows_focus: state.mouse_follows_focus,
         mod_key,
+        keybinds: LUA_CONFIG.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|cfg| {
+                    cfg.keybinds
+                        .iter()
+                        .map(|kb| (format!("{:?}+{:?}", kb.modifiers, kb.key), format!("{:?}", kb.action)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }),
+        rules: LUA_CONFIG.with(|c| {
+            c.borrow()
+                .as_ref()
+                .map(|cfg| {
+                    cfg.rules
+                        .iter()
+                        .map(|r| {
+                            let match_str = r.app_name.as_deref().unwrap_or("*").to_string();
+                            let mut actions = Vec::new();
+                            if let Some(true) = r.floating {
+                                actions.push("float".to_string());
+                            }
+                            if let Some(ws) = &r.workspace {
+                                actions.push(format!("workspace {ws}"));
+                            }
+                            (match_str, actions.join(", "))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }),
     }
 }
 
