@@ -332,14 +332,14 @@ fn register_gar_api(
 }
 
 impl LuaConfig {
-    /// Fire all callbacks registered for a given event.
+    /// Fire all callbacks registered for a given event with string args.
+    /// Used for events like workspace_changed(old, new).
     pub fn fire_event(&self, event: &str, args: &[&str]) {
         let Some(lua) = &self.lua else { return };
         for cb in &self.callbacks {
             if cb.event == event {
                 match lua.registry_value::<mlua::Function>(&cb.func_key) {
                     Ok(func) => {
-                        // Build args as Lua strings
                         let lua_args: Vec<mlua::Value> = args
                             .iter()
                             .filter_map(|a| lua.create_string(a).ok().map(mlua::Value::String))
@@ -353,6 +353,64 @@ impl LuaConfig {
                     }
                 }
             }
+        }
+    }
+
+    /// Fire all callbacks registered for a given event with a structured data table.
+    /// Converts a serde_json::Value to a Lua table, enabling callbacks like:
+    ///   gar.on("window_focused", function(info) print(info.title) end)
+    pub fn fire_event_with_data(&self, event: &str, data: &serde_json::Value) {
+        let Some(lua) = &self.lua else { return };
+        for cb in &self.callbacks {
+            if cb.event == event {
+                match lua.registry_value::<mlua::Function>(&cb.func_key) {
+                    Ok(func) => {
+                        let lua_val = match json_to_lua(lua, data) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                tracing::warn!(event, err = %e, "failed to convert event data");
+                                continue;
+                            }
+                        };
+                        if let Err(e) = func.call::<()>(lua_val) {
+                            tracing::warn!(event, err = %e, "callback error");
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(event, err = %e, "failed to retrieve callback");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Convert a serde_json::Value to a mlua::Value.
+fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> LuaResult<mlua::Value> {
+    match value {
+        serde_json::Value::Null => Ok(mlua::Value::Nil),
+        serde_json::Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(mlua::Value::Integer(i))
+            } else {
+                Ok(mlua::Value::Number(n.as_f64().unwrap_or(0.0)))
+            }
+        }
+        serde_json::Value::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
+        serde_json::Value::Array(arr) => {
+            let table = lua.create_table()?;
+            for (i, v) in arr.iter().enumerate() {
+                table.set(i + 1, json_to_lua(lua, v)?)?;
+            }
+            Ok(mlua::Value::Table(table))
+        }
+        serde_json::Value::Object(map) => {
+            let table = lua.create_table()?;
+            for (k, v) in map {
+                table.set(k.as_str(), json_to_lua(lua, v)?)?;
+            }
+            Ok(mlua::Value::Table(table))
         }
     }
 }

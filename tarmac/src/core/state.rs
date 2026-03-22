@@ -2457,6 +2457,15 @@ impl WmState {
     /// Build a LayoutChanged event for the current active workspace.
     pub fn layout_changed_event(&self) -> crate::ipc::events::WmEvent {
         let ws = self.active_workspace();
+        let (tiled, floating, layout_type) = Self::layout_info(ws);
+        crate::ipc::events::WmEvent::LayoutChanged {
+            workspace: ws.id.to_string(),
+            window_count: tiled + floating,
+            layout_type: layout_type.to_string(),
+        }
+    }
+
+    fn layout_info(ws: &super::workspace::Workspace) -> (usize, usize, &'static str) {
         let tiled = ws.tree.windows().len();
         let floating = ws.floating.len();
         let layout_type = if floating > 0 && tiled > 0 {
@@ -2466,11 +2475,51 @@ impl WmState {
         } else {
             "tiled"
         };
-        crate::ipc::events::WmEvent::LayoutChanged {
-            workspace: ws.id.to_string(),
-            window_count: tiled + floating,
-            layout_type: layout_type.to_string(),
-        }
+        (tiled, floating, layout_type)
+    }
+
+    // --- Lua event data builders ---
+
+    /// Build JSON data for a window_focused Lua callback.
+    pub fn window_focus_data(&self, wid: WindowId) -> Option<serde_json::Value> {
+        let w = self.registry.get(wid)?;
+        let ws_id = self
+            .workspaces
+            .find_window(wid)
+            .map(|idx| self.workspaces.get(idx).id.to_string())
+            .unwrap_or_default();
+        Some(serde_json::json!({
+            "window_id": wid,
+            "title": w.title,
+            "app_name": w.app_name,
+            "app_bundle": w.app_bundle_id,
+            "workspace": ws_id,
+        }))
+    }
+
+    /// Build JSON data for a window_created Lua callback.
+    pub fn window_created_data(&self, wid: WindowId) -> Option<serde_json::Value> {
+        self.window_focus_data(wid) // same fields
+    }
+
+    /// Build JSON data for a layout_changed Lua callback.
+    pub fn layout_changed_data(&self) -> serde_json::Value {
+        let ws = self.active_workspace();
+        let (tiled, floating, layout_type) = Self::layout_info(ws);
+        serde_json::json!({
+            "workspace": ws.id.to_string(),
+            "window_count": tiled + floating,
+            "layout_type": layout_type,
+        })
+    }
+
+    /// Build JSON data for a monitor_changed Lua callback.
+    pub fn monitor_changed_data(&self) -> serde_json::Value {
+        serde_json::json!({
+            "index": self.focused_monitor,
+            "monitor_count": self.monitors.len(),
+            "focused_workspace": self.active_workspace().id.to_string(),
+        })
     }
 
     // --- Helpers ---

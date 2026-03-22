@@ -118,9 +118,13 @@ fn main() {
                 let new_focused = state.active_workspace().focused;
                 if new_focused != prev_focused
                     && let Some(id) = new_focused
-                    && let Some(evt) = state.window_focused_event(id)
                 {
-                    publish_event(evt);
+                    if let Some(data) = state.window_focus_data(id) {
+                        fire_lua_event_data("window_focused", &data);
+                    }
+                    if let Some(evt) = state.window_focused_event(id) {
+                        publish_event(evt);
+                    }
                 }
             }
         });
@@ -132,7 +136,6 @@ fn main() {
             WM_STATE.with(|s| {
                 if let Some(state) = s.borrow_mut().as_mut() {
                     state.on_new_window_detected(pid, &owner, wid);
-                    // Publish WindowCreated for each newly-registered window from this app
                     if let Some(w) = state.registry.get(wid) {
                         let ws_id = state
                             .workspaces
@@ -146,7 +149,12 @@ fn main() {
                             app_bundle: w.app_bundle_id.clone(),
                             workspace: ws_id,
                         });
+                        if let Some(data) = state.window_created_data(wid) {
+                            fire_lua_event_data("window_created", &data);
+                        }
+                        let layout_data = state.layout_changed_data();
                         publish_event(state.layout_changed_event());
+                        fire_lua_event_data("layout_changed", &layout_data);
                     }
                 }
             });
@@ -162,13 +170,20 @@ fn main() {
             WM_STATE.with(|s| {
                 if let Some(state) = s.borrow_mut().as_mut() {
                     state.on_window_closed(wid);
+                    let layout_data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &layout_data);
                 }
+            });
+            let closed_data = serde_json::json!({
+                "window_id": wid,
+                "app_name": &app_name,
             });
             publish_event(tarmac::ipc::events::WmEvent::WindowClosed {
                 window_id: wid,
                 app_name,
             });
+            fire_lua_event_data("window_closed", &closed_data);
         }),
         Box::new(move |pid| {
             WM_STATE.with(|s| {
@@ -220,13 +235,16 @@ fn handle_action(action: Action) {
                 Action::SpawnTerminal => spawn_terminal(),
                 Action::CloseWindow => {
                     state.close_focused();
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::Focus(dir) => {
                     state.focus_direction(dir);
                     if let Some(id) = state.active_workspace().focused {
-                        let id_str = id.to_string();
-                        fire_lua_event("window_focused", &[&id_str]);
+                        if let Some(data) = state.window_focus_data(id) {
+                            fire_lua_event_data("window_focused", &data);
+                        }
                         if let Some(evt) = state.window_focused_event(id) {
                             publish_event(evt);
                         }
@@ -234,15 +252,21 @@ fn handle_action(action: Action) {
                 }
                 Action::Swap(dir) => {
                     state.swap_direction(dir);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::Resize(dir) => {
                     state.resize_direction(dir);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::Equalize => {
                     state.equalize();
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::Workspace(num) => {
                     let old = state.active_workspace().id.to_string();
@@ -253,7 +277,9 @@ fn handle_action(action: Action) {
                 }
                 Action::MoveToWorkspace(num) => {
                     state.move_to_workspace(num);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::WorkspaceNext => {
                     let old = state.active_workspace().id.to_string();
@@ -271,20 +297,26 @@ fn handle_action(action: Action) {
                 }
                 Action::ToggleFloat => {
                     state.toggle_float();
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::ToggleSpecial(ref name) => {
                     state.toggle_special(name);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::MoveToSpecial(ref name) => {
                     state.move_to_special(name);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::FocusMonitorNext => {
                     state.focus_monitor_next();
-                    let mid = state.focused_monitor.to_string();
-                    fire_lua_event("monitor_focused", &[&mid]);
+                    let data = state.monitor_changed_data();
+                    fire_lua_event_data("monitor_changed", &data);
                     publish_event(tarmac::ipc::events::WmEvent::MonitorChanged {
                         index: state.focused_monitor,
                         monitor_count: state.monitors.len(),
@@ -293,8 +325,8 @@ fn handle_action(action: Action) {
                 }
                 Action::FocusMonitorPrev => {
                     state.focus_monitor_prev();
-                    let mid = state.focused_monitor.to_string();
-                    fire_lua_event("monitor_focused", &[&mid]);
+                    let data = state.monitor_changed_data();
+                    fire_lua_event_data("monitor_changed", &data);
                     publish_event(tarmac::ipc::events::WmEvent::MonitorChanged {
                         index: state.focused_monitor,
                         monitor_count: state.monitors.len(),
@@ -303,11 +335,15 @@ fn handle_action(action: Action) {
                 }
                 Action::MoveToMonitorNext => {
                     state.move_to_monitor_next();
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::MoveToMonitorPrev => {
                     state.move_to_monitor_prev();
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                 }
                 Action::Reload => unreachable!("handled above"),
                 Action::Exit => {
@@ -492,10 +528,13 @@ fn process_ipc_command(
             "focus" => {
                 if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
                     state.focus_direction(dir);
-                    if let Some(id) = state.active_workspace().focused
-                        && let Some(evt) = state.window_focused_event(id)
-                    {
-                        publish_event(evt);
+                    if let Some(id) = state.active_workspace().focused {
+                        if let Some(data) = state.window_focus_data(id) {
+                            fire_lua_event_data("window_focused", &data);
+                        }
+                        if let Some(evt) = state.window_focused_event(id) {
+                            publish_event(evt);
+                        }
                     }
                     Response::ok_empty()
                 } else {
@@ -505,7 +544,9 @@ fn process_ipc_command(
             "swap" => {
                 if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
                     state.swap_direction(dir);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: swap left|right|up|down")
@@ -514,7 +555,9 @@ fn process_ipc_command(
             "resize" => {
                 if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
                     state.resize_direction(dir);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: resize left|right|up|down")
@@ -522,12 +565,16 @@ fn process_ipc_command(
             }
             "close" => {
                 state.close_focused();
+                let data = state.layout_changed_data();
                 publish_event(state.layout_changed_event());
+                fire_lua_event_data("layout_changed", &data);
                 Response::ok_empty()
             }
             "equalize" => {
                 state.equalize();
+                let data = state.layout_changed_data();
                 publish_event(state.layout_changed_event());
+                fire_lua_event_data("layout_changed", &data);
                 Response::ok_empty()
             }
             "workspace" => {
@@ -535,6 +582,7 @@ fn process_ipc_command(
                     let old = state.active_workspace().id.to_string();
                     state.switch_workspace(n);
                     let new = state.active_workspace().id.to_string();
+                    fire_lua_event("workspace_changed", &[&old, &new]);
                     publish_event(state.workspace_changed_event(old, new));
                     Response::ok_empty()
                 } else {
@@ -544,7 +592,9 @@ fn process_ipc_command(
             "move-to-workspace" => {
                 if let Some(n) = request.args.first().and_then(|a| a.parse::<u8>().ok()) {
                     state.move_to_workspace(n);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: move-to-workspace <1-10>")
@@ -552,13 +602,17 @@ fn process_ipc_command(
             }
             "toggle-floating" => {
                 state.toggle_float();
+                let data = state.layout_changed_data();
                 publish_event(state.layout_changed_event());
+                fire_lua_event_data("layout_changed", &data);
                 Response::ok_empty()
             }
             "toggle-special" => {
                 if let Some(name) = request.args.first() {
                     state.toggle_special(name);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: toggle-special <name>")
@@ -567,7 +621,9 @@ fn process_ipc_command(
             "move-to-special" => {
                 if let Some(name) = request.args.first() {
                     state.move_to_special(name);
+                    let data = state.layout_changed_data();
                     publish_event(state.layout_changed_event());
+                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: move-to-special <name>")
@@ -877,6 +933,14 @@ fn fire_lua_event(event: &str, args: &[&str]) {
     LUA_CONFIG.with(|c| {
         if let Some(config) = c.borrow().as_ref() {
             config.fire_event(event, args);
+        }
+    });
+}
+
+fn fire_lua_event_data(event: &str, data: &serde_json::Value) {
+    LUA_CONFIG.with(|c| {
+        if let Some(config) = c.borrow().as_ref() {
+            config.fire_event_with_data(event, data);
         }
     });
 }
