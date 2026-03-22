@@ -2391,6 +2391,88 @@ impl WmState {
         }
     }
 
+    // --- IPC event snapshot builders ---
+
+    /// Build a workspace snapshot for IPC events.
+    pub fn workspace_snapshot(&self) -> Vec<crate::ipc::events::WorkspaceInfo> {
+        self.workspaces
+            .iter()
+            .map(|ws| {
+                let id_str = ws.id.to_string();
+                let monitor = self
+                    .monitors
+                    .iter()
+                    .position(|m| m.active_workspace == self.ws_index_by_id(&ws.id));
+                crate::ipc::events::WorkspaceInfo {
+                    id: id_str,
+                    active: monitor.is_some(),
+                    windows: ws.all_window_ids().len(),
+                    monitor,
+                    urgent: false,
+                }
+            })
+            .collect()
+    }
+
+    /// Resolve the workspace index for a WorkspaceId.
+    fn ws_index_by_id(&self, id: &super::workspace::WorkspaceId) -> usize {
+        self.workspaces
+            .iter()
+            .position(|ws| ws.id == *id)
+            .unwrap_or(0)
+    }
+
+    /// Build a WindowFocused event for the given window, or None if not found.
+    pub fn window_focused_event(&self, wid: WindowId) -> Option<crate::ipc::events::WmEvent> {
+        let w = self.registry.get(wid)?;
+        let ws_id = self
+            .workspaces
+            .find_window(wid)
+            .map(|idx| self.workspaces.get(idx).id.to_string())
+            .unwrap_or_default();
+        Some(crate::ipc::events::WmEvent::WindowFocused {
+            window_id: wid,
+            title: w.title.clone(),
+            app_name: w.app_name.clone(),
+            app_bundle: w.app_bundle_id.clone(),
+            workspace: ws_id,
+        })
+    }
+
+    /// Build a WorkspaceChanged event with full snapshot.
+    pub fn workspace_changed_event(
+        &self,
+        old: String,
+        new: String,
+    ) -> crate::ipc::events::WmEvent {
+        crate::ipc::events::WmEvent::WorkspaceChanged {
+            old,
+            new: new.clone(),
+            workspaces: self.workspace_snapshot(),
+            focused_workspace: new,
+            focused_monitor: self.focused_monitor,
+        }
+    }
+
+    /// Build a LayoutChanged event for the current active workspace.
+    pub fn layout_changed_event(&self) -> crate::ipc::events::WmEvent {
+        let ws = self.active_workspace();
+        let tiled = ws.tree.windows().len();
+        let floating = ws.floating.len();
+        let layout_type = if floating > 0 && tiled > 0 {
+            "mixed"
+        } else if floating > 0 {
+            "floating"
+        } else {
+            "tiled"
+        };
+        crate::ipc::events::WmEvent::LayoutChanged {
+            workspace: ws.id.to_string(),
+            window_count: tiled + floating,
+            layout_type: layout_type.to_string(),
+        }
+    }
+
     // --- Helpers ---
 
     #[allow(clippy::too_many_arguments)]
