@@ -18,6 +18,7 @@ thread_local! {
     static LUA_CONFIG: RefCell<Option<tarmac::config::lua::LuaConfig>> = const { RefCell::new(None) };
     static HOTKEY_MGR: RefCell<Option<HotkeyManager>> = const { RefCell::new(None) };
     static CONFIG_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+    static TRAY: RefCell<Option<tarmac::ui::tray::TrayWidget>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -505,6 +506,14 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             }
         }
     });
+
+    // Process tray menu actions and refresh tray state
+    poll_tray_actions();
+    TRAY.with(|t| {
+        if let Some(tray) = t.borrow().as_ref() {
+            update_tray(tray);
+        }
+    });
 }
 
 fn process_ipc_command(
@@ -958,6 +967,48 @@ fn cleanup_socket() {
     let _ = std::fs::remove_file(&path);
 }
 
+fn update_tray(tray: &tarmac::ui::tray::TrayWidget) {
+    WM_STATE.with(|s| {
+        if let Some(state) = s.borrow().as_ref() {
+            let active_id = state.active_workspace().id.to_string();
+            let workspaces: Vec<tarmac::ui::tray::TrayWorkspace> = state
+                .workspaces
+                .iter()
+                .map(|ws| tarmac::ui::tray::TrayWorkspace {
+                    id: ws.id.to_string(),
+                    active: ws.visible,
+                    windows: ws.all_window_ids().len(),
+                })
+                .collect();
+            tray.update(&workspaces, &active_id);
+        }
+    });
+}
+
+fn poll_tray_actions() {
+    TRAY.with(|t| {
+        let borrow = t.borrow();
+        let Some(tray) = borrow.as_ref() else { return };
+        let actions = tray.poll_actions();
+        drop(borrow); // release borrow before handling actions
+        for action in actions {
+            match action {
+                tarmac::ui::tray::TrayAction::SwitchWorkspace(num) => {
+                    handle_action(tarmac::core::input::Action::Workspace(num));
+                }
+                tarmac::ui::tray::TrayAction::Reload => {
+                    reload_config();
+                }
+                tarmac::ui::tray::TrayAction::Quit => {
+                    tracing::info!("quit from tray");
+                    cleanup_socket();
+                    std::process::exit(0);
+                }
+            }
+        }
+    });
+}
+
 fn run_app() {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
@@ -966,6 +1017,11 @@ fn run_app() {
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+    // Initialize system tray
+    let tray = tarmac::ui::tray::TrayWidget::new(mtm);
+    update_tray(&tray);
+    TRAY.with(|t| *t.borrow_mut() = Some(tray));
 
     tracing::info!("entering main event loop");
     app.run();

@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32">
+  <!-- Runway strip -->
+  <rect x="2" y="24" width="28" height="2" rx="1" fill="black" opacity="0.6"/>
+  <!-- Runway markings -->
+  <rect x="6" y="24.5" width="3" height="1" rx="0.5" fill="black" opacity="0.3"/>
+  <rect x="14" y="24.5" width="3" height="1" rx="0.5" fill="black" opacity="0.3"/>
+  <rect x="22" y="24.5" width="3" height="1" rx="0.5" fill="black" opacity="0.3"/>
+  <!-- Airplane fuselage - descending at ~15 deg from left to right -->
+  <g transform="translate(14, 14) rotate(-12)">
+    <!-- Fuselage -->
+    <ellipse cx="0" cy="0" rx="9" ry="1.8" fill="black"/>
+    <!-- Nose -->
+    <path d="M 8.5 0 Q 11 -0.3 11 0 Q 11 0.3 8.5 0" fill="black"/>
+    <!-- Main wing -->
+    <path d="M -1 -1.5 L -4 -7.5 L 0 -7 L 4 -1.5 Z" fill="black"/>
+    <!-- Tail fin -->
+    <path d="M -7.5 -1.5 L -9.5 -5.5 L -7 -4.5 L -6 -1.5 Z" fill="black"/>
+    <!-- Horizontal stabilizer -->
+    <path d="M -7 -0.5 L -9.5 -2.5 L -7 -2 L -5.5 -0.5 Z" fill="black"/>
+    <!-- Landing gear -->
+    <line x1="-2" y1="1.8" x2="-2.5" y2="4" stroke="black" stroke-width="0.6"/>
+    <line x1="2" y1="1.8" x2="1.5" y2="4" stroke="black" stroke-width="0.6"/>
+    <circle cx="-2.5" cy="4.2" r="0.7" fill="black"/>
+    <circle cx="1.5" cy="4.2" r="0.7" fill="black"/>
+  </g>
+</svg>
