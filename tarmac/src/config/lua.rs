@@ -743,11 +743,7 @@ pub fn default_keybinds(settings: &Settings) -> Vec<LuaKeybind> {
 /// Update a single `gar.set("key", ...)` line in a Lua config file.
 /// Preserves all other content (comments, bindings, rules, etc.).
 /// `value` should be the Lua literal: a number like `8` or a quoted string like `"#5294e2"`.
-pub fn update_lua_setting(
-    path: &std::path::Path,
-    key: &str,
-    value: &str,
-) -> Result<(), String> {
+pub fn update_lua_setting(path: &std::path::Path, key: &str, value: &str) -> Result<(), String> {
     let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
 
     // Match: gar.set("key", <anything>) or gar.set("key", <anything>)
@@ -845,7 +841,10 @@ mod tests {
         std::fs::write(&path, "gar.set(\"gap_inner\", 8)\n").unwrap();
         update_lua_setting(&path, "gap_inner", "20").unwrap();
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("gar.set(\"gap_inner\", 20)"), "got: {content}");
+        assert!(
+            content.contains("gar.set(\"gap_inner\", 20)"),
+            "got: {content}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

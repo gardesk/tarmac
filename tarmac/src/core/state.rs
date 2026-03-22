@@ -317,14 +317,18 @@ impl WmState {
         for (mi, monitor) in self.monitors.iter().enumerate() {
             let ws = self.workspaces.get(monitor.active_workspace);
             let sr = self.monitor_rect(mi);
-            let geoms = ws.tree.calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+            let geoms =
+                ws.tree
+                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
             let focused = ws.focused;
 
             for (wid, rect) in &geoms {
-                self.borders.update_border(*wid, *rect, focused == Some(*wid));
+                self.borders
+                    .update_border(*wid, *rect, focused == Some(*wid));
             }
             for fw in &ws.floating {
-                self.borders.update_border(fw.id, fw.geometry, focused == Some(fw.id));
+                self.borders
+                    .update_border(fw.id, fw.geometry, focused == Some(fw.id));
             }
         }
     }
@@ -2440,11 +2444,7 @@ impl WmState {
     }
 
     /// Build a WorkspaceChanged event with full snapshot.
-    pub fn workspace_changed_event(
-        &self,
-        old: String,
-        new: String,
-    ) -> crate::ipc::events::WmEvent {
+    pub fn workspace_changed_event(&self, old: String, new: String) -> crate::ipc::events::WmEvent {
         crate::ipc::events::WmEvent::WorkspaceChanged {
             old,
             new: new.clone(),

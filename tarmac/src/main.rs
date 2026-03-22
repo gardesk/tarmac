@@ -1072,7 +1072,12 @@ fn build_settings_snapshot(
                 .map(|cfg| {
                     cfg.keybinds
                         .iter()
-                        .map(|kb| (format!("{:?}+{:?}", kb.modifiers, kb.key), format!("{:?}", kb.action)))
+                        .map(|kb| {
+                            (
+                                format!("{:?}+{:?}", kb.modifiers, kb.key),
+                                format!("{:?}", kb.action),
+                            )
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
@@ -1135,11 +1140,19 @@ fn poll_settings_actions() {
                         }
                         SettingsAction::BorderWidth(v) => {
                             state.borders.border_width = v;
-                            write_setting(&config_path, "border_width", &lua_string(&lua_number(v)));
+                            write_setting(
+                                &config_path,
+                                "border_width",
+                                &lua_string(&lua_number(v)),
+                            );
                         }
                         SettingsAction::BorderRadius(v) => {
                             state.borders.radius = v;
-                            write_setting(&config_path, "border_radius", &lua_string(&lua_number(v)));
+                            write_setting(
+                                &config_path,
+                                "border_radius",
+                                &lua_string(&lua_number(v)),
+                            );
                         }
                         SettingsAction::BorderColorFocused(ref hex) => {
                             state.borders.focused_color =

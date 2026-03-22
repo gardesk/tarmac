@@ -2,7 +2,7 @@ use std::sync::mpsc;
 
 use objc2::rc::Retained;
 use objc2::{
-    define_class, msg_send, sel, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly,
+    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
     NSBackingStoreType, NSButton, NSColorWell, NSPopUpButton, NSScrollView, NSSegmentedControl,
@@ -244,9 +244,7 @@ impl SettingsWindow {
         unsafe { window.setReleasedWhenClosed(false) };
 
         // Root content view
-        let root: Retained<NSView> = unsafe {
-            msg_send![NSView::alloc(mtm), initWithFrame: frame]
-        };
+        let root: Retained<NSView> = unsafe { msg_send![NSView::alloc(mtm), initWithFrame: frame] };
         window.setContentView(Some(&root));
 
         // Segmented control (tab bar) at top
@@ -254,9 +252,8 @@ impl SettingsWindow {
             CGPoint::new(20.0, WIN_H - TAB_BAR_H + 4.0),
             CGSize::new(WIN_W - 40.0, 24.0),
         );
-        let seg: Retained<NSSegmentedControl> = unsafe {
-            msg_send![NSSegmentedControl::alloc(mtm), initWithFrame: seg_frame]
-        };
+        let seg: Retained<NSSegmentedControl> =
+            unsafe { msg_send![NSSegmentedControl::alloc(mtm), initWithFrame: seg_frame] };
         seg.setSegmentCount(4);
         set_segment_label(&seg, 0, "General");
         set_segment_label(&seg, 1, "Keybindings");
@@ -273,13 +270,9 @@ impl SettingsWindow {
         root.addSubview(&seg);
 
         // Content container (below tab bar)
-        let container_frame = CGRect::new(
-            CGPoint::new(0.0, 0.0),
-            CGSize::new(WIN_W, CONTENT_H),
-        );
-        let container: Retained<NSView> = unsafe {
-            msg_send![NSView::alloc(mtm), initWithFrame: container_frame]
-        };
+        let container_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(WIN_W, CONTENT_H));
+        let container: Retained<NSView> =
+            unsafe { msg_send![NSView::alloc(mtm), initWithFrame: container_frame] };
         root.addSubview(&container);
 
         // Build tab views
@@ -290,12 +283,7 @@ impl SettingsWindow {
 
         // Register tab views with handler for switching
         handler.set_tab_views(
-            vec![
-                general.view.clone(),
-                keybinds_view,
-                rules_view,
-                about_view,
-            ],
+            vec![general.view.clone(), keybinds_view, rules_view, about_view],
             container.clone(),
         );
 
@@ -400,10 +388,7 @@ impl SettingsWindow {
     pub fn refresh_labels(&self) {
         set_value_label(&self.gap_inner_label, self.gap_inner_slider.doubleValue());
         set_value_label(&self.gap_outer_label, self.gap_outer_slider.doubleValue());
-        set_value_label(
-            &self.bar_height_label,
-            self.bar_height_slider.doubleValue(),
-        );
+        set_value_label(&self.bar_height_label, self.bar_height_slider.doubleValue());
         set_value_label(
             &self.border_width_label,
             self.border_width_slider.doubleValue(),
@@ -451,19 +436,49 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
     y -= row;
     let gap_inner_label = add_value_label(mtm, &view, "0", cx + cw + 8.0, y);
     let gap_inner_slider = add_slider(
-        mtm, &view, handler, "Inner Gap", lx, cx, y, cw, 0.0, 50.0, 0.0,
+        mtm,
+        &view,
+        handler,
+        "Inner Gap",
+        lx,
+        cx,
+        y,
+        cw,
+        0.0,
+        50.0,
+        0.0,
         sel!(onGapInnerChanged:),
     );
     y -= row;
     let gap_outer_label = add_value_label(mtm, &view, "0", cx + cw + 8.0, y);
     let gap_outer_slider = add_slider(
-        mtm, &view, handler, "Outer Gap", lx, cx, y, cw, 0.0, 50.0, 0.0,
+        mtm,
+        &view,
+        handler,
+        "Outer Gap",
+        lx,
+        cx,
+        y,
+        cw,
+        0.0,
+        50.0,
+        0.0,
         sel!(onGapOuterChanged:),
     );
     y -= row;
     let bar_height_label = add_value_label(mtm, &view, "0", cx + cw + 8.0, y);
     let bar_height_slider = add_slider(
-        mtm, &view, handler, "Bar Height", lx, cx, y, cw, 0.0, 60.0, 0.0,
+        mtm,
+        &view,
+        handler,
+        "Bar Height",
+        lx,
+        cx,
+        y,
+        cw,
+        0.0,
+        60.0,
+        0.0,
         sel!(onBarHeightChanged:),
     );
     y -= row + 12.0;
@@ -473,34 +488,78 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
     y -= row;
     let border_width_label = add_value_label(mtm, &view, "0", cx + cw + 8.0, y);
     let border_width_slider = add_slider(
-        mtm, &view, handler, "Width", lx, cx, y, cw, 0.0, 10.0, 0.0,
+        mtm,
+        &view,
+        handler,
+        "Width",
+        lx,
+        cx,
+        y,
+        cw,
+        0.0,
+        10.0,
+        0.0,
         sel!(onBorderWidthChanged:),
     );
     y -= row;
     let border_radius_label = add_value_label(mtm, &view, "0", cx + cw + 8.0, y);
     let border_radius_slider = add_slider(
-        mtm, &view, handler, "Radius", lx, cx, y, cw, 0.0, 30.0, 10.0,
+        mtm,
+        &view,
+        handler,
+        "Radius",
+        lx,
+        cx,
+        y,
+        cw,
+        0.0,
+        30.0,
+        10.0,
         sel!(onBorderRadiusChanged:),
     );
     y -= row;
     add_label(mtm, &view, "Focused Color", lx, y);
-    let focused_color_well =
-        add_color_well(mtm, &view, handler, cx, y, sel!(onBorderColorFocusedChanged:));
+    let focused_color_well = add_color_well(
+        mtm,
+        &view,
+        handler,
+        cx,
+        y,
+        sel!(onBorderColorFocusedChanged:),
+    );
     y -= row;
     add_label(mtm, &view, "Unfocused Color", lx, y);
-    let unfocused_color_well =
-        add_color_well(mtm, &view, handler, cx, y, sel!(onBorderColorUnfocusedChanged:));
+    let unfocused_color_well = add_color_well(
+        mtm,
+        &view,
+        handler,
+        cx,
+        y,
+        sel!(onBorderColorUnfocusedChanged:),
+    );
     y -= row + 12.0;
 
     // Behavior
     add_section_label(mtm, &view, "Behavior", lx, y);
     y -= row;
     let ffm_checkbox = add_checkbox(
-        mtm, &view, handler, "Focus follows mouse", lx, y, sel!(onFfmToggled:),
+        mtm,
+        &view,
+        handler,
+        "Focus follows mouse",
+        lx,
+        y,
+        sel!(onFfmToggled:),
     );
     y -= row;
     let mff_checkbox = add_checkbox(
-        mtm, &view, handler, "Mouse follows focus", lx, y, sel!(onMffToggled:),
+        mtm,
+        &view,
+        handler,
+        "Mouse follows focus",
+        lx,
+        y,
+        sel!(onMffToggled:),
     );
     y -= row + 12.0;
 
@@ -508,7 +567,12 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
     add_section_label(mtm, &view, "Modifier Key", lx, y);
     y -= row;
     let mod_key_popup = add_popup(
-        mtm, &view, handler, lx, y, cw,
+        mtm,
+        &view,
+        handler,
+        lx,
+        y,
+        cw,
         &["Command", "Option", "Control"],
         sel!(onModKeyChanged:),
     );
@@ -516,12 +580,21 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
 
     GeneralTab {
         view,
-        gap_inner_slider, gap_outer_slider, bar_height_slider,
-        border_width_slider, border_radius_slider,
-        focused_color_well, unfocused_color_well,
-        ffm_checkbox, mff_checkbox, mod_key_popup,
-        gap_inner_label, gap_outer_label, bar_height_label,
-        border_width_label, border_radius_label,
+        gap_inner_slider,
+        gap_outer_slider,
+        bar_height_slider,
+        border_width_slider,
+        border_radius_slider,
+        focused_color_well,
+        unfocused_color_well,
+        ffm_checkbox,
+        mff_checkbox,
+        mod_key_popup,
+        gap_inner_label,
+        gap_outer_label,
+        bar_height_label,
+        border_width_label,
+        border_radius_label,
     }
 }
 
@@ -538,20 +611,17 @@ fn build_text_tab(
         CGPoint::new(15.0, 15.0),
         CGSize::new(WIN_W - 30.0, CONTENT_H - 30.0),
     );
-    let scroll: Retained<NSScrollView> = unsafe {
-        msg_send![NSScrollView::alloc(mtm), initWithFrame: scroll_frame]
-    };
+    let scroll: Retained<NSScrollView> =
+        unsafe { msg_send![NSScrollView::alloc(mtm), initWithFrame: scroll_frame] };
     scroll.setHasVerticalScroller(true);
     scroll.setBorderType(objc2_app_kit::NSBorderType(2)); // NSBezelBorder
 
     let text_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(WIN_W - 50.0, CONTENT_H));
-    let text: Retained<NSTextView> = unsafe {
-        msg_send![NSTextView::alloc(mtm), initWithFrame: text_frame]
-    };
+    let text: Retained<NSTextView> =
+        unsafe { msg_send![NSTextView::alloc(mtm), initWithFrame: text_frame] };
     text.setEditable(false);
     unsafe {
-        let mono: Retained<objc2_app_kit::NSFont> =
-            msg_send![objc2_app_kit::NSFont::class(), monospacedSystemFontOfSize: 11.0_f64, weight: 0.0_f64];
+        let mono: Retained<objc2_app_kit::NSFont> = msg_send![objc2_app_kit::NSFont::class(), monospacedSystemFontOfSize: 11.0_f64, weight: 0.0_f64];
         text.setFont(Some(&mono));
     }
     set_text_view(&text, placeholder);
@@ -578,9 +648,8 @@ fn build_about_view(mtm: MainThreadMarker) -> Retained<NSView> {
 
     // App name
     let name_frame = CGRect::new(CGPoint::new(center_x, y), CGSize::new(300.0, 28.0));
-    let name: Retained<NSTextField> = unsafe {
-        msg_send![NSTextField::alloc(mtm), initWithFrame: name_frame]
-    };
+    let name: Retained<NSTextField> =
+        unsafe { msg_send![NSTextField::alloc(mtm), initWithFrame: name_frame] };
     name.setStringValue(&NSString::from_str("tarmac"));
     name.setEditable(false);
     name.setBordered(false);
@@ -604,7 +673,13 @@ fn build_about_view(mtm: MainThreadMarker) -> Retained<NSView> {
     y -= 28.0;
 
     // Build info
-    add_centered_label(mtm, &view, "Rust 2024 edition · objc2 + SkyLight", center_x, y);
+    add_centered_label(
+        mtm,
+        &view,
+        "Rust 2024 edition · objc2 + SkyLight",
+        center_x,
+        y,
+    );
     y -= 36.0;
 
     // Links
@@ -618,9 +693,8 @@ fn build_about_view(mtm: MainThreadMarker) -> Retained<NSView> {
 
 fn add_centered_label(mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64, y: f64) {
     let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(300.0, 20.0));
-    let label: Retained<NSTextField> = unsafe {
-        msg_send![NSTextField::alloc(mtm), initWithFrame: frame]
-    };
+    let label: Retained<NSTextField> =
+        unsafe { msg_send![NSTextField::alloc(mtm), initWithFrame: frame] };
     label.setStringValue(&NSString::from_str(text));
     label.setEditable(false);
     label.setBordered(false);
@@ -642,9 +716,8 @@ fn set_segment_label(seg: &NSSegmentedControl, index: isize, label: &str) {
 
 fn add_section_label(mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64, y: f64) {
     let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(360.0, 20.0));
-    let label: Retained<NSTextField> = unsafe {
-        msg_send![NSTextField::alloc(mtm), initWithFrame: frame]
-    };
+    let label: Retained<NSTextField> =
+        unsafe { msg_send![NSTextField::alloc(mtm), initWithFrame: frame] };
     label.setStringValue(&NSString::from_str(text));
     label.setEditable(false);
     label.setBordered(false);
@@ -659,9 +732,8 @@ fn add_section_label(mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64,
 
 fn add_label(mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64, y: f64) {
     let frame = CGRect::new(CGPoint::new(x, y + 2.0), CGSize::new(150.0, 18.0));
-    let label: Retained<NSTextField> = unsafe {
-        msg_send![NSTextField::alloc(mtm), initWithFrame: frame]
-    };
+    let label: Retained<NSTextField> =
+        unsafe { msg_send![NSTextField::alloc(mtm), initWithFrame: frame] };
     label.setStringValue(&NSString::from_str(text));
     label.setEditable(false);
     label.setBordered(false);
@@ -670,12 +742,15 @@ fn add_label(mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64, y: f64)
 }
 
 fn add_value_label(
-    mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64, y: f64,
+    mtm: MainThreadMarker,
+    parent: &NSView,
+    text: &str,
+    x: f64,
+    y: f64,
 ) -> Retained<NSTextField> {
     let frame = CGRect::new(CGPoint::new(x, y + 2.0), CGSize::new(30.0, 18.0));
-    let label: Retained<NSTextField> = unsafe {
-        msg_send![NSTextField::alloc(mtm), initWithFrame: frame]
-    };
+    let label: Retained<NSTextField> =
+        unsafe { msg_send![NSTextField::alloc(mtm), initWithFrame: frame] };
     label.setStringValue(&NSString::from_str(text));
     label.setEditable(false);
     label.setBordered(false);
@@ -691,15 +766,23 @@ fn set_value_label(label: &NSTextField, val: f64) {
 
 #[allow(clippy::too_many_arguments)]
 fn add_slider(
-    mtm: MainThreadMarker, parent: &NSView, handler: &SettingsHandler,
-    label_text: &str, label_x: f64, control_x: f64, y: f64, width: f64,
-    min: f64, max: f64, initial: f64, action: objc2::runtime::Sel,
+    mtm: MainThreadMarker,
+    parent: &NSView,
+    handler: &SettingsHandler,
+    label_text: &str,
+    label_x: f64,
+    control_x: f64,
+    y: f64,
+    width: f64,
+    min: f64,
+    max: f64,
+    initial: f64,
+    action: objc2::runtime::Sel,
 ) -> Retained<NSSlider> {
     add_label(mtm, parent, label_text, label_x, y);
     let frame = CGRect::new(CGPoint::new(control_x, y), CGSize::new(width, 20.0));
-    let slider: Retained<NSSlider> = unsafe {
-        msg_send![NSSlider::alloc(mtm), initWithFrame: frame]
-    };
+    let slider: Retained<NSSlider> =
+        unsafe { msg_send![NSSlider::alloc(mtm), initWithFrame: frame] };
     slider.setMinValue(min);
     slider.setMaxValue(max);
     slider.setDoubleValue(initial);
@@ -713,13 +796,16 @@ fn add_slider(
 }
 
 fn add_color_well(
-    mtm: MainThreadMarker, parent: &NSView, handler: &SettingsHandler,
-    x: f64, y: f64, action: objc2::runtime::Sel,
+    mtm: MainThreadMarker,
+    parent: &NSView,
+    handler: &SettingsHandler,
+    x: f64,
+    y: f64,
+    action: objc2::runtime::Sel,
 ) -> Retained<NSColorWell> {
     let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(44.0, 24.0));
-    let well: Retained<NSColorWell> = unsafe {
-        msg_send![NSColorWell::alloc(mtm), initWithFrame: frame]
-    };
+    let well: Retained<NSColorWell> =
+        unsafe { msg_send![NSColorWell::alloc(mtm), initWithFrame: frame] };
     unsafe {
         well.setTarget(Some(handler));
         well.setAction(Some(action));
@@ -729,13 +815,16 @@ fn add_color_well(
 }
 
 fn add_checkbox(
-    mtm: MainThreadMarker, parent: &NSView, handler: &SettingsHandler,
-    title: &str, x: f64, y: f64, action: objc2::runtime::Sel,
+    mtm: MainThreadMarker,
+    parent: &NSView,
+    handler: &SettingsHandler,
+    title: &str,
+    x: f64,
+    y: f64,
+    action: objc2::runtime::Sel,
 ) -> Retained<NSButton> {
     let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(250.0, 22.0));
-    let btn: Retained<NSButton> = unsafe {
-        msg_send![NSButton::alloc(mtm), initWithFrame: frame]
-    };
+    let btn: Retained<NSButton> = unsafe { msg_send![NSButton::alloc(mtm), initWithFrame: frame] };
     btn.setTitle(&NSString::from_str(title));
     unsafe {
         let _: () = msg_send![&*btn, setButtonType: 3_isize]; // NSSwitchButton
@@ -747,13 +836,18 @@ fn add_checkbox(
 }
 
 fn add_popup(
-    mtm: MainThreadMarker, parent: &NSView, handler: &SettingsHandler,
-    x: f64, y: f64, width: f64, items: &[&str], action: objc2::runtime::Sel,
+    mtm: MainThreadMarker,
+    parent: &NSView,
+    handler: &SettingsHandler,
+    x: f64,
+    y: f64,
+    width: f64,
+    items: &[&str],
+    action: objc2::runtime::Sel,
 ) -> Retained<NSPopUpButton> {
     let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(width, 26.0));
-    let popup: Retained<NSPopUpButton> = unsafe {
-        msg_send![NSPopUpButton::alloc(mtm), initWithFrame: frame, pullsDown: false]
-    };
+    let popup: Retained<NSPopUpButton> =
+        unsafe { msg_send![NSPopUpButton::alloc(mtm), initWithFrame: frame, pullsDown: false] };
     for item in items {
         popup.addItemWithTitle(&NSString::from_str(item));
     }
@@ -776,7 +870,12 @@ fn color_well_to_hex(well: &NSColorWell) -> String {
             let r: f64 = msg_send![&*rgb, redComponent];
             let g: f64 = msg_send![&*rgb, greenComponent];
             let b: f64 = msg_send![&*rgb, blueComponent];
-            format!("#{:02x}{:02x}{:02x}", (r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
+            format!(
+                "#{:02x}{:02x}{:02x}",
+                (r * 255.0) as u8,
+                (g * 255.0) as u8,
+                (b * 255.0) as u8
+            )
         } else {
             "#000000".to_string()
         }

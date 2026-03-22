@@ -3,8 +3,8 @@ use std::sync::mpsc;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{
-    define_class, msg_send, sel, AnyThread, ClassType, DefinedClass, MainThreadMarker,
-    MainThreadOnly,
+    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    sel,
 };
 use objc2_app_kit::{
     NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
@@ -174,7 +174,12 @@ fn build_menu(
             continue; // skip empty non-active workspaces
         }
         let label = if ws.windows > 0 {
-            format!("{}  ({} window{})", ws.id, ws.windows, if ws.windows == 1 { "" } else { "s" })
+            format!(
+                "{}  ({} window{})",
+                ws.id,
+                ws.windows,
+                if ws.windows == 1 { "" } else { "s" }
+            )
         } else {
             ws.id.clone()
         };
@@ -198,7 +203,12 @@ fn build_menu(
     menu.addItem(&sep);
 
     // Settings
-    let settings = make_item(mtm, "Settings\u{2026}", Some(sel!(onOpenSettings:)), Some(handler));
+    let settings = make_item(
+        mtm,
+        "Settings\u{2026}",
+        Some(sel!(onOpenSettings:)),
+        Some(handler),
+    );
     menu.addItem(&settings);
 
     // Reload Config

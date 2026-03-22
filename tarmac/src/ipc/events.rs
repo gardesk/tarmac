@@ -41,10 +41,7 @@ pub enum WmEvent {
         workspace: String,
     },
     #[serde(rename = "window_closed")]
-    WindowClosed {
-        window_id: u32,
-        app_name: String,
-    },
+    WindowClosed { window_id: u32, app_name: String },
     #[serde(rename = "monitor_changed")]
     MonitorChanged {
         index: usize,
