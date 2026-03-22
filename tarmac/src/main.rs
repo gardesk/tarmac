@@ -64,6 +64,7 @@ fn main() {
     state.borders.unfocused_color =
         tarmac::platform::border::BorderColor::from_hex(&config.settings.border_color_unfocused);
     state.borders.radius = config.settings.border_radius;
+    state.borders.spawn();
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
@@ -280,7 +281,7 @@ fn generate_default_config_if_missing(path: &std::path::Path) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let default_config = r#"-- tarmac configuration
+    let default_config = r##"-- tarmac configuration
 -- ~/.config/tarmac/init.lua
 
 -- Modifier key: "command", "option", or "control"
@@ -359,9 +360,15 @@ gar.bind("mod+shift+r", "reload")
 -- gar.rule({ app_name = "System Settings" }, { floating = true })
 -- gar.rule({ app_name = "Safari" }, { workspace = 2 })
 
+-- Borders (set border_width > 0 to enable ers)
+gar.set("border_width", "4")
+gar.set("border_color_focused", "#5294e2")
+gar.set("border_color_unfocused", "#59595980")
+gar.set("border_radius", "10")
+
 -- Autostart (uncomment as needed)
 -- gar.exec_once("sketchybar")
-"#;
+"##;
 
     match std::fs::write(path, default_config) {
         Ok(()) => tracing::info!(?path, "generated default config"),
@@ -774,6 +781,7 @@ fn reload_config() {
                 &config.settings.border_color_unfocused,
             );
             state.borders.radius = config.settings.border_radius;
+            state.borders.restart();
             // Reapply layout with potentially new gap/bar values
             state.apply_layout();
             state.update_borders();
