@@ -1,5 +1,5 @@
 [workspace]
-members = ["tarmac", "tarmacctl"]
+members = ["ers","tarmac", "tarmacctl"]
 resolver = "2"
 
 [profile.dev]
