@@ -1102,6 +1102,9 @@ fn build_settings_snapshot(
 }
 
 fn poll_settings_actions() {
+    use tarmac::config::lua::{lua_number, lua_string};
+    use tarmac::ui::settings::SettingsAction;
+
     SETTINGS_WIN.with(|sw| {
         let borrow = sw.borrow();
         let Some(win) = borrow.as_ref() else { return };
@@ -1112,44 +1115,62 @@ fn poll_settings_actions() {
         win.refresh_labels();
         drop(borrow);
 
+        let config_path = CONFIG_PATH.with(|p| p.borrow().clone());
+
         WM_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
                 for action in actions {
                     match action {
-                        tarmac::ui::settings::SettingsAction::GapInner(v) => {
+                        SettingsAction::GapInner(v) => {
                             state.gap_inner = v;
+                            write_setting(&config_path, "gap_inner", &lua_number(v));
                         }
-                        tarmac::ui::settings::SettingsAction::GapOuter(v) => {
+                        SettingsAction::GapOuter(v) => {
                             state.gap_outer = v;
+                            write_setting(&config_path, "gap_outer", &lua_number(v));
                         }
-                        tarmac::ui::settings::SettingsAction::BarHeight(v) => {
+                        SettingsAction::BarHeight(v) => {
                             state.bar_height = v;
+                            write_setting(&config_path, "bar_height", &lua_number(v));
                         }
-                        tarmac::ui::settings::SettingsAction::BorderWidth(v) => {
+                        SettingsAction::BorderWidth(v) => {
                             state.borders.border_width = v;
+                            write_setting(&config_path, "border_width", &lua_string(&lua_number(v)));
                         }
-                        tarmac::ui::settings::SettingsAction::BorderRadius(v) => {
+                        SettingsAction::BorderRadius(v) => {
                             state.borders.radius = v;
+                            write_setting(&config_path, "border_radius", &lua_string(&lua_number(v)));
                         }
-                        tarmac::ui::settings::SettingsAction::BorderColorFocused(hex) => {
+                        SettingsAction::BorderColorFocused(ref hex) => {
                             state.borders.focused_color =
-                                tarmac::platform::border::BorderColor::from_hex(&hex);
+                                tarmac::platform::border::BorderColor::from_hex(hex);
+                            write_setting(&config_path, "border_color_focused", &lua_string(hex));
                         }
-                        tarmac::ui::settings::SettingsAction::BorderColorUnfocused(hex) => {
+                        SettingsAction::BorderColorUnfocused(ref hex) => {
                             state.borders.unfocused_color =
-                                tarmac::platform::border::BorderColor::from_hex(&hex);
+                                tarmac::platform::border::BorderColor::from_hex(hex);
+                            write_setting(&config_path, "border_color_unfocused", &lua_string(hex));
                         }
-                        tarmac::ui::settings::SettingsAction::FocusFollowsMouse(v) => {
+                        SettingsAction::FocusFollowsMouse(v) => {
                             state.focus_follows_mouse = v;
+                            write_setting(
+                                &config_path,
+                                "focus_follows_mouse",
+                                &lua_string(if v { "true" } else { "false" }),
+                            );
                         }
-                        tarmac::ui::settings::SettingsAction::MouseFollowsFocus(v) => {
+                        SettingsAction::MouseFollowsFocus(v) => {
                             state.mouse_follows_focus = v;
+                            write_setting(
+                                &config_path,
+                                "mouse_follows_focus",
+                                &lua_string(if v { "true" } else { "false" }),
+                            );
                         }
-                        tarmac::ui::settings::SettingsAction::ModKey(_) => {
-                            // Mod key changes require re-registering hotkeys,
-                            // which needs a full config reload. Skip for now.
+                        SettingsAction::ModKey(ref key) => {
+                            write_setting(&config_path, "mod_key", &lua_string(key));
                         }
-                        tarmac::ui::settings::SettingsAction::Open => {}
+                        SettingsAction::Open => {}
                     }
                 }
                 state.apply_layout();
@@ -1157,6 +1178,14 @@ fn poll_settings_actions() {
             }
         });
     });
+}
+
+fn write_setting(config_path: &Option<std::path::PathBuf>, key: &str, value: &str) {
+    if let Some(path) = config_path
+        && let Err(e) = tarmac::config::lua::update_lua_setting(path, key, value)
+    {
+        tracing::warn!(key, err = %e, "failed to write setting to config");
+    }
 }
 
 fn run_app() {
