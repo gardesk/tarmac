@@ -1031,7 +1031,7 @@ fn open_settings() {
             *sw.borrow_mut() = Some(win);
         }
         if let Some(win) = sw.borrow().as_ref() {
-            win.show();
+            win.toggle();
         }
     });
 }

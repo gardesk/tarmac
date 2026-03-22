@@ -326,6 +326,14 @@ impl SettingsWindow {
         }
     }
 
+    pub fn toggle(&self) {
+        if self.window.isVisible() {
+            self.window.orderOut(None);
+        } else {
+            self.window.makeKeyAndOrderFront(None);
+        }
+    }
+
     pub fn show(&self) {
         self.window.makeKeyAndOrderFront(None);
     }
