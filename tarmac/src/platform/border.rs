@@ -1,19 +1,10 @@
-//! Window border overlays using transparent NSWindows.
-//! Each managed window can have a border overlay that follows its geometry.
-//! Borders are borderless, transparent, click-through NSWindows that draw
-//! a colored rectangle using Core Graphics.
+//! Border management via ers subprocess.
+//! ers is a standalone border renderer that handles its own window events,
+//! focus detection, and rendering. Tarmac just spawns and manages the process.
 
-use std::collections::HashMap;
-use std::ffi::c_void;
+use std::process::{Child, Command};
 
-use objc2::runtime::AnyObject;
-use objc2::msg_send;
-
-use crate::core::tree::Rect;
-
-type WindowId = u32;
-
-/// RGBA color for border drawing.
+/// RGBA color for border configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct BorderColor {
     pub r: f64,
@@ -36,284 +27,90 @@ impl BorderColor {
         };
         Self { r, g, b, a }
     }
+
+    fn to_hex(&self) -> String {
+        let r = (self.r * 255.0) as u8;
+        let g = (self.g * 255.0) as u8;
+        let b = (self.b * 255.0) as u8;
+        let a = (self.a * 255.0) as u8;
+        if a == 255 {
+            format!("#{r:02x}{g:02x}{b:02x}")
+        } else {
+            format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
+        }
+    }
 }
 
-/// Manages border overlay windows for all tracked windows.
+/// Manages the ers border renderer subprocess.
 pub struct BorderManager {
-    /// Map from managed window ID to its overlay CGWindowID.
-    overlays: HashMap<WindowId, u32>,
     pub border_width: f64,
     pub focused_color: BorderColor,
     pub unfocused_color: BorderColor,
     pub radius: f64,
+    child: Option<Child>,
 }
 
 impl BorderManager {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Self {
-            overlays: HashMap::new(),
             border_width: 0.0,
             focused_color: BorderColor::from_hex("#5294e2"),
             unfocused_color: BorderColor::from_hex("#2d2d2d"),
             radius: 10.0,
+            child: None,
         }
     }
 
     pub fn is_enabled(&self) -> bool {
-        // TODO: SkyLight overlay approach is broken (wrong coordinates,
-        // no transparency, phantom tiles). Disabled until we implement
-        // proper NSWindow overlays or integrate with JankyBorders.
-        false
+        self.border_width > 0.0
     }
 
-    /// Create or update the border overlay for a window.
-    pub fn update_border(&mut self, _wid: WindowId, _rect: Rect, _focused: bool) {
-        // Disabled — see is_enabled()
-    }
+    /// Spawn ers with current settings. Kills any existing instance first.
+    pub fn spawn(&mut self) {
+        self.kill();
+        if !self.is_enabled() { return; }
 
-    /// Hide the border for a window.
-    pub fn hide_border(&self, wid: WindowId) {
-        if let Some(&overlay_wid) = self.overlays.get(&wid) {
-            crate::platform::skylight::set_window_alpha(overlay_wid, 0.0);
+        let cmd = format!(
+            "ers --active-only --width {} --radius {} --color '{}' --inactive '{}'",
+            self.border_width, self.radius,
+            self.focused_color.to_hex(), self.unfocused_color.to_hex(),
+        );
+        tracing::debug!(cmd, "spawning ers");
+        match Command::new("/bin/sh").args(["-c", &cmd]).spawn() {
+            Ok(child) => { self.child = Some(child); }
+            Err(e) => { tracing::warn!(err = %e, "failed to spawn ers"); }
         }
     }
 
-    /// Show the border for a window.
-    pub fn show_border(&self, wid: WindowId) {
-        if let Some(&overlay_wid) = self.overlays.get(&wid) {
-            crate::platform::skylight::set_window_alpha(overlay_wid, 1.0);
+    /// Kill the managed ers process if running.
+    pub fn kill(&mut self) {
+        if let Some(ref mut child) = self.child {
+            let _ = child.kill();
+            let _ = child.wait();
         }
+        self.child = None;
     }
 
-    /// Remove the border overlay for a window.
-    pub fn remove_border(&mut self, wid: WindowId) {
-        if let Some(overlay_wid) = self.overlays.remove(&wid) {
-            destroy_overlay(overlay_wid);
-        }
+    /// Restart ers with current settings (used on config reload).
+    pub fn restart(&mut self) {
+        self.spawn();
     }
 
-    /// Remove all border overlays.
-    pub fn remove_all(&mut self) {
-        let wids: Vec<u32> = self.overlays.values().copied().collect();
-        for overlay_wid in wids {
-            destroy_overlay(overlay_wid);
-        }
-        self.overlays.clear();
-    }
-
-    /// Update focus: set focused border on new window, unfocused on old.
-    pub fn update_focus(&mut self, old_focused: Option<WindowId>, new_focused: Option<WindowId>, get_rect: impl Fn(WindowId) -> Option<Rect>) {
-        if !self.is_enabled() {
-            return;
-        }
-
-        if let Some(old) = old_focused
-            && let Some(rect) = get_rect(old)
-        {
-            self.update_border(old, rect, false);
-        }
-        if let Some(new) = new_focused
-            && let Some(rect) = get_rect(new)
-        {
-            self.update_border(new, rect, true);
-        }
-    }
+    // Stub methods for compatibility with existing state.rs calls.
+    // ers handles all of these independently.
+    pub fn update_border(&mut self, _wid: u32, _rect: crate::core::tree::Rect, _focused: bool) {}
+    pub fn remove_border(&mut self, _wid: u32) {}
+    pub fn update_focus(
+        &mut self,
+        _old: Option<u32>,
+        _new: Option<u32>,
+        _get_rect: impl Fn(u32) -> Option<crate::core::tree::Rect>,
+    ) {}
 }
 
-// --- SkyLight-based overlay implementation ---
-// Uses SLSNewWindow to create a WindowServer-level overlay, avoiding
-// the need for a full NSWindow + NSView hierarchy.
-
-unsafe extern "C" {
-    fn SLSMainConnectionID() -> i32;
-    fn SLSNewWindow(
-        cid: i32,
-        window_type: i32,
-        x: f64,
-        y: f64,
-        region: *const c_void,
-        wid_out: *mut u32,
-    ) -> i32;
-    fn SLSReleaseWindow(cid: i32, wid: u32) -> i32;
-    fn SLSSetWindowAlpha(cid: i32, wid: u32, alpha: f32) -> i32;
-    fn SLSSetWindowLevel(cid: i32, wid: u32, level: i32) -> i32;
-    fn SLSOrderWindow(cid: i32, wid: u32, mode: i32, relative_to: u32) -> i32;
-    fn SLSSetWindowResolution(cid: i32, wid: u32, resolution: f64) -> i32;
-    fn SLSSetWindowOpacity(cid: i32, wid: u32, opaque: i32) -> i32;
-    fn SLSSetWindowBackgroundBlurRadius(cid: i32, wid: u32, radius: i32) -> i32;
-    fn SLSSetWindowTags(cid: i32, wid: u32, tags: *const u64, tag_size: i32) -> i32;
-    fn SLSClearWindowTags(cid: i32, wid: u32, tags: *const u64, tag_size: i32) -> i32;
-
-    fn CGWindowContextCreate(cid: i32, wid: u32, options: *const c_void) -> *mut c_void;
-
-    // Core Graphics drawing
-    fn CGContextSetRGBStrokeColor(ctx: *mut c_void, r: f64, g: f64, b: f64, a: f64);
-    fn CGContextSetLineWidth(ctx: *mut c_void, width: f64);
-    fn CGContextClearRect(ctx: *mut c_void, rect: CGRect);
-    fn CGContextAddPath(ctx: *mut c_void, path: *const c_void);
-    fn CGContextStrokePath(ctx: *mut c_void);
-    fn CGContextFlush(ctx: *mut c_void);
-    fn CGContextRelease(ctx: *mut c_void);
-    fn CGPathCreateWithRoundedRect(rect: CGRect, rx: f64, ry: f64, transform: *const c_void) -> *const c_void;
-    fn CGPathRelease(path: *const c_void);
-
-    fn CGSNewRegionWithRect(rect: *const CGRect, region: *mut *const c_void) -> i32;
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGRect {
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-}
-
-fn create_overlay(rect: Rect, color: BorderColor, bw: f64, radius: f64) -> Option<u32> {
-    let cid = unsafe { SLSMainConnectionID() };
-    let cg_rect = CGRect {
-        x: 0.0,
-        y: 0.0,
-        width: rect.width,
-        height: rect.height,
-    };
-
-    let mut region: *const c_void = std::ptr::null();
-    let err = unsafe { CGSNewRegionWithRect(&cg_rect, &mut region) };
-    if err != 0 || region.is_null() {
-        tracing::warn!("CGSNewRegionWithRect failed: {}", err);
-        return None;
-    }
-
-    let mut wid: u32 = 0;
-    // window_type 2 = kCGBackingStoreBuffered
-    let err = unsafe { SLSNewWindow(cid, 2, rect.x, rect.y, region, &mut wid) };
-    if err != 0 {
-        tracing::warn!("SLSNewWindow failed: {}", err);
-        return None;
-    }
-
-    unsafe {
-        // Make the overlay transparent (non-opaque) so CGContextClearRect works
-        SLSSetWindowOpacity(cid, wid, 0);
-        // Above floating windows
-        SLSSetWindowLevel(cid, wid, 20);
-        SLSOrderWindow(cid, wid, 1, 0);
-        SLSSetWindowBackgroundBlurRadius(cid, wid, 0);
-
-        // Set tags: ignore mouse events (click-through) + sticky (all spaces)
-        // Tag bit 0x2 = kCGSIgnoreForEvents (click-through)
-        // Tag bit 0x800 = kCGSStickyWindow (visible on all spaces)
-        let tags: u64 = 0x2 | 0x800;
-        SLSSetWindowTags(cid, wid, &tags, 64);
-
-        // Clear shadow tag
-        let shadow_tag: u64 = 0x4; // kCGSHasShadow
-        SLSClearWindowTags(cid, wid, &shadow_tag, 64);
-    }
-
-    // Get Retina scale factor
-    let scale = get_main_screen_scale();
-    if scale > 1.0 {
-        unsafe { SLSSetWindowResolution(cid, wid, scale); }
-    }
-
-    draw_border(cid, wid, rect, color, bw, radius, scale);
-
-    Some(wid)
-}
-
-fn update_overlay(wid: u32, rect: Rect, color: BorderColor, bw: f64, radius: f64) {
-    let cid = unsafe { SLSMainConnectionID() };
-
-    // Move the overlay window
-    let point = super::skylight::CGPoint {
-        x: rect.x,
-        y: rect.y,
-    };
-    unsafe {
-        super::skylight::SLSMoveWindow(cid, wid, &point);
-    }
-
-    // Resize and redraw
-    let scale = get_main_screen_scale();
-    draw_border(cid, wid, rect, color, bw, radius, scale);
-
-    // Ensure visible
-    unsafe {
-        SLSSetWindowAlpha(cid, wid, 1.0);
-        SLSOrderWindow(cid, wid, 1, 0);
-    }
-}
-
-fn destroy_overlay(wid: u32) {
-    let cid = unsafe { SLSMainConnectionID() };
-    unsafe {
-        SLSReleaseWindow(cid, wid);
-    }
-}
-
-fn draw_border(
-    cid: i32,
-    wid: u32,
-    rect: Rect,
-    color: BorderColor,
-    bw: f64,
-    radius: f64,
-    scale: f64,
-) {
-    let ctx = unsafe { CGWindowContextCreate(cid, wid, std::ptr::null()) };
-    if ctx.is_null() {
-        return;
-    }
-
-    let w = rect.width * scale;
-    let h = rect.height * scale;
-
-    // Clear the context
-    let full = CGRect {
-        x: 0.0,
-        y: 0.0,
-        width: w,
-        height: h,
-    };
-    unsafe {
-        CGContextClearRect(ctx, full);
-    }
-
-    // Draw the border rectangle (inset by half the border width)
-    let half_bw = bw * scale / 2.0;
-    let border = CGRect {
-        x: half_bw,
-        y: half_bw,
-        width: w - bw * scale,
-        height: h - bw * scale,
-    };
-
-    unsafe {
-        CGContextSetRGBStrokeColor(ctx, color.r, color.g, color.b, color.a);
-        CGContextSetLineWidth(ctx, bw * scale);
-        let path = CGPathCreateWithRoundedRect(border, radius * scale, radius * scale, std::ptr::null());
-        if !path.is_null() {
-            CGContextAddPath(ctx, path);
-            CGPathRelease(path);
-        }
-        CGContextStrokePath(ctx);
-        CGContextFlush(ctx);
-        CGContextRelease(ctx);
-    }
-}
-
-fn get_main_screen_scale() -> f64 {
-    // Use NSScreen.mainScreen.backingScaleFactor
-    unsafe {
-        let cls = objc2::runtime::AnyClass::get(c"NSScreen").unwrap();
-        let screen: *const AnyObject = msg_send![cls, mainScreen];
-        if screen.is_null() {
-            return 1.0;
-        }
-        let scale: f64 = msg_send![screen, backingScaleFactor];
-        scale
+impl Drop for BorderManager {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
