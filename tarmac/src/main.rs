@@ -19,6 +19,7 @@ thread_local! {
     static HOTKEY_MGR: RefCell<Option<HotkeyManager>> = const { RefCell::new(None) };
     static CONFIG_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
     static TRAY: RefCell<Option<tarmac::ui::tray::TrayWidget>> = const { RefCell::new(None) };
+    static SETTINGS_WIN: RefCell<Option<tarmac::ui::settings::SettingsWindow>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -514,6 +515,9 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             update_tray(tray);
         }
     });
+
+    // Process settings window actions
+    poll_settings_actions();
 }
 
 fn process_ipc_command(
@@ -990,11 +994,14 @@ fn poll_tray_actions() {
         let borrow = t.borrow();
         let Some(tray) = borrow.as_ref() else { return };
         let actions = tray.poll_actions();
-        drop(borrow); // release borrow before handling actions
+        drop(borrow);
         for action in actions {
             match action {
                 tarmac::ui::tray::TrayAction::SwitchWorkspace(num) => {
                     handle_action(tarmac::core::input::Action::Workspace(num));
+                }
+                tarmac::ui::tray::TrayAction::OpenSettings => {
+                    open_settings();
                 }
                 tarmac::ui::tray::TrayAction::Reload => {
                     reload_config();
@@ -1006,6 +1013,117 @@ fn poll_tray_actions() {
                 }
             }
         }
+    });
+}
+
+fn open_settings() {
+    SETTINGS_WIN.with(|sw| {
+        if sw.borrow().is_none() {
+            let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+            let win = tarmac::ui::settings::SettingsWindow::new(mtm);
+            // Populate from current state
+            WM_STATE.with(|s| {
+                if let Some(state) = s.borrow().as_ref() {
+                    let snap = build_settings_snapshot(state);
+                    win.populate(&snap);
+                }
+            });
+            *sw.borrow_mut() = Some(win);
+        }
+        if let Some(win) = sw.borrow().as_ref() {
+            win.show();
+        }
+    });
+}
+
+fn build_settings_snapshot(
+    state: &tarmac::core::state::WmState,
+) -> tarmac::ui::settings::SettingsSnapshot {
+    use tarmac::core::input::Modifiers;
+    let mod_key = LUA_CONFIG.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|cfg| {
+                if cfg.settings.mod_key == Modifiers::OPTION {
+                    "option"
+                } else if cfg.settings.mod_key == Modifiers::CONTROL {
+                    "control"
+                } else {
+                    "command"
+                }
+            })
+            .unwrap_or("command")
+            .to_string()
+    });
+    tarmac::ui::settings::SettingsSnapshot {
+        gap_inner: state.gap_inner,
+        gap_outer: state.gap_outer,
+        bar_height: state.bar_height,
+        border_width: state.borders.border_width,
+        border_radius: state.borders.radius,
+        border_color_focused: state.borders.focused_color.to_hex(),
+        border_color_unfocused: state.borders.unfocused_color.to_hex(),
+        focus_follows_mouse: state.focus_follows_mouse,
+        mouse_follows_focus: state.mouse_follows_focus,
+        mod_key,
+    }
+}
+
+fn poll_settings_actions() {
+    SETTINGS_WIN.with(|sw| {
+        let borrow = sw.borrow();
+        let Some(win) = borrow.as_ref() else { return };
+        let actions = win.poll_actions();
+        if actions.is_empty() {
+            return;
+        }
+        win.refresh_labels();
+        drop(borrow);
+
+        WM_STATE.with(|s| {
+            if let Some(state) = s.borrow_mut().as_mut() {
+                for action in actions {
+                    match action {
+                        tarmac::ui::settings::SettingsAction::GapInner(v) => {
+                            state.gap_inner = v;
+                        }
+                        tarmac::ui::settings::SettingsAction::GapOuter(v) => {
+                            state.gap_outer = v;
+                        }
+                        tarmac::ui::settings::SettingsAction::BarHeight(v) => {
+                            state.bar_height = v;
+                        }
+                        tarmac::ui::settings::SettingsAction::BorderWidth(v) => {
+                            state.borders.border_width = v;
+                        }
+                        tarmac::ui::settings::SettingsAction::BorderRadius(v) => {
+                            state.borders.radius = v;
+                        }
+                        tarmac::ui::settings::SettingsAction::BorderColorFocused(hex) => {
+                            state.borders.focused_color =
+                                tarmac::platform::border::BorderColor::from_hex(&hex);
+                        }
+                        tarmac::ui::settings::SettingsAction::BorderColorUnfocused(hex) => {
+                            state.borders.unfocused_color =
+                                tarmac::platform::border::BorderColor::from_hex(&hex);
+                        }
+                        tarmac::ui::settings::SettingsAction::FocusFollowsMouse(v) => {
+                            state.focus_follows_mouse = v;
+                        }
+                        tarmac::ui::settings::SettingsAction::MouseFollowsFocus(v) => {
+                            state.mouse_follows_focus = v;
+                        }
+                        tarmac::ui::settings::SettingsAction::ModKey(_) => {
+                            // Mod key changes require re-registering hotkeys,
+                            // which needs a full config reload. Skip for now.
+                        }
+                        tarmac::ui::settings::SettingsAction::Open => {}
+                    }
+                }
+                state.apply_layout();
+                state.update_borders();
+            }
+        });
     });
 }
 

@@ -28,7 +28,7 @@ impl BorderColor {
         Self { r, g, b, a }
     }
 
-    fn to_hex(&self) -> String {
+    pub fn to_hex(&self) -> String {
         let r = (self.r * 255.0) as u8;
         let g = (self.g * 255.0) as u8;
         let b = (self.b * 255.0) as u8;

@@ -18,6 +18,7 @@ const TRAY_ICON_PNG: &[u8] = include_bytes!("../../assets/tray_icon_32.png");
 #[derive(Debug)]
 pub enum TrayAction {
     SwitchWorkspace(u8),
+    OpenSettings,
     Reload,
     Quit,
 }
@@ -62,6 +63,11 @@ define_class!(
                     self.emit(TrayAction::SwitchWorkspace(tag as u8));
                 }
             }
+        }
+
+        #[unsafe(method(onOpenSettings:))]
+        fn on_open_settings(&self, _sender: Option<&AnyObject>) {
+            self.emit(TrayAction::OpenSettings);
         }
 
         #[unsafe(method(onReload:))]
@@ -190,6 +196,10 @@ fn build_menu(
     // Separator
     let sep: Retained<NSMenuItem> = unsafe { msg_send![NSMenuItem::class(), separatorItem] };
     menu.addItem(&sep);
+
+    // Settings
+    let settings = make_item(mtm, "Settings\u{2026}", Some(sel!(onOpenSettings:)), Some(handler));
+    menu.addItem(&settings);
 
     // Reload Config
     let reload = make_item(mtm, "Reload Config", Some(sel!(onReload:)), Some(handler));
