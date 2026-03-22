@@ -608,7 +608,7 @@ fn build_about_view(mtm: MainThreadMarker) -> Retained<NSView> {
     y -= 36.0;
 
     // Links
-    add_centered_label(mtm, &view, "github.com/gardesk/garmac", center_x, y);
+    add_centered_label(mtm, &view, "github.com/gardesk/tarmac", center_x, y);
     y -= 28.0;
     add_centered_label(mtm, &view, "config: ~/.config/tarmac/init.lua", center_x, y);
     let _ = y;
