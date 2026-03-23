@@ -317,18 +317,14 @@ impl WmState {
         for (mi, monitor) in self.monitors.iter().enumerate() {
             let ws = self.workspaces.get(monitor.active_workspace);
             let sr = self.monitor_rect(mi);
-            let geoms =
-                ws.tree
-                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+            let geoms = ws.tree.calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
             let focused = ws.focused;
 
             for (wid, rect) in &geoms {
-                self.borders
-                    .update_border(*wid, *rect, focused == Some(*wid));
+                self.borders.update_border(*wid, *rect, focused == Some(*wid));
             }
             for fw in &ws.floating {
-                self.borders
-                    .update_border(fw.id, fw.geometry, focused == Some(fw.id));
+                self.borders.update_border(fw.id, fw.geometry, focused == Some(fw.id));
             }
         }
     }
@@ -2393,133 +2389,6 @@ impl WmState {
         } else {
             false
         }
-    }
-
-    // --- IPC event snapshot builders ---
-
-    /// Build a workspace snapshot for IPC events.
-    pub fn workspace_snapshot(&self) -> Vec<crate::ipc::events::WorkspaceInfo> {
-        self.workspaces
-            .iter()
-            .map(|ws| {
-                let id_str = ws.id.to_string();
-                let monitor = self
-                    .monitors
-                    .iter()
-                    .position(|m| m.active_workspace == self.ws_index_by_id(&ws.id));
-                crate::ipc::events::WorkspaceInfo {
-                    id: id_str,
-                    active: monitor.is_some(),
-                    windows: ws.all_window_ids().len(),
-                    monitor,
-                    urgent: false,
-                }
-            })
-            .collect()
-    }
-
-    /// Resolve the workspace index for a WorkspaceId.
-    fn ws_index_by_id(&self, id: &super::workspace::WorkspaceId) -> usize {
-        self.workspaces
-            .iter()
-            .position(|ws| ws.id == *id)
-            .unwrap_or(0)
-    }
-
-    /// Build a WindowFocused event for the given window, or None if not found.
-    pub fn window_focused_event(&self, wid: WindowId) -> Option<crate::ipc::events::WmEvent> {
-        let w = self.registry.get(wid)?;
-        let ws_id = self
-            .workspaces
-            .find_window(wid)
-            .map(|idx| self.workspaces.get(idx).id.to_string())
-            .unwrap_or_default();
-        Some(crate::ipc::events::WmEvent::WindowFocused {
-            window_id: wid,
-            title: w.title.clone(),
-            app_name: w.app_name.clone(),
-            app_bundle: w.app_bundle_id.clone(),
-            workspace: ws_id,
-        })
-    }
-
-    /// Build a WorkspaceChanged event with full snapshot.
-    pub fn workspace_changed_event(&self, old: String, new: String) -> crate::ipc::events::WmEvent {
-        crate::ipc::events::WmEvent::WorkspaceChanged {
-            old,
-            new: new.clone(),
-            workspaces: self.workspace_snapshot(),
-            focused_workspace: new,
-            focused_monitor: self.focused_monitor,
-        }
-    }
-
-    /// Build a LayoutChanged event for the current active workspace.
-    pub fn layout_changed_event(&self) -> crate::ipc::events::WmEvent {
-        let ws = self.active_workspace();
-        let (tiled, floating, layout_type) = Self::layout_info(ws);
-        crate::ipc::events::WmEvent::LayoutChanged {
-            workspace: ws.id.to_string(),
-            window_count: tiled + floating,
-            layout_type: layout_type.to_string(),
-        }
-    }
-
-    fn layout_info(ws: &super::workspace::Workspace) -> (usize, usize, &'static str) {
-        let tiled = ws.tree.windows().len();
-        let floating = ws.floating.len();
-        let layout_type = if floating > 0 && tiled > 0 {
-            "mixed"
-        } else if floating > 0 {
-            "floating"
-        } else {
-            "tiled"
-        };
-        (tiled, floating, layout_type)
-    }
-
-    // --- Lua event data builders ---
-
-    /// Build JSON data for a window_focused Lua callback.
-    pub fn window_focus_data(&self, wid: WindowId) -> Option<serde_json::Value> {
-        let w = self.registry.get(wid)?;
-        let ws_id = self
-            .workspaces
-            .find_window(wid)
-            .map(|idx| self.workspaces.get(idx).id.to_string())
-            .unwrap_or_default();
-        Some(serde_json::json!({
-            "window_id": wid,
-            "title": w.title,
-            "app_name": w.app_name,
-            "app_bundle": w.app_bundle_id,
-            "workspace": ws_id,
-        }))
-    }
-
-    /// Build JSON data for a window_created Lua callback.
-    pub fn window_created_data(&self, wid: WindowId) -> Option<serde_json::Value> {
-        self.window_focus_data(wid) // same fields
-    }
-
-    /// Build JSON data for a layout_changed Lua callback.
-    pub fn layout_changed_data(&self) -> serde_json::Value {
-        let ws = self.active_workspace();
-        let (tiled, floating, layout_type) = Self::layout_info(ws);
-        serde_json::json!({
-            "workspace": ws.id.to_string(),
-            "window_count": tiled + floating,
-            "layout_type": layout_type,
-        })
-    }
-
-    /// Build JSON data for a monitor_changed Lua callback.
-    pub fn monitor_changed_data(&self) -> serde_json::Value {
-        serde_json::json!({
-            "index": self.focused_monitor,
-            "monitor_count": self.monitors.len(),
-            "focused_workspace": self.active_workspace().id.to_string(),
-        })
     }
 
     // --- Helpers ---

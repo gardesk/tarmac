@@ -18,8 +18,6 @@ thread_local! {
     static LUA_CONFIG: RefCell<Option<tarmac::config::lua::LuaConfig>> = const { RefCell::new(None) };
     static HOTKEY_MGR: RefCell<Option<HotkeyManager>> = const { RefCell::new(None) };
     static CONFIG_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
-    static TRAY: RefCell<Option<tarmac::ui::tray::TrayWidget>> = const { RefCell::new(None) };
-    static SETTINGS_WIN: RefCell<Option<tarmac::ui::settings::SettingsWindow>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -82,7 +80,6 @@ fn main() {
         use tarmac::platform::event_tap::MouseEvent;
         WM_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
-                let prev_focused = state.active_workspace().focused;
                 match event {
                     MouseEvent::Click { x, y } => state.click_to_focus(x, y),
                     MouseEvent::Moved { x, y } => {
@@ -116,18 +113,6 @@ fn main() {
                     MouseEvent::RightUp { .. } => state.end_drag(),
                     _ => {}
                 }
-                // Publish focus change from FFM or click-to-focus
-                let new_focused = state.active_workspace().focused;
-                if new_focused != prev_focused
-                    && let Some(id) = new_focused
-                {
-                    if let Some(data) = state.window_focus_data(id) {
-                        fire_lua_event_data("window_focused", &data);
-                    }
-                    if let Some(evt) = state.window_focused_event(id) {
-                        publish_event(evt);
-                    }
-                }
             }
         });
     }));
@@ -138,54 +123,16 @@ fn main() {
             WM_STATE.with(|s| {
                 if let Some(state) = s.borrow_mut().as_mut() {
                     state.on_new_window_detected(pid, &owner, wid);
-                    if let Some(w) = state.registry.get(wid) {
-                        let ws_id = state
-                            .workspaces
-                            .find_window(wid)
-                            .map(|idx| state.workspaces.get(idx).id.to_string())
-                            .unwrap_or_default();
-                        publish_event(tarmac::ipc::events::WmEvent::WindowCreated {
-                            window_id: wid,
-                            title: w.title.clone(),
-                            app_name: w.app_name.clone(),
-                            app_bundle: w.app_bundle_id.clone(),
-                            workspace: ws_id,
-                        });
-                        if let Some(data) = state.window_created_data(wid) {
-                            fire_lua_event_data("window_created", &data);
-                        }
-                        let layout_data = state.layout_changed_data();
-                        publish_event(state.layout_changed_event());
-                        fire_lua_event_data("layout_changed", &layout_data);
-                    }
                 }
             });
         }),
         Box::new(move |wid, _pid| {
-            // Capture app_name before the window is removed from the registry
-            let app_name = WM_STATE.with(|s| {
-                s.borrow()
-                    .as_ref()
-                    .and_then(|state| state.registry.get(wid).map(|w| w.app_name.clone()))
-                    .unwrap_or_default()
-            });
             WM_STATE.with(|s| {
                 if let Some(state) = s.borrow_mut().as_mut() {
                     state.on_window_closed(wid);
-                    let layout_data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &layout_data);
                 }
             });
-            let closed_data = serde_json::json!({
-                "window_id": wid,
-                "app_name": &app_name,
-            });
-            publish_event(tarmac::ipc::events::WmEvent::WindowClosed {
-                window_id: wid,
-                app_name,
-            });
-            fire_lua_event_data("window_closed", &closed_data);
+            publish_event(tarmac::ipc::events::WmEvent::WindowClosed { window_id: wid });
         }),
         Box::new(move |pid| {
             WM_STATE.with(|s| {
@@ -235,118 +182,78 @@ fn handle_action(action: Action) {
         if let Some(state) = s.borrow_mut().as_mut() {
             match action {
                 Action::SpawnTerminal => spawn_terminal(),
-                Action::CloseWindow => {
-                    state.close_focused();
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
+                Action::CloseWindow => state.close_focused(),
                 Action::Focus(dir) => {
                     state.focus_direction(dir);
                     if let Some(id) = state.active_workspace().focused {
-                        if let Some(data) = state.window_focus_data(id) {
-                            fire_lua_event_data("window_focused", &data);
-                        }
-                        if let Some(evt) = state.window_focused_event(id) {
-                            publish_event(evt);
-                        }
+                        let id_str = id.to_string();
+                        fire_lua_event("window_focused", &[&id_str]);
+                        let app_name = state
+                            .registry
+                            .get(id)
+                            .map(|w| w.app_name.clone())
+                            .unwrap_or_default();
+                        publish_event(tarmac::ipc::events::WmEvent::WindowFocused {
+                            window_id: id,
+                            app_name,
+                        });
                     }
                 }
-                Action::Swap(dir) => {
-                    state.swap_direction(dir);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
-                Action::Resize(dir) => {
-                    state.resize_direction(dir);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
-                Action::Equalize => {
-                    state.equalize();
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
+                Action::Swap(dir) => state.swap_direction(dir),
+                Action::Resize(dir) => state.resize_direction(dir),
+                Action::Equalize => state.equalize(),
                 Action::Workspace(num) => {
                     let old = state.active_workspace().id.to_string();
                     state.switch_workspace(num);
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
-                    publish_event(state.workspace_changed_event(old, new));
+                    publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
+                        old: old.clone(),
+                        new: new.clone(),
+                    });
                 }
-                Action::MoveToWorkspace(num) => {
-                    state.move_to_workspace(num);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
+                Action::MoveToWorkspace(num) => state.move_to_workspace(num),
                 Action::WorkspaceNext => {
                     let old = state.active_workspace().id.to_string();
                     state.workspace_next();
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
-                    publish_event(state.workspace_changed_event(old, new));
+                    publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
+                        old: old.clone(),
+                        new: new.clone(),
+                    });
                 }
                 Action::WorkspacePrev => {
                     let old = state.active_workspace().id.to_string();
                     state.workspace_prev();
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
-                    publish_event(state.workspace_changed_event(old, new));
+                    publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
+                        old: old.clone(),
+                        new: new.clone(),
+                    });
                 }
-                Action::ToggleFloat => {
-                    state.toggle_float();
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
-                Action::ToggleSpecial(ref name) => {
-                    state.toggle_special(name);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
-                Action::MoveToSpecial(ref name) => {
-                    state.move_to_special(name);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
+                Action::ToggleFloat => state.toggle_float(),
+                Action::ToggleSpecial(ref name) => state.toggle_special(name),
+                Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
                     state.focus_monitor_next();
-                    let data = state.monitor_changed_data();
-                    fire_lua_event_data("monitor_changed", &data);
+                    let mid = state.focused_monitor.to_string();
+                    fire_lua_event("monitor_focused", &[&mid]);
                     publish_event(tarmac::ipc::events::WmEvent::MonitorChanged {
                         index: state.focused_monitor,
-                        monitor_count: state.monitors.len(),
-                        focused_workspace: state.active_workspace().id.to_string(),
                     });
                 }
                 Action::FocusMonitorPrev => {
                     state.focus_monitor_prev();
-                    let data = state.monitor_changed_data();
-                    fire_lua_event_data("monitor_changed", &data);
+                    let mid = state.focused_monitor.to_string();
+                    fire_lua_event("monitor_focused", &[&mid]);
                     publish_event(tarmac::ipc::events::WmEvent::MonitorChanged {
                         index: state.focused_monitor,
-                        monitor_count: state.monitors.len(),
-                        focused_workspace: state.active_workspace().id.to_string(),
                     });
                 }
-                Action::MoveToMonitorNext => {
-                    state.move_to_monitor_next();
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
-                Action::MoveToMonitorPrev => {
-                    state.move_to_monitor_prev();
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
-                }
+                Action::MoveToMonitorNext => state.move_to_monitor_next(),
+                Action::MoveToMonitorPrev => state.move_to_monitor_prev(),
                 Action::Reload => unreachable!("handled above"),
                 Action::Exit => {
                     tracing::info!("exit requested");
@@ -507,17 +414,6 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             }
         }
     });
-
-    // Process tray menu actions and refresh tray state
-    poll_tray_actions();
-    TRAY.with(|t| {
-        if let Some(tray) = t.borrow().as_ref() {
-            update_tray(tray);
-        }
-    });
-
-    // Process settings window actions
-    poll_settings_actions();
 }
 
 fn process_ipc_command(
@@ -541,14 +437,6 @@ fn process_ipc_command(
             "focus" => {
                 if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
                     state.focus_direction(dir);
-                    if let Some(id) = state.active_workspace().focused {
-                        if let Some(data) = state.window_focus_data(id) {
-                            fire_lua_event_data("window_focused", &data);
-                        }
-                        if let Some(evt) = state.window_focused_event(id) {
-                            publish_event(evt);
-                        }
-                    }
                     Response::ok_empty()
                 } else {
                     Response::err("usage: focus left|right|up|down")
@@ -557,9 +445,6 @@ fn process_ipc_command(
             "swap" => {
                 if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
                     state.swap_direction(dir);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: swap left|right|up|down")
@@ -568,9 +453,6 @@ fn process_ipc_command(
             "resize" => {
                 if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
                     state.resize_direction(dir);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: resize left|right|up|down")
@@ -578,25 +460,15 @@ fn process_ipc_command(
             }
             "close" => {
                 state.close_focused();
-                let data = state.layout_changed_data();
-                publish_event(state.layout_changed_event());
-                fire_lua_event_data("layout_changed", &data);
                 Response::ok_empty()
             }
             "equalize" => {
                 state.equalize();
-                let data = state.layout_changed_data();
-                publish_event(state.layout_changed_event());
-                fire_lua_event_data("layout_changed", &data);
                 Response::ok_empty()
             }
             "workspace" => {
                 if let Some(n) = request.args.first().and_then(|a| a.parse::<u8>().ok()) {
-                    let old = state.active_workspace().id.to_string();
                     state.switch_workspace(n);
-                    let new = state.active_workspace().id.to_string();
-                    fire_lua_event("workspace_changed", &[&old, &new]);
-                    publish_event(state.workspace_changed_event(old, new));
                     Response::ok_empty()
                 } else {
                     Response::err("usage: workspace <1-10>")
@@ -605,9 +477,6 @@ fn process_ipc_command(
             "move-to-workspace" => {
                 if let Some(n) = request.args.first().and_then(|a| a.parse::<u8>().ok()) {
                     state.move_to_workspace(n);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: move-to-workspace <1-10>")
@@ -615,17 +484,11 @@ fn process_ipc_command(
             }
             "toggle-floating" => {
                 state.toggle_float();
-                let data = state.layout_changed_data();
-                publish_event(state.layout_changed_event());
-                fire_lua_event_data("layout_changed", &data);
                 Response::ok_empty()
             }
             "toggle-special" => {
                 if let Some(name) = request.args.first() {
                     state.toggle_special(name);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: toggle-special <name>")
@@ -634,9 +497,6 @@ fn process_ipc_command(
             "move-to-special" => {
                 if let Some(name) = request.args.first() {
                     state.move_to_special(name);
-                    let data = state.layout_changed_data();
-                    publish_event(state.layout_changed_event());
-                    fire_lua_event_data("layout_changed", &data);
                     Response::ok_empty()
                 } else {
                     Response::err("usage: move-to-special <name>")
@@ -950,14 +810,6 @@ fn fire_lua_event(event: &str, args: &[&str]) {
     });
 }
 
-fn fire_lua_event_data(event: &str, data: &serde_json::Value) {
-    LUA_CONFIG.with(|c| {
-        if let Some(config) = c.borrow().as_ref() {
-            config.fire_event_with_data(event, data);
-        }
-    });
-}
-
 fn publish_event(event: tarmac::ipc::events::WmEvent) {
     EVENT_BUS.with(|r| {
         if let Some(bus) = r.borrow().as_ref() {
@@ -971,236 +823,6 @@ fn cleanup_socket() {
     let _ = std::fs::remove_file(&path);
 }
 
-fn update_tray(tray: &tarmac::ui::tray::TrayWidget) {
-    WM_STATE.with(|s| {
-        if let Some(state) = s.borrow().as_ref() {
-            let active_id = state.active_workspace().id.to_string();
-            let workspaces: Vec<tarmac::ui::tray::TrayWorkspace> = state
-                .workspaces
-                .iter()
-                .map(|ws| tarmac::ui::tray::TrayWorkspace {
-                    id: ws.id.to_string(),
-                    active: ws.visible,
-                    windows: ws.all_window_ids().len(),
-                })
-                .collect();
-            tray.update(&workspaces, &active_id);
-        }
-    });
-}
-
-fn poll_tray_actions() {
-    TRAY.with(|t| {
-        let borrow = t.borrow();
-        let Some(tray) = borrow.as_ref() else { return };
-        let actions = tray.poll_actions();
-        drop(borrow);
-        for action in actions {
-            match action {
-                tarmac::ui::tray::TrayAction::SwitchWorkspace(num) => {
-                    handle_action(tarmac::core::input::Action::Workspace(num));
-                }
-                tarmac::ui::tray::TrayAction::OpenSettings => {
-                    open_settings();
-                }
-                tarmac::ui::tray::TrayAction::Reload => {
-                    reload_config();
-                }
-                tarmac::ui::tray::TrayAction::Quit => {
-                    tracing::info!("quit from tray");
-                    cleanup_socket();
-                    std::process::exit(0);
-                }
-            }
-        }
-    });
-}
-
-fn open_settings() {
-    SETTINGS_WIN.with(|sw| {
-        if sw.borrow().is_none() {
-            let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
-            let win = tarmac::ui::settings::SettingsWindow::new(mtm);
-            // Populate from current state
-            WM_STATE.with(|s| {
-                if let Some(state) = s.borrow().as_ref() {
-                    let snap = build_settings_snapshot(state);
-                    win.populate(&snap);
-                }
-            });
-            *sw.borrow_mut() = Some(win);
-        }
-        if let Some(win) = sw.borrow().as_ref() {
-            win.toggle();
-        }
-    });
-}
-
-fn build_settings_snapshot(
-    state: &tarmac::core::state::WmState,
-) -> tarmac::ui::settings::SettingsSnapshot {
-    use tarmac::core::input::Modifiers;
-    let mod_key = LUA_CONFIG.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|cfg| {
-                if cfg.settings.mod_key == Modifiers::OPTION {
-                    "option"
-                } else if cfg.settings.mod_key == Modifiers::CONTROL {
-                    "control"
-                } else {
-                    "command"
-                }
-            })
-            .unwrap_or("command")
-            .to_string()
-    });
-    tarmac::ui::settings::SettingsSnapshot {
-        gap_inner: state.gap_inner,
-        gap_outer: state.gap_outer,
-        bar_height: state.bar_height,
-        border_width: state.borders.border_width,
-        border_radius: state.borders.radius,
-        border_color_focused: state.borders.focused_color.to_hex(),
-        border_color_unfocused: state.borders.unfocused_color.to_hex(),
-        focus_follows_mouse: state.focus_follows_mouse,
-        mouse_follows_focus: state.mouse_follows_focus,
-        mod_key,
-        keybinds: LUA_CONFIG.with(|c| {
-            c.borrow()
-                .as_ref()
-                .map(|cfg| {
-                    cfg.keybinds
-                        .iter()
-                        .map(|kb| {
-                            (
-                                format!("{:?}+{:?}", kb.modifiers, kb.key),
-                                format!("{:?}", kb.action),
-                            )
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        }),
-        rules: LUA_CONFIG.with(|c| {
-            c.borrow()
-                .as_ref()
-                .map(|cfg| {
-                    cfg.rules
-                        .iter()
-                        .map(|r| {
-                            let match_str = r.app_name.as_deref().unwrap_or("*").to_string();
-                            let mut actions = Vec::new();
-                            if let Some(true) = r.floating {
-                                actions.push("float".to_string());
-                            }
-                            if let Some(ws) = &r.workspace {
-                                actions.push(format!("workspace {ws}"));
-                            }
-                            (match_str, actions.join(", "))
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        }),
-    }
-}
-
-fn poll_settings_actions() {
-    use tarmac::config::lua::{lua_number, lua_string};
-    use tarmac::ui::settings::SettingsAction;
-
-    SETTINGS_WIN.with(|sw| {
-        let borrow = sw.borrow();
-        let Some(win) = borrow.as_ref() else { return };
-        let actions = win.poll_actions();
-        if actions.is_empty() {
-            return;
-        }
-        win.refresh_labels();
-        drop(borrow);
-
-        let config_path = CONFIG_PATH.with(|p| p.borrow().clone());
-
-        WM_STATE.with(|s| {
-            if let Some(state) = s.borrow_mut().as_mut() {
-                for action in actions {
-                    match action {
-                        SettingsAction::GapInner(v) => {
-                            state.gap_inner = v;
-                            write_setting(&config_path, "gap_inner", &lua_number(v));
-                        }
-                        SettingsAction::GapOuter(v) => {
-                            state.gap_outer = v;
-                            write_setting(&config_path, "gap_outer", &lua_number(v));
-                        }
-                        SettingsAction::BarHeight(v) => {
-                            state.bar_height = v;
-                            write_setting(&config_path, "bar_height", &lua_number(v));
-                        }
-                        SettingsAction::BorderWidth(v) => {
-                            state.borders.border_width = v;
-                            write_setting(
-                                &config_path,
-                                "border_width",
-                                &lua_string(&lua_number(v)),
-                            );
-                        }
-                        SettingsAction::BorderRadius(v) => {
-                            state.borders.radius = v;
-                            write_setting(
-                                &config_path,
-                                "border_radius",
-                                &lua_string(&lua_number(v)),
-                            );
-                        }
-                        SettingsAction::BorderColorFocused(ref hex) => {
-                            state.borders.focused_color =
-                                tarmac::platform::border::BorderColor::from_hex(hex);
-                            write_setting(&config_path, "border_color_focused", &lua_string(hex));
-                        }
-                        SettingsAction::BorderColorUnfocused(ref hex) => {
-                            state.borders.unfocused_color =
-                                tarmac::platform::border::BorderColor::from_hex(hex);
-                            write_setting(&config_path, "border_color_unfocused", &lua_string(hex));
-                        }
-                        SettingsAction::FocusFollowsMouse(v) => {
-                            state.focus_follows_mouse = v;
-                            write_setting(
-                                &config_path,
-                                "focus_follows_mouse",
-                                &lua_string(if v { "true" } else { "false" }),
-                            );
-                        }
-                        SettingsAction::MouseFollowsFocus(v) => {
-                            state.mouse_follows_focus = v;
-                            write_setting(
-                                &config_path,
-                                "mouse_follows_focus",
-                                &lua_string(if v { "true" } else { "false" }),
-                            );
-                        }
-                        SettingsAction::ModKey(ref key) => {
-                            write_setting(&config_path, "mod_key", &lua_string(key));
-                        }
-                        SettingsAction::Open => {}
-                    }
-                }
-                state.apply_layout();
-                state.update_borders();
-            }
-        });
-    });
-}
-
-fn write_setting(config_path: &Option<std::path::PathBuf>, key: &str, value: &str) {
-    if let Some(path) = config_path
-        && let Err(e) = tarmac::config::lua::update_lua_setting(path, key, value)
-    {
-        tracing::warn!(key, err = %e, "failed to write setting to config");
-    }
-}
-
 fn run_app() {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
@@ -1209,11 +831,6 @@ fn run_app() {
     let mtm = unsafe { MainThreadMarker::new_unchecked() };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-
-    // Initialize system tray
-    let tray = tarmac::ui::tray::TrayWidget::new(mtm);
-    update_tray(&tray);
-    TRAY.with(|t| *t.borrow_mut() = Some(tray));
 
     tracing::info!("entering main event loop");
     app.run();

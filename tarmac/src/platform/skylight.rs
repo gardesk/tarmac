@@ -15,10 +15,6 @@ type CGError = i32;
 pub const K_CG_NORMAL_WINDOW_LEVEL: c_int = 0;
 /// Floating window level (above normal windows, below menus)
 pub const K_CG_FLOATING_WINDOW_LEVEL: c_int = 3;
-/// Modal panel level — above all normal and floating windows.
-/// Used for tarmac floating windows to prevent any app activation
-/// from pushing them behind tiled windows.
-pub const K_CG_MODAL_WINDOW_LEVEL: c_int = 8;
 
 // SkyLight is a private framework, linked via build.rs
 unsafe extern "C" {
@@ -32,7 +28,6 @@ unsafe extern "C" {
         cid: CGSConnectionID,
         window_list: &CFArray,
     ) -> CGError;
-    fn SLSOrderWindow(cid: CGSConnectionID, wid: u32, mode: c_int, relative_to: u32) -> CGError;
     fn SLSTransactionCreate(cid: CGSConnectionID) -> *const c_void;
     fn SLSTransactionSetWindowSystemAlpha(
         transaction: *const c_void,
@@ -177,11 +172,4 @@ pub fn set_window_level(window_id: u32, level: c_int) -> bool {
         tracing::warn!(window_id, level, result, cid, "SLSSetWindowLevel failed");
     }
     result == 0
-}
-
-/// Order a window above all other windows at its level.
-/// mode 1 = above (kCGSOrderAbove).
-pub fn order_window_front(window_id: u32) {
-    let cid = unsafe { SLSMainConnectionID() };
-    unsafe { SLSOrderWindow(cid, window_id, 1, 0) };
 }

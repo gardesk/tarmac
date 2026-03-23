@@ -332,14 +332,14 @@ fn register_gar_api(
 }
 
 impl LuaConfig {
-    /// Fire all callbacks registered for a given event with string args.
-    /// Used for events like workspace_changed(old, new).
+    /// Fire all callbacks registered for a given event.
     pub fn fire_event(&self, event: &str, args: &[&str]) {
         let Some(lua) = &self.lua else { return };
         for cb in &self.callbacks {
             if cb.event == event {
                 match lua.registry_value::<mlua::Function>(&cb.func_key) {
                     Ok(func) => {
+                        // Build args as Lua strings
                         let lua_args: Vec<mlua::Value> = args
                             .iter()
                             .filter_map(|a| lua.create_string(a).ok().map(mlua::Value::String))
@@ -353,64 +353,6 @@ impl LuaConfig {
                     }
                 }
             }
-        }
-    }
-
-    /// Fire all callbacks registered for a given event with a structured data table.
-    /// Converts a serde_json::Value to a Lua table, enabling callbacks like:
-    ///   gar.on("window_focused", function(info) print(info.title) end)
-    pub fn fire_event_with_data(&self, event: &str, data: &serde_json::Value) {
-        let Some(lua) = &self.lua else { return };
-        for cb in &self.callbacks {
-            if cb.event == event {
-                match lua.registry_value::<mlua::Function>(&cb.func_key) {
-                    Ok(func) => {
-                        let lua_val = match json_to_lua(lua, data) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                tracing::warn!(event, err = %e, "failed to convert event data");
-                                continue;
-                            }
-                        };
-                        if let Err(e) = func.call::<()>(lua_val) {
-                            tracing::warn!(event, err = %e, "callback error");
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(event, err = %e, "failed to retrieve callback");
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Convert a serde_json::Value to a mlua::Value.
-fn json_to_lua(lua: &Lua, value: &serde_json::Value) -> LuaResult<mlua::Value> {
-    match value {
-        serde_json::Value::Null => Ok(mlua::Value::Nil),
-        serde_json::Value::Bool(b) => Ok(mlua::Value::Boolean(*b)),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(mlua::Value::Integer(i))
-            } else {
-                Ok(mlua::Value::Number(n.as_f64().unwrap_or(0.0)))
-            }
-        }
-        serde_json::Value::String(s) => Ok(mlua::Value::String(lua.create_string(s)?)),
-        serde_json::Value::Array(arr) => {
-            let table = lua.create_table()?;
-            for (i, v) in arr.iter().enumerate() {
-                table.set(i + 1, json_to_lua(lua, v)?)?;
-            }
-            Ok(mlua::Value::Table(table))
-        }
-        serde_json::Value::Object(map) => {
-            let table = lua.create_table()?;
-            for (k, v) in map {
-                table.set(k.as_str(), json_to_lua(lua, v)?)?;
-            }
-            Ok(mlua::Value::Table(table))
         }
     }
 }
@@ -740,48 +682,6 @@ pub fn default_keybinds(settings: &Settings) -> Vec<LuaKeybind> {
     binds
 }
 
-/// Update a single `gar.set("key", ...)` line in a Lua config file.
-/// Preserves all other content (comments, bindings, rules, etc.).
-/// `value` should be the Lua literal: a number like `8` or a quoted string like `"#5294e2"`.
-pub fn update_lua_setting(path: &std::path::Path, key: &str, value: &str) -> Result<(), String> {
-    let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-
-    // Match: gar.set("key", <anything>) or gar.set("key", <anything>)
-    // The value can be a number, a quoted string, or a boolean string
-    let pattern = format!(
-        r#"(gar\.set\(\s*"{key}"\s*,\s*).+?(\s*\))"#,
-        key = regex::escape(key),
-    );
-    let re = regex::Regex::new(&pattern).map_err(|e| e.to_string())?;
-
-    if !re.is_match(&content) {
-        tracing::debug!(key, "gar.set line not found in config, skipping write-back");
-        return Ok(());
-    }
-
-    let replacement = format!("${{1}}{value}${{2}}");
-    let updated = re.replace(&content, replacement.as_str());
-
-    std::fs::write(path, updated.as_bytes()).map_err(|e| e.to_string())?;
-    tracing::debug!(key, value, "config write-back");
-    Ok(())
-}
-
-/// Format a numeric value for Lua config write-back.
-pub fn lua_number(v: f64) -> String {
-    let i = v as i64;
-    if (v - i as f64).abs() < 0.01 {
-        i.to_string()
-    } else {
-        format!("{v:.1}")
-    }
-}
-
-/// Format a string value for Lua config write-back (quoted).
-pub fn lua_string(s: &str) -> String {
-    format!("\"{s}\"")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,50 +731,5 @@ mod tests {
         let binds = default_keybinds(&Settings::default());
         // 4 basic + 12 focus + 12 swap + 4 resize + 20 workspaces = 52
         assert!(binds.len() >= 40);
-    }
-
-    #[test]
-    fn write_back_number() {
-        let dir = std::env::temp_dir().join("tarmac_test_wb");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("test.lua");
-        std::fs::write(&path, "gar.set(\"gap_inner\", 8)\n").unwrap();
-        update_lua_setting(&path, "gap_inner", "20").unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            content.contains("gar.set(\"gap_inner\", 20)"),
-            "got: {content}"
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn write_back_string() {
-        let dir = std::env::temp_dir().join("tarmac_test_wb2");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("test.lua");
-        std::fs::write(&path, "gar.set(\"border_color_focused\", \"#5294e2\")\n").unwrap();
-        update_lua_setting(&path, "border_color_focused", "\"#ff0000\"").unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("\"#ff0000\""), "got: {content}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn write_back_preserves_other_lines() {
-        let dir = std::env::temp_dir().join("tarmac_test_wb3");
-        let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("test.lua");
-        std::fs::write(
-            &path,
-            "-- comment\ngar.set(\"gap_inner\", 8)\ngar.bind(\"mod+h\", \"focus left\")\n",
-        )
-        .unwrap();
-        update_lua_setting(&path, "gap_inner", "12").unwrap();
-        let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("-- comment"));
-        assert!(content.contains("gar.set(\"gap_inner\", 12)"));
-        assert!(content.contains("gar.bind(\"mod+h\", \"focus left\")"));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -14,8 +14,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: true
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -38,7 +36,7 @@ jobs:
         run: cargo test --workspace
 
       - name: Clippy
-        run: cargo clippy -p tarmac -p tarmacctl -- -D warnings -A clippy::wrong_self_convention -A clippy::too_many_arguments
+        run: cargo clippy --workspace -- -D warnings
 
       - name: Format check
-        run: cargo fmt -p tarmac -p tarmacctl -- --check
+        run: cargo fmt --all -- --check

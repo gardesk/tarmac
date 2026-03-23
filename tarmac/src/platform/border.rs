@@ -28,7 +28,7 @@ impl BorderColor {
         Self { r, g, b, a }
     }
 
-    pub fn to_hex(&self) -> String {
+    fn to_hex(&self) -> String {
         let r = (self.r * 255.0) as u8;
         let g = (self.g * 255.0) as u8;
         let b = (self.b * 255.0) as u8;
@@ -67,36 +67,19 @@ impl BorderManager {
     }
 
     /// Spawn ers with current settings. Kills any existing instance first.
-    /// Looks for ers next to the tarmac binary first, then falls back to PATH.
     pub fn spawn(&mut self) {
         self.kill();
-        if !self.is_enabled() {
-            return;
-        }
-
-        let ers_bin = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("ers")))
-            .filter(|p| p.exists())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "ers".to_string());
+        if !self.is_enabled() { return; }
 
         let cmd = format!(
-            "{} --active-only --width {} --radius {} --color '{}' --inactive '{}'",
-            ers_bin,
-            self.border_width,
-            self.radius,
-            self.focused_color.to_hex(),
-            self.unfocused_color.to_hex(),
+            "ers --active-only --width {} --radius {} --color '{}' --inactive '{}'",
+            self.border_width, self.radius,
+            self.focused_color.to_hex(), self.unfocused_color.to_hex(),
         );
         tracing::debug!(cmd, "spawning ers");
         match Command::new("/bin/sh").args(["-c", &cmd]).spawn() {
-            Ok(child) => {
-                self.child = Some(child);
-            }
-            Err(e) => {
-                tracing::warn!(err = %e, "failed to spawn ers");
-            }
+            Ok(child) => { self.child = Some(child); }
+            Err(e) => { tracing::warn!(err = %e, "failed to spawn ers"); }
         }
     }
 
@@ -123,8 +106,7 @@ impl BorderManager {
         _old: Option<u32>,
         _new: Option<u32>,
         _get_rect: impl Fn(u32) -> Option<crate::core::tree::Rect>,
-    ) {
-    }
+    ) {}
 }
 
 impl Drop for BorderManager {

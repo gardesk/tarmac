@@ -2,59 +2,16 @@ use serde::Serialize;
 use std::sync::Mutex;
 use std::sync::mpsc;
 
-/// Per-workspace summary included in workspace_changed events.
-#[derive(Debug, Clone, Serialize)]
-pub struct WorkspaceInfo {
-    pub id: String,
-    pub active: bool,
-    pub windows: usize,
-    pub monitor: Option<usize>,
-    pub urgent: bool,
-}
-
 /// Events emitted by the window manager for IPC subscribers.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event", content = "data")]
 pub enum WmEvent {
-    #[serde(rename = "workspace_changed")]
-    WorkspaceChanged {
-        old: String,
-        new: String,
-        workspaces: Vec<WorkspaceInfo>,
-        focused_workspace: String,
-        focused_monitor: usize,
-    },
-    #[serde(rename = "window_focused")]
-    WindowFocused {
-        window_id: u32,
-        title: String,
-        app_name: String,
-        app_bundle: String,
-        workspace: String,
-    },
-    #[serde(rename = "window_created")]
-    WindowCreated {
-        window_id: u32,
-        title: String,
-        app_name: String,
-        app_bundle: String,
-        workspace: String,
-    },
-    #[serde(rename = "window_closed")]
-    WindowClosed { window_id: u32, app_name: String },
-    #[serde(rename = "monitor_changed")]
-    MonitorChanged {
-        index: usize,
-        monitor_count: usize,
-        focused_workspace: String,
-    },
-    #[serde(rename = "layout_changed")]
-    LayoutChanged {
-        workspace: String,
-        window_count: usize,
-        layout_type: String,
-    },
-    #[serde(rename = "mode_changed")]
+    WorkspaceChanged { old: String, new: String },
+    WindowFocused { window_id: u32, app_name: String },
+    WindowCreated { window_id: u32, app_name: String },
+    WindowClosed { window_id: u32 },
+    MonitorChanged { index: usize },
+    LayoutChanged { workspace: String },
     ModeChanged { mode: String },
 }
 
