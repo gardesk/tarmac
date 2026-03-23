@@ -28,6 +28,7 @@ unsafe extern "C" {
         cid: CGSConnectionID,
         window_list: &CFArray,
     ) -> CGError;
+    fn SLSOrderWindow(cid: CGSConnectionID, wid: u32, mode: c_int, relative_to: u32) -> CGError;
     fn SLSTransactionCreate(cid: CGSConnectionID) -> *const c_void;
     fn SLSTransactionSetWindowSystemAlpha(
         transaction: *const c_void,
@@ -172,4 +173,11 @@ pub fn set_window_level(window_id: u32, level: c_int) -> bool {
         tracing::warn!(window_id, level, result, cid, "SLSSetWindowLevel failed");
     }
     result == 0
+}
+
+/// Order a window above all other windows at its level.
+/// mode 1 = above (kCGSOrderAbove).
+pub fn order_window_front(window_id: u32) {
+    let cid = unsafe { SLSMainConnectionID() };
+    unsafe { SLSOrderWindow(cid, window_id, 1, 0) };
 }

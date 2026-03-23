@@ -1013,22 +1013,47 @@ impl WmState {
 
     /// Re-apply SkyLight window levels for all floating windows.
     /// Called after every focus change since app activation can reset ordering.
+    /// Lightweight check: only enforce if any floating windows exist.
+    pub fn enforce_floating_if_needed(&self) {
+        let has_floating = self.monitors.iter().any(|m| {
+            !self
+                .workspaces
+                .get(m.active_workspace)
+                .floating
+                .is_empty()
+        }) || self
+            .active_specials
+            .iter()
+            .flatten()
+            .any(|idx| !self.workspaces.get(*idx).is_empty());
+        if has_floating {
+            self.enforce_floating_levels();
+        }
+    }
+
     fn enforce_floating_levels(&self) {
-        use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-        // Reassert floating level on all visible workspaces (all monitors)
+        use crate::platform::skylight::{
+            K_CG_FLOATING_WINDOW_LEVEL, order_window_front, set_window_level,
+        };
+        // Reassert floating level AND z-order on all visible workspaces.
+        // Setting the level alone isn't enough — activate_app can reorder
+        // windows within the same level. SLSOrderWindow forces them back
+        // to the front of their level.
         for monitor in &self.monitors {
             for fw in &self.workspaces.get(monitor.active_workspace).floating {
                 set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+                order_window_front(fw.id);
             }
         }
         // Also cover active special/scratchpad workspaces
         for special_idx in self.active_specials.iter().flatten() {
             for fw in &self.workspaces.get(*special_idx).floating {
                 set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+                order_window_front(fw.id);
             }
-            // Special workspace tiled windows also float visually
             for wid in self.workspaces.get(*special_idx).tree.windows() {
                 set_window_level(wid, K_CG_FLOATING_WINDOW_LEVEL);
+                order_window_front(wid);
             }
         }
     }

@@ -489,6 +489,9 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
     WM_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.process_events();
+            // Continuously reassert floating window z-order to counter
+            // async macOS app activation that can reorder windows.
+            state.enforce_floating_if_needed();
         }
     });
 
