@@ -820,26 +820,46 @@ impl WmState {
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
-                // Full activation sequence for reliable cross-monitor focus:
-                // 1. Set AXFrontmost on the app-level AX element
-                // 2. NSRunningApplication.activate (brings app to foreground)
-                // 3. AXRaise (brings window to front of app's stack)
-                // 4. Set AXMain on window (makes it the key window)
-                // 5. Set AXFocused on window (tells AX this is focused)
-                //
-                // Setting AXFrontmost on the app AND calling activate_app
-                // covers both same-app (WezTerm→WezTerm) and cross-app cases.
-                if let Some(w) = self.registry.get(id) {
-                    let app_ref = unsafe {
-                        objc2_application_services::AXUIElement::new_application(w.app_pid)
-                    };
-                    let frontmost_key =
-                        objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                    let _ =
-                        crate::platform::accessibility::ax_set_bool(&app_ref, &frontmost_key, true);
-                    crate::platform::application::activate_app(w.app_pid);
+                let is_floating = self.active_workspace().is_floating(id);
+                let has_floating = !self.active_workspace().floating.is_empty();
+
+                if is_floating || !has_floating {
+                    // Full activation: no floating windows to protect, or we're
+                    // focusing a floating window itself — safe to raise.
+                    if let Some(w) = self.registry.get(id) {
+                        let app_ref = unsafe {
+                            objc2_application_services::AXUIElement::new_application(w.app_pid)
+                        };
+                        let frontmost_key =
+                            objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                        let _ = crate::platform::accessibility::ax_set_bool(
+                            &app_ref,
+                            &frontmost_key,
+                            true,
+                        );
+                        crate::platform::application::activate_app(w.app_pid);
+                    }
+                    let _ = ax_perform_action(ax_ref, "AXRaise");
+                } else {
+                    // Focusing a tiled window while floating windows exist:
+                    // activate the app for keyboard input but DON'T AXRaise,
+                    // so the tiled window stays behind floating windows.
+                    if let Some(w) = self.registry.get(id) {
+                        let app_ref = unsafe {
+                            objc2_application_services::AXUIElement::new_application(w.app_pid)
+                        };
+                        let frontmost_key =
+                            objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                        let _ = crate::platform::accessibility::ax_set_bool(
+                            &app_ref,
+                            &frontmost_key,
+                            true,
+                        );
+                        crate::platform::application::activate_app(w.app_pid);
+                    }
+                    // Skip AXRaise — floating windows stay visually on top
                 }
-                let _ = ax_perform_action(ax_ref, "AXRaise");
+
                 let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
                 let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, true);
                 let focused_key = objc2_core_foundation::CFString::from_static_str("AXFocused");
@@ -995,8 +1015,21 @@ impl WmState {
     /// Called after every focus change since app activation can reset ordering.
     fn enforce_floating_levels(&self) {
         use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-        for fw in &self.active_workspace().floating {
-            set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+        // Reassert floating level on all visible workspaces (all monitors)
+        for monitor in &self.monitors {
+            for fw in &self.workspaces.get(monitor.active_workspace).floating {
+                set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+            }
+        }
+        // Also cover active special/scratchpad workspaces
+        for special_idx in self.active_specials.iter().flatten() {
+            for fw in &self.workspaces.get(*special_idx).floating {
+                set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+            }
+            // Special workspace tiled windows also float visually
+            for wid in self.workspaces.get(*special_idx).tree.windows() {
+                set_window_level(wid, K_CG_FLOATING_WINDOW_LEVEL);
+            }
         }
     }
 
