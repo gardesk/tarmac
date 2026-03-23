@@ -302,8 +302,8 @@ impl WmState {
                     "show floating"
                 );
                 self.show_window(fw.id, fw.geometry);
-                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-                set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+                use crate::platform::skylight::{K_CG_MODAL_WINDOW_LEVEL, set_window_level};
+                set_window_level(fw.id, K_CG_MODAL_WINDOW_LEVEL);
             }
         }
     }
@@ -689,8 +689,8 @@ impl WmState {
                 let _ = ax_set_position(ax_ref, fx, fy);
                 let _ = ax_set_size(ax_ref, min_w, min_h);
             }
-            use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-            set_window_level(oversized_wid, K_CG_FLOATING_WINDOW_LEVEL);
+            use crate::platform::skylight::{K_CG_MODAL_WINDOW_LEVEL, set_window_level};
+            set_window_level(oversized_wid, K_CG_MODAL_WINDOW_LEVEL);
             self.apply_layout();
         }
     }
@@ -1021,7 +1021,7 @@ impl WmState {
 
     fn enforce_floating_levels(&self) {
         use crate::platform::skylight::{
-            K_CG_FLOATING_WINDOW_LEVEL, order_window_front, set_window_level,
+            K_CG_MODAL_WINDOW_LEVEL, order_window_front, set_window_level,
         };
         // Reassert floating level AND z-order on all visible workspaces.
         // Setting the level alone isn't enough — activate_app can reorder
@@ -1029,18 +1029,18 @@ impl WmState {
         // to the front of their level.
         for monitor in &self.monitors {
             for fw in &self.workspaces.get(monitor.active_workspace).floating {
-                set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+                set_window_level(fw.id, K_CG_MODAL_WINDOW_LEVEL);
                 order_window_front(fw.id);
             }
         }
         // Also cover active special/scratchpad workspaces
         for special_idx in self.active_specials.iter().flatten() {
             for fw in &self.workspaces.get(*special_idx).floating {
-                set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+                set_window_level(fw.id, K_CG_MODAL_WINDOW_LEVEL);
                 order_window_front(fw.id);
             }
             for wid in self.workspaces.get(*special_idx).tree.windows() {
-                set_window_level(wid, K_CG_FLOATING_WINDOW_LEVEL);
+                set_window_level(wid, K_CG_MODAL_WINDOW_LEVEL);
                 order_window_front(wid);
             }
         }
@@ -1245,8 +1245,8 @@ impl WmState {
                     let _ = ax_set_size(ax_ref, fw.geometry.width, fw.geometry.height);
                 }
                 // Set window level to floating so it stays above all normal windows
-                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-                set_window_level(focused, K_CG_FLOATING_WINDOW_LEVEL);
+                use crate::platform::skylight::{K_CG_MODAL_WINDOW_LEVEL, set_window_level};
+                set_window_level(focused, K_CG_MODAL_WINDOW_LEVEL);
                 self.enforce_floating_levels();
                 tracing::info!(id = focused, "window floated (level=floating)");
             } else {
@@ -1675,14 +1675,14 @@ impl WmState {
                 self.show_window(*wid, *rect);
                 crate::platform::skylight::set_window_level(
                     *wid,
-                    crate::platform::skylight::K_CG_FLOATING_WINDOW_LEVEL,
+                    crate::platform::skylight::K_CG_MODAL_WINDOW_LEVEL,
                 );
             }
             for (wid, rect) in &floating_data {
                 self.show_window(*wid, *rect);
                 crate::platform::skylight::set_window_level(
                     *wid,
-                    crate::platform::skylight::K_CG_FLOATING_WINDOW_LEVEL,
+                    crate::platform::skylight::K_CG_MODAL_WINDOW_LEVEL,
                 );
             }
             if let Some(wid) = focus_target {
@@ -2287,8 +2287,8 @@ impl WmState {
                     let _ = ax_set_position(ax_ref, fx, fy);
                     let _ = ax_set_size(ax_ref, ow_min_w, ow_min_h);
                 }
-                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-                set_window_level(ow, K_CG_FLOATING_WINDOW_LEVEL);
+                use crate::platform::skylight::{K_CG_MODAL_WINDOW_LEVEL, set_window_level};
+                set_window_level(ow, K_CG_MODAL_WINDOW_LEVEL);
                 self.apply_layout();
                 // Continue checking — other windows may still overflow
             }

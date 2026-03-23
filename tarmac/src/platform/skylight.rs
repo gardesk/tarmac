@@ -15,6 +15,10 @@ type CGError = i32;
 pub const K_CG_NORMAL_WINDOW_LEVEL: c_int = 0;
 /// Floating window level (above normal windows, below menus)
 pub const K_CG_FLOATING_WINDOW_LEVEL: c_int = 3;
+/// Modal panel level — above all normal and floating windows.
+/// Used for tarmac floating windows to prevent any app activation
+/// from pushing them behind tiled windows.
+pub const K_CG_MODAL_WINDOW_LEVEL: c_int = 8;
 
 // SkyLight is a private framework, linked via build.rs
 unsafe extern "C" {
