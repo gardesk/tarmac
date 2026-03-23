@@ -302,8 +302,8 @@ impl WmState {
                     "show floating"
                 );
                 self.show_window(fw.id, fw.geometry);
-                use crate::platform::skylight::{K_CG_MODAL_WINDOW_LEVEL, set_window_level};
-                set_window_level(fw.id, K_CG_MODAL_WINDOW_LEVEL);
+                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+                set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
             }
         }
     }
@@ -689,8 +689,8 @@ impl WmState {
                 let _ = ax_set_position(ax_ref, fx, fy);
                 let _ = ax_set_size(ax_ref, min_w, min_h);
             }
-            use crate::platform::skylight::{K_CG_MODAL_WINDOW_LEVEL, set_window_level};
-            set_window_level(oversized_wid, K_CG_MODAL_WINDOW_LEVEL);
+            use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+            set_window_level(oversized_wid, K_CG_FLOATING_WINDOW_LEVEL);
             self.apply_layout();
         }
     }
@@ -820,51 +820,26 @@ impl WmState {
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
-                let is_floating = self.active_workspace().is_floating(id);
-                let has_floating = !self.active_workspace().floating.is_empty();
-
-                if is_floating || !has_floating {
-                    // Full activation: no floating windows to protect, or we're
-                    // focusing a floating window itself — safe to raise.
-                    if let Some(w) = self.registry.get(id) {
-                        let app_ref = unsafe {
-                            objc2_application_services::AXUIElement::new_application(w.app_pid)
-                        };
-                        let frontmost_key =
-                            objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                        let _ = crate::platform::accessibility::ax_set_bool(
-                            &app_ref,
-                            &frontmost_key,
-                            true,
-                        );
-                        crate::platform::application::activate_app(w.app_pid);
-                    }
-                    let _ = ax_perform_action(ax_ref, "AXRaise");
-                } else {
-                    // Focusing a tiled window while floating windows exist:
-                    // activate the app for keyboard routing and focus events
-                    // (ers needs EVENT_FRONT_CHANGE), but skip AXRaise so
-                    // macOS doesn't bring the tiled window above floating ones.
-                    // Immediately reassert floating z-order after activation.
-                    if let Some(w) = self.registry.get(id) {
-                        let app_ref = unsafe {
-                            objc2_application_services::AXUIElement::new_application(w.app_pid)
-                        };
-                        let frontmost_key =
-                            objc2_core_foundation::CFString::from_static_str("AXFrontmost");
-                        let _ = crate::platform::accessibility::ax_set_bool(
-                            &app_ref,
-                            &frontmost_key,
-                            true,
-                        );
-                        crate::platform::application::activate_app(w.app_pid);
-                    }
-                    // NO AXRaise — floating windows stay visually on top.
-                    // Immediately reassert floating window z-order to counter
-                    // the window reordering that activate_app triggers.
-                    self.enforce_floating_levels();
+                // Full activation sequence for reliable cross-monitor focus:
+                // 1. Set AXFrontmost on the app-level AX element
+                // 2. NSRunningApplication.activate (brings app to foreground)
+                // 3. AXRaise (brings window to front of app's stack)
+                // 4. Set AXMain on window (makes it the key window)
+                // 5. Set AXFocused on window (tells AX this is focused)
+                //
+                // Setting AXFrontmost on the app AND calling activate_app
+                // covers both same-app (WezTerm→WezTerm) and cross-app cases.
+                if let Some(w) = self.registry.get(id) {
+                    let app_ref = unsafe {
+                        objc2_application_services::AXUIElement::new_application(w.app_pid)
+                    };
+                    let frontmost_key =
+                        objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                    let _ =
+                        crate::platform::accessibility::ax_set_bool(&app_ref, &frontmost_key, true);
+                    crate::platform::application::activate_app(w.app_pid);
                 }
-
+                let _ = ax_perform_action(ax_ref, "AXRaise");
                 let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
                 let _ = crate::platform::accessibility::ax_set_bool(ax_ref, &main_key, true);
                 let focused_key = objc2_core_foundation::CFString::from_static_str("AXFocused");
@@ -1018,48 +993,10 @@ impl WmState {
 
     /// Re-apply SkyLight window levels for all floating windows.
     /// Called after every focus change since app activation can reset ordering.
-    /// Lightweight check: only enforce if any floating windows exist.
-    pub fn enforce_floating_if_needed(&self) {
-        let has_floating = self.monitors.iter().any(|m| {
-            !self
-                .workspaces
-                .get(m.active_workspace)
-                .floating
-                .is_empty()
-        }) || self
-            .active_specials
-            .iter()
-            .flatten()
-            .any(|idx| !self.workspaces.get(*idx).is_empty());
-        if has_floating {
-            self.enforce_floating_levels();
-        }
-    }
-
     fn enforce_floating_levels(&self) {
-        use crate::platform::skylight::{
-            K_CG_MODAL_WINDOW_LEVEL, order_window_front, set_window_level,
-        };
-        // Reassert floating level AND z-order on all visible workspaces.
-        // Setting the level alone isn't enough — activate_app can reorder
-        // windows within the same level. SLSOrderWindow forces them back
-        // to the front of their level.
-        for monitor in &self.monitors {
-            for fw in &self.workspaces.get(monitor.active_workspace).floating {
-                set_window_level(fw.id, K_CG_MODAL_WINDOW_LEVEL);
-                order_window_front(fw.id);
-            }
-        }
-        // Also cover active special/scratchpad workspaces
-        for special_idx in self.active_specials.iter().flatten() {
-            for fw in &self.workspaces.get(*special_idx).floating {
-                set_window_level(fw.id, K_CG_MODAL_WINDOW_LEVEL);
-                order_window_front(fw.id);
-            }
-            for wid in self.workspaces.get(*special_idx).tree.windows() {
-                set_window_level(wid, K_CG_MODAL_WINDOW_LEVEL);
-                order_window_front(wid);
-            }
+        use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+        for fw in &self.active_workspace().floating {
+            set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
         }
     }
 
@@ -1262,8 +1199,8 @@ impl WmState {
                     let _ = ax_set_size(ax_ref, fw.geometry.width, fw.geometry.height);
                 }
                 // Set window level to floating so it stays above all normal windows
-                use crate::platform::skylight::{K_CG_MODAL_WINDOW_LEVEL, set_window_level};
-                set_window_level(focused, K_CG_MODAL_WINDOW_LEVEL);
+                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+                set_window_level(focused, K_CG_FLOATING_WINDOW_LEVEL);
                 self.enforce_floating_levels();
                 tracing::info!(id = focused, "window floated (level=floating)");
             } else {
@@ -1692,14 +1629,14 @@ impl WmState {
                 self.show_window(*wid, *rect);
                 crate::platform::skylight::set_window_level(
                     *wid,
-                    crate::platform::skylight::K_CG_MODAL_WINDOW_LEVEL,
+                    crate::platform::skylight::K_CG_FLOATING_WINDOW_LEVEL,
                 );
             }
             for (wid, rect) in &floating_data {
                 self.show_window(*wid, *rect);
                 crate::platform::skylight::set_window_level(
                     *wid,
-                    crate::platform::skylight::K_CG_MODAL_WINDOW_LEVEL,
+                    crate::platform::skylight::K_CG_FLOATING_WINDOW_LEVEL,
                 );
             }
             if let Some(wid) = focus_target {
@@ -2304,8 +2241,8 @@ impl WmState {
                     let _ = ax_set_position(ax_ref, fx, fy);
                     let _ = ax_set_size(ax_ref, ow_min_w, ow_min_h);
                 }
-                use crate::platform::skylight::{K_CG_MODAL_WINDOW_LEVEL, set_window_level};
-                set_window_level(ow, K_CG_MODAL_WINDOW_LEVEL);
+                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
+                set_window_level(ow, K_CG_FLOATING_WINDOW_LEVEL);
                 self.apply_layout();
                 // Continue checking — other windows may still overflow
             }
