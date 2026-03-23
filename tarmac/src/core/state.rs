@@ -842,8 +842,9 @@ impl WmState {
                     let _ = ax_perform_action(ax_ref, "AXRaise");
                 } else {
                     // Focusing a tiled window while floating windows exist:
-                    // activate the app for keyboard input but DON'T AXRaise,
-                    // so the tiled window stays behind floating windows.
+                    // use AXFrontmost for keyboard routing but skip activate_app
+                    // entirely — NSRunningApplication.activate reorders windows
+                    // aggressively and sends floating windows behind tiled ones.
                     if let Some(w) = self.registry.get(id) {
                         let app_ref = unsafe {
                             objc2_application_services::AXUIElement::new_application(w.app_pid)
@@ -855,7 +856,7 @@ impl WmState {
                             &frontmost_key,
                             true,
                         );
-                        crate::platform::application::activate_app(w.app_pid);
+                        // NO activate_app — it reorders windows
                     }
                     // Skip AXRaise — floating windows stay visually on top
                 }
