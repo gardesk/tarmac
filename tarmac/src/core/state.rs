@@ -842,10 +842,27 @@ impl WmState {
                     let _ = ax_perform_action(ax_ref, "AXRaise");
                 } else {
                     // Focusing a tiled window while floating windows exist:
-                    // skip ALL app activation (AXFrontmost, activate_app, AXRaise).
-                    // Any of these can cause macOS to reorder windows and push
-                    // floating windows behind tiled ones. AXMain + AXFocused
-                    // alone is enough for keyboard input routing.
+                    // activate the app for keyboard routing and focus events
+                    // (ers needs EVENT_FRONT_CHANGE), but skip AXRaise so
+                    // macOS doesn't bring the tiled window above floating ones.
+                    // Immediately reassert floating z-order after activation.
+                    if let Some(w) = self.registry.get(id) {
+                        let app_ref = unsafe {
+                            objc2_application_services::AXUIElement::new_application(w.app_pid)
+                        };
+                        let frontmost_key =
+                            objc2_core_foundation::CFString::from_static_str("AXFrontmost");
+                        let _ = crate::platform::accessibility::ax_set_bool(
+                            &app_ref,
+                            &frontmost_key,
+                            true,
+                        );
+                        crate::platform::application::activate_app(w.app_pid);
+                    }
+                    // NO AXRaise — floating windows stay visually on top.
+                    // Immediately reassert floating window z-order to counter
+                    // the window reordering that activate_app triggers.
+                    self.enforce_floating_levels();
                 }
 
                 let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
