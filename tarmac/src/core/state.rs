@@ -705,21 +705,43 @@ impl WmState {
             let geoms =
                 ws.tree
                     .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
-            if let Some(target) = Node::find_adjacent(&geoms, from, direction) {
-                self.focus_window(target);
-                if self.mouse_follows_focus
-                    && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
-                {
-                    warp_mouse_to_center(rect);
-                    self.ffm_cooldown_until =
-                        Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
-                    self.ffm_last_window = Some(target);
+
+            // Check if focused window is at the monitor edge in the requested
+            // direction. If so, cross monitors instead of spiraling into the BSP tree.
+            let at_edge = if let Some((_, rect)) = geoms.iter().find(|(w, _)| *w == from) {
+                let tolerance = self.gap_outer + 2.0;
+                match direction {
+                    Direction::Right => {
+                        (rect.x + rect.width) >= (sr.x + sr.width - tolerance)
+                    }
+                    Direction::Left => rect.x <= (sr.x + tolerance),
+                    Direction::Down => {
+                        (rect.y + rect.height) >= (sr.y + sr.height - tolerance)
+                    }
+                    Direction::Up => rect.y <= (sr.y + tolerance),
                 }
-                return;
+            } else {
+                false
+            };
+
+            if !at_edge {
+                if let Some(target) = Node::find_adjacent(&geoms, from, direction) {
+                    self.focus_window(target);
+                    if self.mouse_follows_focus
+                        && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
+                    {
+                        warp_mouse_to_center(rect);
+                        self.ffm_cooldown_until = Some(
+                            std::time::Instant::now() + std::time::Duration::from_millis(200),
+                        );
+                        self.ffm_last_window = Some(target);
+                    }
+                    return;
+                }
             }
         }
 
-        // No adjacent window (or empty workspace) — try crossing monitors
+        // At monitor edge or no adjacent window — try crossing monitors
         if self.monitors.len() <= 1 {
             return;
         }
@@ -779,17 +801,41 @@ impl WmState {
             None => return,
         };
         let sr = self.focused_rect();
-        let geoms = ws.tree.calculate_geometries(sr);
-        if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
-            tracing::debug!(focused, target, ?direction, "swap_direction");
-            if self.active_workspace_mut().tree.swap(focused, target) {
-                self.apply_layout();
-                self.fix_oversized_windows();
+        let geoms = ws.tree.calculate_geometries_with_gaps(
+            sr,
+            self.gap_inner,
+            self.gap_outer,
+            true,
+        );
+
+        // Check if the focused window touches the monitor edge in the
+        // requested direction. If so, skip intra-workspace swap and move
+        // to the adjacent monitor. This prevents the BSP spiral from
+        // trapping windows at the edge.
+        let at_edge = if let Some((_, rect)) = geoms.iter().find(|(w, _)| *w == focused) {
+            let tolerance = self.gap_outer + 2.0;
+            match direction {
+                Direction::Right => (rect.x + rect.width) >= (sr.x + sr.width - tolerance),
+                Direction::Left => rect.x <= (sr.x + tolerance),
+                Direction::Down => (rect.y + rect.height) >= (sr.y + sr.height - tolerance),
+                Direction::Up => rect.y <= (sr.y + tolerance),
             }
-            return;
+        } else {
+            false
+        };
+
+        if !at_edge {
+            if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
+                tracing::debug!(focused, target, ?direction, "swap_direction");
+                if self.active_workspace_mut().tree.swap(focused, target) {
+                    self.apply_layout();
+                    self.fix_oversized_windows();
+                }
+                return;
+            }
         }
 
-        // No adjacent window — move window to adjacent monitor
+        // At monitor edge or no adjacent window — move to adjacent monitor
         if self.monitors.len() <= 1 {
             return;
         }
