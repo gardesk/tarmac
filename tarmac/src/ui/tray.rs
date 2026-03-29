@@ -4,14 +4,17 @@ use std::sync::mpsc;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{
-    ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+    AnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    sel,
 };
 use objc2_app_kit::{
     NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength,
 };
-use objc2_foundation::{NSObject, NSString};
+use objc2_foundation::{NSData, NSObject, NSSize, NSString};
 
 use crate::core::workspace::WorkspaceTarget;
+
+const TRAY_ICON_BYTES: &[u8] = include_bytes!("../../assets/tray-icon.png");
 
 #[derive(Debug)]
 pub enum TrayAction {
@@ -153,15 +156,13 @@ impl Drop for TrayWidget {
 }
 
 fn tray_image() -> Option<Retained<NSImage>> {
-    // Use SF Symbol for a clean native menu bar icon.
-    // "airplane" is the landing plane glyph; fall back to grid if unavailable.
-    template_symbol("airplane").or_else(|| template_symbol("square.grid.2x2"))
-}
-
-fn template_symbol(symbol: &str) -> Option<Retained<NSImage>> {
-    let name = NSString::from_str(symbol);
-    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&name, None)?;
+    let data = unsafe {
+        NSData::dataWithBytes_length(TRAY_ICON_BYTES.as_ptr().cast(), TRAY_ICON_BYTES.len())
+    };
+    let image = NSImage::initWithData(NSImage::alloc(), &data)?;
     image.setTemplate(true);
+    // 36x36 px source at 2x retina = 18x18 pt (standard menu bar icon size)
+    image.setSize(NSSize::new(18.0, 18.0));
     Some(image)
 }
 
