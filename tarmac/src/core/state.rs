@@ -771,6 +771,8 @@ impl WmState {
     }
 
     pub fn swap_direction(&mut self, direction: super::tree::Direction) {
+        use super::tree::Direction;
+
         let ws = self.active_workspace();
         let focused = match ws.focused {
             Some(f) => f,
@@ -784,8 +786,25 @@ impl WmState {
                 self.apply_layout();
                 self.fix_oversized_windows();
             }
-        } else {
-            tracing::debug!(focused, ?direction, "swap: no adjacent window");
+            return;
+        }
+
+        // No adjacent window — move window to adjacent monitor
+        if self.monitors.len() <= 1 {
+            return;
+        }
+        let new_mi = match direction {
+            Direction::Right => {
+                super::monitor::next_index_nowrap(&self.monitors, self.focused_monitor)
+            }
+            Direction::Left => {
+                super::monitor::prev_index_nowrap(&self.monitors, self.focused_monitor)
+            }
+            _ => None,
+        };
+        if let Some(target_mi) = new_mi {
+            tracing::debug!(focused, monitor = target_mi, ?direction, "swap: moving to adjacent monitor");
+            self.move_window_to_monitor(target_mi);
         }
     }
 
