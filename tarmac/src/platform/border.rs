@@ -67,13 +67,21 @@ impl BorderManager {
     }
 
     /// Spawn ers with current settings. Kills any existing instance first.
+    /// Looks for ers next to the tarmac binary first, then falls back to PATH.
     pub fn spawn(&mut self) {
         self.kill();
         if !self.is_enabled() { return; }
 
+        let ers_bin = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("ers")))
+            .filter(|p| p.exists())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "ers".to_string());
+
         let cmd = format!(
-            "ers --active-only --width {} --radius {} --color '{}' --inactive '{}'",
-            self.border_width, self.radius,
+            "{} --active-only --width {} --radius {} --color '{}' --inactive '{}'",
+            ers_bin, self.border_width, self.radius,
             self.focused_color.to_hex(), self.unfocused_color.to_hex(),
         );
         tracing::debug!(cmd, "spawning ers");
