@@ -70,7 +70,9 @@ impl BorderManager {
     /// Looks for ers next to the tarmac binary first, then falls back to PATH.
     pub fn spawn(&mut self) {
         self.kill();
-        if !self.is_enabled() { return; }
+        if !self.is_enabled() {
+            return;
+        }
 
         let ers_bin = std::env::current_exe()
             .ok()
@@ -81,13 +83,20 @@ impl BorderManager {
 
         let cmd = format!(
             "{} --active-only --width {} --radius {} --color '{}' --inactive '{}'",
-            ers_bin, self.border_width, self.radius,
-            self.focused_color.to_hex(), self.unfocused_color.to_hex(),
+            ers_bin,
+            self.border_width,
+            self.radius,
+            self.focused_color.to_hex(),
+            self.unfocused_color.to_hex(),
         );
         tracing::debug!(cmd, "spawning ers");
         match Command::new("/bin/sh").args(["-c", &cmd]).spawn() {
-            Ok(child) => { self.child = Some(child); }
-            Err(e) => { tracing::warn!(err = %e, "failed to spawn ers"); }
+            Ok(child) => {
+                self.child = Some(child);
+            }
+            Err(e) => {
+                tracing::warn!(err = %e, "failed to spawn ers");
+            }
         }
     }
 
@@ -114,7 +123,8 @@ impl BorderManager {
         _old: Option<u32>,
         _new: Option<u32>,
         _get_rect: impl Fn(u32) -> Option<crate::core::tree::Rect>,
-    ) {}
+    ) {
+    }
 }
 
 impl Drop for BorderManager {

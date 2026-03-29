@@ -317,14 +317,18 @@ impl WmState {
         for (mi, monitor) in self.monitors.iter().enumerate() {
             let ws = self.workspaces.get(monitor.active_workspace);
             let sr = self.monitor_rect(mi);
-            let geoms = ws.tree.calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+            let geoms =
+                ws.tree
+                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
             let focused = ws.focused;
 
             for (wid, rect) in &geoms {
-                self.borders.update_border(*wid, *rect, focused == Some(*wid));
+                self.borders
+                    .update_border(*wid, *rect, focused == Some(*wid));
             }
             for fw in &ws.floating {
-                self.borders.update_border(fw.id, fw.geometry, focused == Some(fw.id));
+                self.borders
+                    .update_border(fw.id, fw.geometry, focused == Some(fw.id));
             }
         }
     }
@@ -711,33 +715,26 @@ impl WmState {
             let at_edge = if let Some((_, rect)) = geoms.iter().find(|(w, _)| *w == from) {
                 let tolerance = self.gap_outer + 2.0;
                 match direction {
-                    Direction::Right => {
-                        (rect.x + rect.width) >= (sr.x + sr.width - tolerance)
-                    }
+                    Direction::Right => (rect.x + rect.width) >= (sr.x + sr.width - tolerance),
                     Direction::Left => rect.x <= (sr.x + tolerance),
-                    Direction::Down => {
-                        (rect.y + rect.height) >= (sr.y + sr.height - tolerance)
-                    }
+                    Direction::Down => (rect.y + rect.height) >= (sr.y + sr.height - tolerance),
                     Direction::Up => rect.y <= (sr.y + tolerance),
                 }
             } else {
                 false
             };
 
-            if !at_edge {
-                if let Some(target) = Node::find_adjacent(&geoms, from, direction) {
-                    self.focus_window(target);
-                    if self.mouse_follows_focus
-                        && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
-                    {
-                        warp_mouse_to_center(rect);
-                        self.ffm_cooldown_until = Some(
-                            std::time::Instant::now() + std::time::Duration::from_millis(200),
-                        );
-                        self.ffm_last_window = Some(target);
-                    }
-                    return;
+            if !at_edge && let Some(target) = Node::find_adjacent(&geoms, from, direction) {
+                self.focus_window(target);
+                if self.mouse_follows_focus
+                    && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
+                {
+                    warp_mouse_to_center(rect);
+                    self.ffm_cooldown_until =
+                        Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+                    self.ffm_last_window = Some(target);
                 }
+                return;
             }
         }
 
@@ -801,12 +798,9 @@ impl WmState {
             None => return,
         };
         let sr = self.focused_rect();
-        let geoms = ws.tree.calculate_geometries_with_gaps(
-            sr,
-            self.gap_inner,
-            self.gap_outer,
-            true,
-        );
+        let geoms =
+            ws.tree
+                .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
 
         // Check if the focused window touches the monitor edge in the
         // requested direction. If so, skip intra-workspace swap and move
@@ -824,15 +818,13 @@ impl WmState {
             false
         };
 
-        if !at_edge {
-            if let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
-                tracing::debug!(focused, target, ?direction, "swap_direction");
-                if self.active_workspace_mut().tree.swap(focused, target) {
-                    self.apply_layout();
-                    self.fix_oversized_windows();
-                }
-                return;
+        if !at_edge && let Some(target) = Node::find_adjacent(&geoms, focused, direction) {
+            tracing::debug!(focused, target, ?direction, "swap_direction");
+            if self.active_workspace_mut().tree.swap(focused, target) {
+                self.apply_layout();
+                self.fix_oversized_windows();
             }
+            return;
         }
 
         // At monitor edge or no adjacent window — move to adjacent monitor
@@ -849,7 +841,12 @@ impl WmState {
             _ => None,
         };
         if let Some(target_mi) = new_mi {
-            tracing::debug!(focused, monitor = target_mi, ?direction, "swap: moving to adjacent monitor");
+            tracing::debug!(
+                focused,
+                monitor = target_mi,
+                ?direction,
+                "swap: moving to adjacent monitor"
+            );
             self.move_window_to_monitor(target_mi);
         }
     }
