@@ -16,7 +16,7 @@ use objc2_app_kit::{
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSIndexSet, NSInteger, NSNotification, NSObject, NSString};
 
-use crate::config::document::RuleRow;
+use crate::config::document::{KeybindRow, RuleRow};
 use crate::config::lua::{RuleMatchMode, RulePattern, WindowRule};
 
 const WIN_W: f64 = 920.0;
@@ -27,6 +27,24 @@ const RULE_COLUMN_NAME: &str = "name";
 const RULE_COLUMN_WHEN: &str = "when";
 const RULE_COLUMN_THEN: &str = "then";
 const RULE_COLUMN_SOURCE: &str = "source";
+const KEYBIND_COLUMN_SHORTCUT: &str = "shortcut";
+const KEYBIND_COLUMN_ACTION: &str = "action";
+const KEYBIND_COLUMN_SOURCE: &str = "source";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindDraft {
+    pub shortcut: String,
+    pub action: String,
+}
+
+impl KeybindDraft {
+    fn from_row(row: &KeybindRow) -> Self {
+        Self {
+            shortcut: row.shortcut.clone(),
+            action: row.action.clone(),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum SettingsAction {
@@ -40,7 +58,11 @@ pub enum SettingsAction {
     FocusFollowsMouse(bool),
     MouseFollowsFocus(bool),
     ModKey(String),
-    ApplyManagedKeybinds(String),
+    SelectKeybind(String),
+    AddKeybind,
+    DeleteKeybind(String),
+    UpdateKeybindDraft(KeybindDraft),
+    ApplyKeybind(String),
     ResetManagedKeybinds,
     SelectRule(String),
     AddRule,
@@ -65,12 +87,21 @@ pub struct SettingsSnapshot {
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
     pub mod_key: String,
-    pub keybinds_external_text: String,
-    pub keybinds_managed_text: String,
+    pub keybinds: Vec<KeybindRow>,
+    pub selected_keybind_id: Option<String>,
     pub rules: Vec<RuleRow>,
     pub selected_rule_id: Option<String>,
     pub workspaces_external_text: String,
     pub workspaces_managed_text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KeybindInspectorState {
+    editable: bool,
+    source_label: String,
+    can_delete: bool,
+    can_apply: bool,
+    draft: Option<KeybindDraft>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -85,6 +116,16 @@ struct RuleInspectorState {
     can_apply: bool,
     geometry_enabled: bool,
     rule: Option<WindowRule>,
+}
+
+struct KeybindingsUiRefs {
+    table: Retained<NSTableView>,
+    placeholder_label: Retained<NSTextField>,
+    source_value: Retained<NSTextField>,
+    shortcut_field: Retained<NSTextField>,
+    action_field: Retained<NSTextField>,
+    delete_button: Retained<NSButton>,
+    apply_button: Retained<NSButton>,
 }
 
 struct RulesUiRefs {
@@ -115,8 +156,12 @@ struct RulesUiRefs {
 
 struct SettingsHandlerIvars {
     tx: mpsc::Sender<SettingsAction>,
-    keybinds_editor: RefCell<Option<Retained<NSTextView>>>,
     workspaces_editor: RefCell<Option<Retained<NSTextView>>>,
+    keybind_rows: RefCell<Vec<KeybindRow>>,
+    selected_keybind_id: RefCell<Option<String>>,
+    draft_keybind: RefCell<Option<KeybindDraft>>,
+    suppress_keybind_selection_change: RefCell<bool>,
+    keybindings_ui: RefCell<Option<KeybindingsUiRefs>>,
     rule_rows: RefCell<Vec<RuleRow>>,
     selected_rule_id: RefCell<Option<String>>,
     draft_rule: RefCell<Option<WindowRule>>,
@@ -128,8 +173,12 @@ impl SettingsHandler {
     fn new(mtm: MainThreadMarker, tx: mpsc::Sender<SettingsAction>) -> Retained<Self> {
         let this = mtm.alloc().set_ivars(SettingsHandlerIvars {
             tx,
-            keybinds_editor: RefCell::new(None),
             workspaces_editor: RefCell::new(None),
+            keybind_rows: RefCell::new(Vec::new()),
+            selected_keybind_id: RefCell::new(None),
+            draft_keybind: RefCell::new(None),
+            suppress_keybind_selection_change: RefCell::new(false),
+            keybindings_ui: RefCell::new(None),
             rule_rows: RefCell::new(Vec::new()),
             selected_rule_id: RefCell::new(None),
             draft_rule: RefCell::new(None),
@@ -143,8 +192,8 @@ impl SettingsHandler {
         let _ = self.ivars().tx.send(action);
     }
 
-    fn set_keybinds_editor(&self, editor: Retained<NSTextView>) {
-        *self.ivars().keybinds_editor.borrow_mut() = Some(editor);
+    fn set_keybindings_ui(&self, ui: KeybindingsUiRefs) {
+        *self.ivars().keybindings_ui.borrow_mut() = Some(ui);
     }
 
     fn set_workspaces_editor(&self, editor: Retained<NSTextView>) {
@@ -153,6 +202,25 @@ impl SettingsHandler {
 
     fn set_rules_ui(&self, ui: RulesUiRefs) {
         *self.ivars().rules_ui.borrow_mut() = Some(ui);
+    }
+
+    fn load_keybinds(&self, rows: Vec<KeybindRow>, selected_keybind_id: Option<String>) {
+        let resolved_selection = if let Some(selected) = selected_keybind_id {
+            rows.iter().find(|row| row.id == selected).map(|_| selected)
+        } else {
+            None
+        };
+        let draft = resolved_selection
+            .as_deref()
+            .and_then(|id| rows.iter().find(|row| row.id == id))
+            .and_then(|row| row.editable.then(|| KeybindDraft::from_row(row)));
+
+        *self.ivars().keybind_rows.borrow_mut() = rows;
+        *self.ivars().selected_keybind_id.borrow_mut() = resolved_selection;
+        *self.ivars().draft_keybind.borrow_mut() = draft;
+
+        self.reload_keybind_table();
+        self.refresh_keybind_inspector();
     }
 
     fn load_rules(&self, rows: Vec<RuleRow>, selected_rule_id: Option<String>) {
@@ -174,6 +242,25 @@ impl SettingsHandler {
         self.refresh_rule_inspector();
     }
 
+    fn selected_keybind_row(&self) -> Option<KeybindRow> {
+        let selected = self.ivars().selected_keybind_id.borrow().clone()?;
+        self.ivars()
+            .keybind_rows
+            .borrow()
+            .iter()
+            .find(|row| row.id == selected)
+            .cloned()
+    }
+
+    fn selected_keybind_row_index(&self) -> Option<usize> {
+        let selected = self.ivars().selected_keybind_id.borrow().clone()?;
+        self.ivars()
+            .keybind_rows
+            .borrow()
+            .iter()
+            .position(|row| row.id == selected)
+    }
+
     fn selected_rule_row(&self) -> Option<RuleRow> {
         let selected = self.ivars().selected_rule_id.borrow().clone()?;
         self.ivars()
@@ -193,11 +280,41 @@ impl SettingsHandler {
             .position(|row| row.id == selected)
     }
 
+    fn current_keybind_inspector_state(&self) -> KeybindInspectorState {
+        let rows = self.ivars().keybind_rows.borrow().clone();
+        let selected_keybind_id = self.ivars().selected_keybind_id.borrow().clone();
+        let draft_keybind = self.ivars().draft_keybind.borrow().clone();
+        derive_keybind_inspector_state(
+            &rows,
+            selected_keybind_id.as_deref(),
+            draft_keybind.as_ref(),
+        )
+    }
+
     fn current_rule_inspector_state(&self) -> RuleInspectorState {
         let rows = self.ivars().rule_rows.borrow().clone();
         let selected_rule_id = self.ivars().selected_rule_id.borrow().clone();
         let draft_rule = self.ivars().draft_rule.borrow().clone();
         derive_rule_inspector_state(&rows, selected_rule_id.as_deref(), draft_rule.as_ref())
+    }
+
+    fn reload_keybind_table(&self) {
+        let selected_index = self.selected_keybind_row_index();
+        let ui_borrow = self.ivars().keybindings_ui.borrow();
+        let Some(ui) = ui_borrow.as_ref() else { return };
+        ui.table.reloadData();
+
+        *self.ivars().suppress_keybind_selection_change.borrow_mut() = true;
+        if let Some(index) = selected_index {
+            let indexes = NSIndexSet::indexSetWithIndex(index);
+            ui.table
+                .selectRowIndexes_byExtendingSelection(&indexes, false);
+        } else {
+            let empty = NSIndexSet::indexSet();
+            ui.table
+                .selectRowIndexes_byExtendingSelection(&empty, false);
+        }
+        *self.ivars().suppress_keybind_selection_change.borrow_mut() = false;
     }
 
     fn reload_rule_table(&self) {
@@ -219,11 +336,31 @@ impl SettingsHandler {
         *self.ivars().suppress_rule_selection_change.borrow_mut() = false;
     }
 
+    fn refresh_keybind_inspector(&self) {
+        let state = self.current_keybind_inspector_state();
+        let ui_borrow = self.ivars().keybindings_ui.borrow();
+        let Some(ui) = ui_borrow.as_ref() else { return };
+        apply_keybind_inspector_state(ui, &state);
+    }
+
     fn refresh_rule_inspector(&self) {
         let state = self.current_rule_inspector_state();
         let ui_borrow = self.ivars().rules_ui.borrow();
         let Some(ui) = ui_borrow.as_ref() else { return };
         apply_rule_inspector_state(ui, &state);
+    }
+
+    fn select_keybind_by_row_index(&self, row_index: usize, emit_action: bool) {
+        let Some(row) = self.ivars().keybind_rows.borrow().get(row_index).cloned() else {
+            return;
+        };
+        *self.ivars().selected_keybind_id.borrow_mut() = Some(row.id.clone());
+        *self.ivars().draft_keybind.borrow_mut() =
+            row.editable.then(|| KeybindDraft::from_row(&row));
+        self.refresh_keybind_inspector();
+        if emit_action {
+            self.emit(SettingsAction::SelectKeybind(row.id));
+        }
     }
 
     fn select_rule_by_row_index(&self, row_index: usize, emit_action: bool) {
@@ -235,6 +372,34 @@ impl SettingsHandler {
         self.refresh_rule_inspector();
         if emit_action {
             self.emit(SettingsAction::SelectRule(row.id));
+        }
+    }
+
+    fn sync_keybind_draft_from_controls(&self) -> Option<KeybindDraft> {
+        let row = self.selected_keybind_row()?;
+        if !row.editable {
+            return None;
+        }
+        let ui_borrow = self.ivars().keybindings_ui.borrow();
+        let ui = ui_borrow.as_ref()?;
+
+        let draft = KeybindDraft {
+            shortcut: ui
+                .shortcut_field
+                .stringValue()
+                .to_string()
+                .trim()
+                .to_string(),
+            action: ui.action_field.stringValue().to_string().trim().to_string(),
+        };
+        *self.ivars().draft_keybind.borrow_mut() = Some(draft.clone());
+        Some(draft)
+    }
+
+    fn emit_current_keybind_draft(&self) {
+        if let Some(draft) = self.sync_keybind_draft_from_controls() {
+            self.emit(SettingsAction::UpdateKeybindDraft(draft));
+            self.refresh_keybind_inspector();
         }
     }
 
@@ -432,14 +597,33 @@ define_class!(
             }
         }
 
-        #[unsafe(method(onApplyManagedKeybinds:))]
-        fn on_apply_managed_keybinds(&self, _sender: Option<&AnyObject>) {
-            let text = {
-                let editor = self.ivars().keybinds_editor.borrow();
-                let Some(editor) = editor.as_ref() else { return };
-                editor.string().to_string()
+        #[unsafe(method(onKeybindAdd:))]
+        fn on_keybind_add(&self, _sender: Option<&AnyObject>) {
+            self.emit(SettingsAction::AddKeybind);
+        }
+
+        #[unsafe(method(onKeybindDelete:))]
+        fn on_keybind_delete(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.ivars().selected_keybind_id.borrow().clone() else {
+                return;
             };
-            self.emit(SettingsAction::ApplyManagedKeybinds(text));
+            self.emit(SettingsAction::DeleteKeybind(id));
+        }
+
+        #[unsafe(method(onKeybindApply:))]
+        fn on_keybind_apply(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.ivars().selected_keybind_id.borrow().clone() else {
+                return;
+            };
+            if let Some(draft) = self.sync_keybind_draft_from_controls() {
+                self.emit(SettingsAction::UpdateKeybindDraft(draft));
+                self.emit(SettingsAction::ApplyKeybind(id));
+            }
+        }
+
+        #[unsafe(method(onKeybindDraftChanged:))]
+        fn on_keybind_draft_changed(&self, _sender: Option<&AnyObject>) {
+            self.emit_current_keybind_draft();
         }
 
         #[unsafe(method(onResetManagedKeybinds:))]
@@ -524,21 +708,31 @@ define_class!(
 
         #[unsafe(method(numberOfRowsInTableView:))]
         fn number_of_rows_in_table_view(&self, _table_view: &NSTableView) -> NSInteger {
-            self.ivars().rule_rows.borrow().len() as NSInteger
+            let keybind_count = self.ivars().keybindings_ui.borrow().as_ref().map_or(0, |ui| {
+                usize::from(std::ptr::eq(_table_view, &*ui.table))
+            });
+            if keybind_count == 1 {
+                return self.ivars().keybind_rows.borrow().len() as NSInteger;
+            }
+            let rule_count = self.ivars().rules_ui.borrow().as_ref().map_or(0, |ui| {
+                usize::from(std::ptr::eq(_table_view, &*ui.table))
+            });
+            if rule_count == 1 {
+                self.ivars().rule_rows.borrow().len() as NSInteger
+            } else {
+                0
+            }
         }
 
         #[unsafe(method(tableView:viewForTableColumn:row:))]
         fn table_view_view_for_table_column_row(
             &self,
-            _table_view: &NSTableView,
+            table_view: &NSTableView,
             table_column: Option<&NSTableColumn>,
             row: NSInteger,
         ) -> *mut NSView {
             let mtm = self.mtm();
             let Some(row) = usize::try_from(row).ok() else {
-                return std::ptr::null_mut();
-            };
-            let Some(row_data) = self.ivars().rule_rows.borrow().get(row).cloned() else {
                 return std::ptr::null_mut();
             };
             let Some(column) = table_column else {
@@ -552,6 +746,32 @@ define_class!(
             let container: Retained<NSView> =
                 unsafe { msg_send![NSView::alloc(mtm), initWithFrame: container_frame] };
 
+            if let Some(row_data) = self
+                .ivars()
+                .keybindings_ui
+                .borrow()
+                .as_ref()
+                .filter(|ui| std::ptr::eq(table_view, &*ui.table))
+                .and_then(|_| self.ivars().keybind_rows.borrow().get(row).cloned())
+            {
+                match identifier.as_str() {
+                    KEYBIND_COLUMN_SHORTCUT => {
+                        add_table_label(mtm, &container, &row_data.shortcut, width);
+                    }
+                    KEYBIND_COLUMN_ACTION => {
+                        add_table_label(mtm, &container, &row_data.action, width);
+                    }
+                    KEYBIND_COLUMN_SOURCE => {
+                        add_table_label(mtm, &container, row_data.source_label(), width);
+                    }
+                    _ => {}
+                }
+                return Retained::into_raw(container);
+            }
+
+            let Some(row_data) = self.ivars().rule_rows.borrow().get(row).cloned() else {
+                return std::ptr::null_mut();
+            };
             match identifier.as_str() {
                 RULE_COLUMN_ENABLED => {
                     let checkbox = add_rule_list_checkbox(
@@ -584,6 +804,34 @@ define_class!(
 
         #[unsafe(method(tableViewSelectionDidChange:))]
         fn table_view_selection_did_change(&self, _notification: &NSNotification) {
+            if !*self.ivars().suppress_keybind_selection_change.borrow() {
+                let selected_row = {
+                    let ui_borrow = self.ivars().keybindings_ui.borrow();
+                    match ui_borrow.as_ref() {
+                        Some(ui) => ui.table.selectedRow(),
+                        None => -1,
+                    }
+                };
+                if selected_row >= 0 {
+                    let row_index = selected_row as usize;
+                    let should_select = self
+                        .ivars()
+                        .keybind_rows
+                        .borrow()
+                        .get(row_index)
+                        .is_some_and(|row| {
+                            self.ivars()
+                                .selected_keybind_id
+                                .borrow()
+                                .as_deref()
+                                != Some(row.id.as_str())
+                        });
+                    if should_select {
+                        self.select_keybind_by_row_index(row_index, true);
+                    }
+                }
+            }
+
             if *self.ivars().suppress_rule_selection_change.borrow() {
                 return;
             }
@@ -620,8 +868,6 @@ pub struct SettingsWindow {
     bar_height_label: Retained<NSTextField>,
     border_width_label: Retained<NSTextField>,
     border_radius_label: Retained<NSTextField>,
-    keybinds_external: Retained<NSTextView>,
-    keybinds_editor: Retained<NSTextView>,
     workspaces_external: Retained<NSTextView>,
     workspaces_editor: Retained<NSTextView>,
 }
@@ -657,18 +903,8 @@ impl SettingsWindow {
         tab_controller.setTabStyle(NSTabViewControllerTabStyle::Toolbar);
 
         let general = build_general_view(mtm, &handler);
-        let keybindings = build_editor_tab(
-            mtm,
-            &handler,
-            "Current non-managed rows are shown above. Edit the managed block below using `key_spec | action` per line.",
-            "Read-only rows (effective config)",
-            "Managed rows",
-            Some(sel!(onApplyManagedKeybinds:)),
-            Some(sel!(onResetManagedKeybinds:)),
-            "Apply",
-            "Reset Defaults",
-        );
-        handler.set_keybinds_editor(keybindings.editor.clone());
+        let keybindings = build_keybindings_tab(mtm, &handler);
+        handler.set_keybindings_ui(keybindings.ui);
 
         let rules = build_rules_tab(mtm, &handler);
         handler.set_rules_ui(rules.ui);
@@ -734,8 +970,6 @@ impl SettingsWindow {
             bar_height_label: general.bar_height_label,
             border_width_label: general.border_width_label,
             border_radius_label: general.border_radius_label,
-            keybinds_external: keybindings.read_only,
-            keybinds_editor: keybindings.editor,
             workspaces_external: workspaces.read_only,
             workspaces_editor: workspaces.editor,
         }
@@ -776,8 +1010,10 @@ impl SettingsWindow {
                 "control" => 2,
                 _ => 0,
             });
-        set_text_view(&self.keybinds_external, &snapshot.keybinds_external_text);
-        set_text_view(&self.keybinds_editor, &snapshot.keybinds_managed_text);
+        self.handler.load_keybinds(
+            snapshot.keybinds.clone(),
+            snapshot.selected_keybind_id.clone(),
+        );
         self.handler
             .load_rules(snapshot.rules.clone(), snapshot.selected_rule_id.clone());
         set_text_view(
@@ -838,6 +1074,11 @@ struct EditorTab {
 struct RulesTab {
     root: Retained<NSView>,
     ui: RulesUiRefs,
+}
+
+struct KeybindingsTab {
+    root: Retained<NSView>,
+    ui: KeybindingsUiRefs,
 }
 
 fn add_tab(
@@ -1097,6 +1338,192 @@ fn build_editor_tab(
         root,
         read_only,
         editor,
+    }
+}
+
+fn build_keybindings_tab(mtm: MainThreadMarker, handler: &SettingsHandler) -> KeybindingsTab {
+    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(WIN_W, WIN_H));
+    let root: Retained<NSView> = unsafe { msg_send![NSView::alloc(mtm), initWithFrame: frame] };
+
+    let split: Retained<NSSplitView> =
+        unsafe { msg_send![NSSplitView::alloc(mtm), initWithFrame: frame] };
+    split.setVertical(true);
+    split.setDividerStyle(NSSplitViewDividerStyle::Thin);
+    split.setAutosaveName(Some(&NSString::from_str("TarmacKeybindingsSplitView")));
+
+    let left_width = 332.0;
+    let left_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(left_width, WIN_H));
+    let right_frame = CGRect::new(
+        CGPoint::new(left_width + 1.0, 0.0),
+        CGSize::new(WIN_W - left_width - 1.0, WIN_H),
+    );
+    let left: Retained<NSView> =
+        unsafe { msg_send![NSView::alloc(mtm), initWithFrame: left_frame] };
+    let right: Retained<NSView> =
+        unsafe { msg_send![NSView::alloc(mtm), initWithFrame: right_frame] };
+
+    add_section_label(mtm, &left, "Keybindings", 24.0, WIN_H - 46.0);
+    add_wrapped_label(
+        mtm,
+        &left,
+        "Managed keybindings are editable. Lua-authored and default bindings stay visible here, but open read-only in the inspector.",
+        24.0,
+        WIN_H - 76.0,
+        left_width - 48.0,
+        38.0,
+    );
+
+    let table_scroll_frame = CGRect::new(
+        CGPoint::new(20.0, 96.0),
+        CGSize::new(left_width - 40.0, WIN_H - 176.0),
+    );
+    let table_scroll: Retained<NSScrollView> =
+        unsafe { msg_send![NSScrollView::alloc(mtm), initWithFrame: table_scroll_frame] };
+    table_scroll.setHasVerticalScroller(true);
+    table_scroll.setBorderType(objc2_app_kit::NSBorderType(2));
+
+    let table_frame = CGRect::new(
+        CGPoint::new(0.0, 0.0),
+        CGSize::new(left_width - 40.0, WIN_H - 176.0),
+    );
+    let table: Retained<NSTableView> =
+        unsafe { msg_send![NSTableView::alloc(mtm), initWithFrame: table_frame] };
+    table.setUsesAlternatingRowBackgroundColors(true);
+    table.setAllowsEmptySelection(true);
+    table.setColumnAutoresizingStyle(
+        objc2_app_kit::NSTableViewColumnAutoresizingStyle::SequentialColumnAutoresizingStyle,
+    );
+    table.setStyle(NSTableViewStyle::Inset);
+    table.setRowSizeStyle(NSTableViewRowSizeStyle::Medium);
+    table.setRowHeight(28.0);
+    table.setIntercellSpacing(CGSize::new(8.0, 4.0));
+
+    add_keybind_table_column(mtm, &table, KEYBIND_COLUMN_SHORTCUT, "Shortcut", 134.0);
+    add_keybind_table_column(mtm, &table, KEYBIND_COLUMN_ACTION, "Action", 184.0);
+    add_keybind_table_column(mtm, &table, KEYBIND_COLUMN_SOURCE, "Source", 72.0);
+
+    unsafe {
+        let _: () = msg_send![&*table, setDataSource: handler];
+        let _: () = msg_send![&*table, setDelegate: handler];
+    }
+
+    table_scroll.setDocumentView(Some(&table));
+    left.addSubview(&table_scroll);
+
+    let add_keybind_button = add_button(
+        mtm,
+        &left,
+        handler,
+        "Add",
+        20.0,
+        34.0,
+        62.0,
+        sel!(onKeybindAdd:),
+    );
+    let delete_button = add_button(
+        mtm,
+        &left,
+        handler,
+        "Delete",
+        90.0,
+        34.0,
+        72.0,
+        sel!(onKeybindDelete:),
+    );
+    let reset_keybinds_button = add_button(
+        mtm,
+        &left,
+        handler,
+        "Reset Defaults",
+        170.0,
+        34.0,
+        122.0,
+        sel!(onResetManagedKeybinds:),
+    );
+    let _ = add_keybind_button;
+    let _ = reset_keybinds_button;
+
+    add_section_label(mtm, &right, "Keybinding Inspector", 28.0, WIN_H - 46.0);
+    let placeholder_label = add_wrapped_label_field(
+        mtm,
+        &right,
+        "Select a keybinding to inspect. Managed keybindings can be edited here and applied back into the managed config block.",
+        28.0,
+        WIN_H - 122.0,
+        460.0,
+        44.0,
+    );
+
+    let mut y = WIN_H - 96.0;
+    add_section_label(mtm, &right, "General", 28.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Source", 28.0, y);
+    let source_value = add_value_label(mtm, &right, "", 198.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Shortcut", 28.0, y);
+    let shortcut_field = add_input_field(
+        mtm,
+        &right,
+        handler,
+        198.0,
+        y - 3.0,
+        250.0,
+        "mod+shift+period",
+        sel!(onKeybindDraftChanged:),
+    );
+
+    y -= 56.0;
+    add_section_label(mtm, &right, "Action", 28.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Command", 28.0, y);
+    let action_field = add_input_field(
+        mtm,
+        &right,
+        handler,
+        198.0,
+        y - 3.0,
+        250.0,
+        "reload",
+        sel!(onKeybindDraftChanged:),
+    );
+    add_wrapped_label(
+        mtm,
+        &right,
+        "Use the same action strings as Lua, for example `focus left`, `workspace 3`, `move_to_workspace W`, or `toggle_special terminal`.",
+        28.0,
+        y - 54.0,
+        460.0,
+        44.0,
+    );
+
+    let apply_button = add_button(
+        mtm,
+        &right,
+        handler,
+        "Apply Keybinding",
+        right_frame.size.width - 182.0,
+        34.0,
+        142.0,
+        sel!(onKeybindApply:),
+    );
+
+    split.addSubview(&left);
+    split.addSubview(&right);
+    split.adjustSubviews();
+    split.setPosition_ofDividerAtIndex(left_width, 0);
+    root.addSubview(&split);
+
+    KeybindingsTab {
+        root,
+        ui: KeybindingsUiRefs {
+            table,
+            placeholder_label,
+            source_value,
+            shortcut_field,
+            action_field,
+            delete_button,
+            apply_button,
+        },
     }
 }
 
@@ -1459,6 +1886,71 @@ fn build_rules_tab(mtm: MainThreadMarker, handler: &SettingsHandler) -> RulesTab
     }
 }
 
+fn derive_keybind_inspector_state(
+    rows: &[KeybindRow],
+    selected_keybind_id: Option<&str>,
+    draft_keybind: Option<&KeybindDraft>,
+) -> KeybindInspectorState {
+    let Some(selected_keybind_id) = selected_keybind_id else {
+        return KeybindInspectorState {
+            editable: false,
+            source_label: String::new(),
+            can_delete: false,
+            can_apply: false,
+            draft: None,
+        };
+    };
+
+    let Some(row) = rows.iter().find(|row| row.id == selected_keybind_id) else {
+        return KeybindInspectorState {
+            editable: false,
+            source_label: String::new(),
+            can_delete: false,
+            can_apply: false,
+            draft: None,
+        };
+    };
+
+    KeybindInspectorState {
+        editable: row.editable,
+        source_label: row.source_label().to_string(),
+        can_delete: row.editable,
+        can_apply: row.editable,
+        draft: if row.editable {
+            draft_keybind
+                .cloned()
+                .or_else(|| Some(KeybindDraft::from_row(row)))
+        } else {
+            Some(KeybindDraft::from_row(row))
+        },
+    }
+}
+
+fn apply_keybind_inspector_state(ui: &KeybindingsUiRefs, state: &KeybindInspectorState) {
+    let show_placeholder = state.draft.is_none();
+    ui.placeholder_label.setHidden(!show_placeholder);
+    ui.source_value
+        .setStringValue(&NSString::from_str(&state.source_label));
+    ui.delete_button.setEnabled(state.can_delete);
+    ui.apply_button.setEnabled(state.can_apply);
+
+    let Some(draft) = state.draft.as_ref() else {
+        set_text_field_value(&ui.shortcut_field, "");
+        set_text_field_value(&ui.action_field, "");
+        set_keybind_inspector_enabled(ui, false);
+        return;
+    };
+
+    set_text_field_value(&ui.shortcut_field, &draft.shortcut);
+    set_text_field_value(&ui.action_field, &draft.action);
+    set_keybind_inspector_enabled(ui, state.editable);
+}
+
+fn set_keybind_inspector_enabled(ui: &KeybindingsUiRefs, editable: bool) {
+    ui.shortcut_field.setEnabled(editable);
+    ui.action_field.setEnabled(editable);
+}
+
 fn build_about_view(mtm: MainThreadMarker) -> Retained<NSView> {
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(WIN_W, WIN_H));
     let view: Retained<NSView> = unsafe { msg_send![NSView::alloc(mtm), initWithFrame: frame] };
@@ -1663,6 +2155,22 @@ fn set_rule_inspector_enabled(ui: &RulesUiRefs, editable: bool, geometry_enabled
         .setEnabled(editable && geometry_enabled);
     ui.geometry_height_field
         .setEnabled(editable && geometry_enabled);
+}
+
+fn add_keybind_table_column(
+    mtm: MainThreadMarker,
+    table: &NSTableView,
+    identifier: &str,
+    title: &str,
+    width: CGFloat,
+) {
+    let identifier = NSString::from_str(identifier);
+    let column: Retained<NSTableColumn> =
+        unsafe { msg_send![NSTableColumn::alloc(mtm), initWithIdentifier: &*identifier] };
+    column.setTitle(&NSString::from_str(title));
+    column.setWidth(width);
+    column.setMinWidth(width.min(180.0));
+    table.addTableColumn(&column);
 }
 
 fn add_rule_table_column(
@@ -2109,6 +2617,8 @@ fn format_number_field(value: f64) -> String {
 mod tests {
     use super::*;
     use crate::config::document::ConfigSource;
+    use crate::config::lua::LuaKeybind;
+    use crate::core::input::{Action, Key, Modifiers};
 
     fn managed_row(id: &str, geometry: Option<(f64, f64, f64, f64)>) -> RuleRow {
         RuleRow {
@@ -2127,6 +2637,36 @@ mod tests {
                 floating: None,
                 workspace: None,
                 geometry,
+            },
+        }
+    }
+
+    fn managed_keybind_row(id: &str) -> KeybindRow {
+        KeybindRow {
+            id: id.to_string(),
+            shortcut: "mod+shift+period".to_string(),
+            action: "reload".to_string(),
+            source: ConfigSource::Managed,
+            editable: true,
+            keybind: LuaKeybind {
+                modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
+                key: Key::Period,
+                action: Action::Reload,
+            },
+        }
+    }
+
+    fn external_keybind_row(id: &str, source: ConfigSource) -> KeybindRow {
+        KeybindRow {
+            id: id.to_string(),
+            shortcut: "mod+return".to_string(),
+            action: "spawn_terminal".to_string(),
+            source,
+            editable: false,
+            keybind: LuaKeybind {
+                modifiers: Modifiers::COMMAND,
+                key: Key::Return,
+                action: Action::SpawnTerminal,
             },
         }
     }
@@ -2180,5 +2720,40 @@ mod tests {
         let state = derive_rule_inspector_state(&rows, Some("rule_001"), Some(&draft));
         assert!(state.geometry_enabled);
         assert_eq!(state.rule.expect("rule missing").geometry, draft.geometry);
+    }
+
+    #[test]
+    fn selecting_external_keybind_is_read_only() {
+        let rows = vec![
+            managed_keybind_row("managed:0"),
+            external_keybind_row("default:0", ConfigSource::Default),
+        ];
+        let state = derive_keybind_inspector_state(&rows, Some("default:0"), None);
+        assert!(!state.editable);
+        assert!(!state.can_apply);
+        assert_eq!(state.source_label, "Default");
+    }
+
+    #[test]
+    fn selecting_managed_keybind_is_editable() {
+        let rows = vec![
+            managed_keybind_row("managed:0"),
+            external_keybind_row("lua:0", ConfigSource::Lua),
+        ];
+        let state = derive_keybind_inspector_state(&rows, Some("managed:0"), None);
+        assert!(state.editable);
+        assert!(state.can_apply);
+        assert_eq!(state.source_label, "Managed");
+    }
+
+    #[test]
+    fn keybind_draft_prefers_local_edits() {
+        let rows = vec![managed_keybind_row("managed:0")];
+        let draft = KeybindDraft {
+            shortcut: "mod+shift+comma".to_string(),
+            action: "exit".to_string(),
+        };
+        let state = derive_keybind_inspector_state(&rows, Some("managed:0"), Some(&draft));
+        assert_eq!(state.draft, Some(draft));
     }
 }

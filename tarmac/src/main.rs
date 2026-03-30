@@ -2,9 +2,9 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
 
-use tarmac::config::document::{ConfigSource, ManagedConfigDocument, RuleRow};
-use tarmac::config::lua::WindowRule;
-use tarmac::core::input::Action;
+use tarmac::config::document::{KeybindRow, ManagedConfigDocument, RuleRow};
+use tarmac::config::lua::{LuaKeybind, WindowRule};
+use tarmac::core::input::{Action, Key, Modifiers};
 use tarmac::core::state::WmState;
 use tarmac::core::workspace::WorkspaceTarget;
 use tarmac::platform::event_tap::EventTap;
@@ -23,6 +23,7 @@ thread_local! {
     static CONFIG_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
     static TRAY: RefCell<Option<tarmac::ui::tray::TrayWidget>> = const { RefCell::new(None) };
     static SETTINGS_WIN: RefCell<Option<tarmac::ui::settings::SettingsWindow>> = const { RefCell::new(None) };
+    static SETTINGS_SELECTED_KEYBIND_ID: RefCell<Option<String>> = const { RefCell::new(None) };
     static SETTINGS_SELECTED_RULE_ID: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -937,42 +938,12 @@ fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
     let path = CONFIG_PATH.with(|p| p.borrow().clone())?;
     let doc = ManagedConfigDocument::load(&path).ok()?;
     let mod_key = doc.managed.settings.mod_key;
-
-    let keybinds_external_text = doc
-        .effective
-        .keybinds
-        .iter()
-        .filter(|keybind| !doc.managed.keybinds.contains(*keybind))
-        .map(|keybind| {
-            let source = if tarmac::config::lua::default_keybinds(&doc.effective.settings)
-                .contains(keybind)
-            {
-                ConfigSource::Default
-            } else {
-                ConfigSource::Lua
-            };
-            format!(
-                "[{}] {} | {}",
-                source.as_str(),
-                tarmac::config::lua::format_key_spec(keybind.modifiers, keybind.key, mod_key),
-                tarmac::config::lua::format_action(&keybind.action)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let keybinds_managed_text = doc
-        .managed
-        .keybinds
-        .iter()
-        .map(|keybind| {
-            format!(
-                "{} | {}",
-                tarmac::config::lua::format_key_spec(keybind.modifiers, keybind.key, mod_key),
-                tarmac::config::lua::format_action(&keybind.action)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    let keybinds = doc.keybind_rows(mod_key);
+    let previous_selected_keybind_id =
+        SETTINGS_SELECTED_KEYBIND_ID.with(|slot| slot.borrow().clone());
+    let selected_keybind_id =
+        resolve_selected_keybind_id(&keybinds, previous_selected_keybind_id.as_deref());
+    SETTINGS_SELECTED_KEYBIND_ID.with(|slot| *slot.borrow_mut() = selected_keybind_id.clone());
 
     let rules = doc.rule_rows();
     let previous_selected_rule_id = SETTINGS_SELECTED_RULE_ID.with(|slot| slot.borrow().clone());
@@ -997,13 +968,37 @@ fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
             mods if mods == tarmac::core::input::Modifiers::CONTROL => "control".to_string(),
             _ => "command".to_string(),
         },
-        keybinds_external_text,
-        keybinds_managed_text,
+        keybinds,
+        selected_keybind_id,
         rules,
         selected_rule_id,
         workspaces_external_text,
         workspaces_managed_text,
     })
+}
+
+fn resolve_selected_keybind_id(rows: &[KeybindRow], preferred_id: Option<&str>) -> Option<String> {
+    if let Some(preferred_id) = preferred_id
+        && rows.iter().any(|row| row.id == preferred_id)
+    {
+        return Some(preferred_id.to_string());
+    }
+
+    rows.iter()
+        .find(|row| row.editable)
+        .or_else(|| rows.first())
+        .map(|row| row.id.clone())
+}
+
+fn fallback_selected_keybind_after_delete(rows: &[KeybindRow], deleted_id: &str) -> Option<String> {
+    let deleted_index = rows.iter().position(|row| row.id == deleted_id)?;
+    rows.get(deleted_index + 1)
+        .or_else(|| {
+            deleted_index
+                .checked_sub(1)
+                .and_then(|index| rows.get(index))
+        })
+        .map(|row| row.id.clone())
 }
 
 fn resolve_selected_rule_id(rows: &[RuleRow], preferred_id: Option<&str>) -> Option<String> {
@@ -1104,6 +1099,98 @@ fn managed_rule_index(rules: &[WindowRule], target_id: &str) -> Option<usize> {
         .enumerate()
         .find(|(index, rule)| rule.effective_id(*index) == target_id)
         .map(|(index, _)| index)
+}
+
+fn managed_keybind_index(keybinds: &[LuaKeybind], target_id: &str) -> Option<usize> {
+    let index = target_id.strip_prefix("managed:")?.parse::<usize>().ok()?;
+    (index < keybinds.len()).then_some(index)
+}
+
+fn keybind_shortcut_conflicts(keybinds: &[LuaKeybind], modifiers: Modifiers, key: Key) -> bool {
+    keybinds
+        .iter()
+        .any(|keybind| keybind.modifiers == modifiers && keybind.key == key)
+}
+
+fn default_managed_keybind(keybinds: &[LuaKeybind], mod_key: Modifiers) -> LuaKeybind {
+    for key in [
+        Key::Period,
+        Key::Comma,
+        Key::Equal,
+        Key::Minus,
+        Key::Grave,
+        Key::Num0,
+        Key::Num1,
+        Key::Num2,
+        Key::Num3,
+        Key::Num4,
+        Key::Num5,
+        Key::Num6,
+        Key::Num7,
+        Key::Num8,
+        Key::Num9,
+        Key::A,
+        Key::B,
+        Key::C,
+        Key::D,
+        Key::F,
+        Key::G,
+        Key::I,
+        Key::M,
+        Key::N,
+        Key::O,
+        Key::P,
+        Key::R,
+        Key::S,
+        Key::T,
+        Key::U,
+        Key::V,
+        Key::W,
+        Key::X,
+        Key::Y,
+        Key::Z,
+    ] {
+        let modifiers = mod_key | Modifiers::SHIFT;
+        if !keybind_shortcut_conflicts(keybinds, modifiers, key) {
+            return LuaKeybind {
+                modifiers,
+                key,
+                action: Action::Reload,
+            };
+        }
+    }
+
+    LuaKeybind {
+        modifiers: mod_key | Modifiers::SHIFT,
+        key: Key::Period,
+        action: Action::Reload,
+    }
+}
+
+fn add_managed_keybind(keybinds: &mut Vec<LuaKeybind>, mod_key: Modifiers) -> String {
+    let keybind = default_managed_keybind(keybinds, mod_key);
+    keybinds.push(keybind);
+    format!("managed:{}", keybinds.len() - 1)
+}
+
+fn delete_managed_keybind(keybinds: &mut Vec<LuaKeybind>, target_id: &str) -> bool {
+    let Some(index) = managed_keybind_index(keybinds, target_id) else {
+        return false;
+    };
+    keybinds.remove(index);
+    true
+}
+
+fn replace_managed_keybind(
+    keybinds: &mut [LuaKeybind],
+    target_id: &str,
+    replacement: LuaKeybind,
+) -> bool {
+    let Some(index) = managed_keybind_index(keybinds, target_id) else {
+        return false;
+    };
+    keybinds[index] = replacement;
+    true
 }
 
 fn next_managed_rule_id(rules: &[WindowRule]) -> String {
@@ -1229,6 +1316,7 @@ fn poll_settings_actions() {
 
         let mut should_write = false;
         let mut should_refresh = false;
+        let mut pending_keybind_draft = None;
         let mut pending_rule_draft = None;
         for action in actions {
             match action {
@@ -1276,12 +1364,55 @@ fn poll_settings_actions() {
                     };
                     should_write = true;
                 }
-                SettingsAction::ApplyManagedKeybinds(text) => {
-                    if let Ok(keybinds) =
-                        parse_managed_keybinds(&text, doc.managed.settings.mod_key)
-                    {
-                        doc.managed.keybinds = keybinds;
+                SettingsAction::SelectKeybind(id) => {
+                    SETTINGS_SELECTED_KEYBIND_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                    should_refresh = true;
+                }
+                SettingsAction::AddKeybind => {
+                    let id = add_managed_keybind(
+                        &mut doc.managed.keybinds,
+                        doc.managed.settings.mod_key,
+                    );
+                    SETTINGS_SELECTED_KEYBIND_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                    should_write = true;
+                }
+                SettingsAction::DeleteKeybind(id) => {
+                    let fallback_id = fallback_selected_keybind_after_delete(
+                        &doc.keybind_rows(doc.managed.settings.mod_key),
+                        &id,
+                    );
+                    if delete_managed_keybind(&mut doc.managed.keybinds, &id) {
+                        SETTINGS_SELECTED_KEYBIND_ID.with(|slot| *slot.borrow_mut() = fallback_id);
                         should_write = true;
+                    }
+                }
+                SettingsAction::UpdateKeybindDraft(draft) => {
+                    pending_keybind_draft = Some(draft);
+                }
+                SettingsAction::ApplyKeybind(id) => {
+                    if let Some(draft) = pending_keybind_draft.take() {
+                        match tarmac::config::lua::parse_keybind(
+                            &draft.shortcut,
+                            &draft.action,
+                            doc.managed.settings.mod_key,
+                        ) {
+                            Ok(keybind) => {
+                                if replace_managed_keybind(&mut doc.managed.keybinds, &id, keybind)
+                                {
+                                    SETTINGS_SELECTED_KEYBIND_ID
+                                        .with(|slot| *slot.borrow_mut() = Some(id));
+                                    should_write = true;
+                                }
+                            }
+                            Err(err) => {
+                                tracing::warn!(
+                                    shortcut = draft.shortcut,
+                                    action = draft.action,
+                                    err,
+                                    "failed to parse managed keybind"
+                                );
+                            }
+                        }
                     }
                 }
                 SettingsAction::ResetManagedKeybinds => {
@@ -1357,29 +1488,6 @@ fn poll_settings_actions() {
             refresh_settings_window();
         }
     });
-}
-
-fn parse_managed_keybinds(
-    text: &str,
-    mod_key: tarmac::core::input::Modifiers,
-) -> Result<Vec<tarmac::config::lua::LuaKeybind>, String> {
-    let mod_key_name = match mod_key {
-        mods if mods == tarmac::core::input::Modifiers::OPTION => "option",
-        mods if mods == tarmac::core::input::Modifiers::CONTROL => "control",
-        _ => "command",
-    };
-    let mut source = format!("gar.set(\"mod_key\", \"{}\")\n", mod_key_name);
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Some((key_spec, action)) = line.split_once('|') else {
-            return Err(format!("invalid keybind line: {line}"));
-        };
-        source.push_str(&format!(
-            "gar.bind({}, {})\n",
-            tarmac::config::lua::lua_string(key_spec.trim()),
-            tarmac::config::lua::lua_string(action.trim())
-        ));
-    }
-    Ok(tarmac::config::lua::load_config_from_source(&source, "managed-keybinds").keybinds)
 }
 
 fn parse_managed_workspaces(
@@ -1491,6 +1599,29 @@ mod tests {
     use super::*;
     use tarmac::config::document::ConfigSource;
 
+    fn sample_keybind(key: Key) -> LuaKeybind {
+        LuaKeybind {
+            modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
+            key,
+            action: Action::Reload,
+        }
+    }
+
+    fn sample_keybind_row(id: &str, editable: bool) -> KeybindRow {
+        KeybindRow {
+            id: id.to_string(),
+            shortcut: "mod+shift+period".to_string(),
+            action: "reload".to_string(),
+            source: if editable {
+                ConfigSource::Managed
+            } else {
+                ConfigSource::Lua
+            },
+            editable,
+            keybind: sample_keybind(Key::Period),
+        }
+    }
+
     fn sample_rule(id: &str, name: &str) -> WindowRule {
         WindowRule {
             id: Some(id.to_string()),
@@ -1518,6 +1649,50 @@ mod tests {
             editable,
             rule: sample_rule(id, id),
         }
+    }
+
+    #[test]
+    fn add_keybind_uses_unique_shortcut() {
+        let mut keybinds = vec![sample_keybind(Key::Period)];
+        let id = add_managed_keybind(&mut keybinds, Modifiers::COMMAND);
+        assert_eq!(id, "managed:1");
+        assert_eq!(keybinds.len(), 2);
+        assert_ne!(keybinds[0].key, keybinds[1].key);
+        assert_eq!(keybinds[1].action, Action::Reload);
+    }
+
+    #[test]
+    fn delete_keybind_selection_falls_forward_then_backward() {
+        let rows = vec![
+            sample_keybind_row("managed:0", true),
+            sample_keybind_row("managed:1", true),
+            sample_keybind_row("lua:0", false),
+        ];
+        assert_eq!(
+            fallback_selected_keybind_after_delete(&rows, "managed:0").as_deref(),
+            Some("managed:1")
+        );
+        assert_eq!(
+            fallback_selected_keybind_after_delete(&rows, "lua:0").as_deref(),
+            Some("managed:1")
+        );
+    }
+
+    #[test]
+    fn resolve_selected_keybind_prefers_existing_then_first_managed() {
+        let rows = vec![
+            sample_keybind_row("lua:0", false),
+            sample_keybind_row("managed:0", true),
+            sample_keybind_row("managed:1", true),
+        ];
+        assert_eq!(
+            resolve_selected_keybind_id(&rows, Some("managed:1")).as_deref(),
+            Some("managed:1")
+        );
+        assert_eq!(
+            resolve_selected_keybind_id(&rows, Some("missing")).as_deref(),
+            Some("managed:0")
+        );
     }
 
     #[test]
