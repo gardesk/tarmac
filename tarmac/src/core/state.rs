@@ -17,7 +17,7 @@ use crate::platform::observer::{AppObserver, WindowEvent};
 
 use super::tree::{Node, Rect};
 use super::window::{WindowId, WindowRegistry, WindowState};
-use super::workspace::WorkspaceManager;
+use super::workspace::{WorkspaceDefinition, WorkspaceManager, WorkspaceTarget};
 
 struct QueuedEvent {
     event: WindowEvent,
@@ -62,6 +62,8 @@ pub struct WmState {
     active_specials: Vec<Option<usize>>,
     /// Overlay sizing config per special workspace name.
     pub special_configs: Vec<crate::config::lua::SpecialWorkspaceConfig>,
+    /// User-configured workspace metadata and definitions.
+    pub workspace_defs: Vec<WorkspaceDefinition>,
     /// Border overlay manager for focused/unfocused window borders.
     pub borders: crate::platform::border::BorderManager,
 }
@@ -93,6 +95,7 @@ impl WmState {
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
+            workspace_defs: crate::config::lua::default_workspace_definitions(),
             borders: crate::platform::border::BorderManager::new(),
         }
     }
@@ -123,6 +126,53 @@ impl WmState {
     pub fn active_workspace_mut(&mut self) -> &mut super::workspace::Workspace {
         let idx = self.active_ws_idx();
         self.workspaces.get_mut(idx)
+    }
+
+    pub fn set_workspace_defs(&mut self, defs: Vec<WorkspaceDefinition>) {
+        self.workspace_defs = defs;
+        self.workspace_defs.sort_by_key(|def| def.id.to_string());
+        self.workspace_defs.dedup_by(|a, b| a.id == b.id);
+        self.ensure_defined_workspaces();
+    }
+
+    fn ensure_defined_workspaces(&mut self) {
+        for def in &self.workspace_defs {
+            self.workspaces.get_or_create_by_id(def.id.clone());
+        }
+    }
+
+    pub fn workspace_prefs(
+        &self,
+        ws_idx: usize,
+    ) -> Option<&crate::core::workspace::WorkspacePrefs> {
+        let id = &self.workspaces.get(ws_idx).id;
+        self.workspace_defs
+            .iter()
+            .find(|def| &def.id == id)
+            .map(|def| &def.prefs)
+    }
+
+    pub fn workspace_gaps(&self, ws_idx: usize) -> (f64, f64) {
+        if let Some(prefs) = self.workspace_prefs(ws_idx) {
+            (
+                prefs.gap_inner.unwrap_or(self.gap_inner),
+                prefs.gap_outer.unwrap_or(self.gap_outer),
+            )
+        } else {
+            (self.gap_inner, self.gap_outer)
+        }
+    }
+
+    fn workspace_index_for_target(&mut self, target: &WorkspaceTarget) -> usize {
+        self.workspaces.get_or_create_target(target)
+    }
+
+    fn preferred_monitor_for_workspace(&self, ws_idx: usize) -> Option<usize> {
+        let prefs = self.workspace_prefs(ws_idx)?;
+        let display_id = prefs.monitor.as_ref()?.display_id;
+        self.monitors
+            .iter()
+            .position(|monitor| monitor.id == display_id)
     }
 
     /// Usable frame for a monitor, adjusted for bar_height.
@@ -183,26 +233,50 @@ impl WmState {
             "focused monitor set to cursor location"
         );
 
-        // Assign workspaces: cursor's monitor gets workspace 0 (ws1),
-        // then remaining monitors get 1, 2, etc. in left-to-right order.
-        let mut ws_idx = 0usize;
-        // Cursor monitor gets workspace 0
-        self.monitors[cursor_mi].active_workspace = ws_idx;
-        self.workspaces.get_mut(ws_idx).visible = true;
-        self.workspaces.get_mut(ws_idx).last_monitor = Some(cursor_mi);
-        self.workspaces.get_mut(ws_idx).last_display_id = Some(self.monitors[cursor_mi].id);
-        ws_idx += 1;
+        self.ensure_defined_workspaces();
 
-        // Remaining monitors in left-to-right order
-        for mi in 0..self.monitors.len() {
-            if mi == cursor_mi {
-                continue;
+        let mut assigned = vec![false; self.workspaces.count()];
+        let mut monitor_assignments = vec![None; self.monitors.len()];
+
+        for (ws_idx, is_assigned) in assigned
+            .iter_mut()
+            .enumerate()
+            .take(self.workspaces.count())
+        {
+            if let Some(mi) = self.preferred_monitor_for_workspace(ws_idx)
+                && monitor_assignments[mi].is_none()
+            {
+                monitor_assignments[mi] = Some(ws_idx);
+                *is_assigned = true;
             }
+        }
+
+        if monitor_assignments[cursor_mi].is_none() {
+            monitor_assignments[cursor_mi] = Some(0);
+            assigned[0] = true;
+        }
+
+        let mut next_ws_idx = 0usize;
+        for assignment in monitor_assignments.iter_mut().take(self.monitors.len()) {
+            if assignment.is_none() {
+                while next_ws_idx < assigned.len() && assigned[next_ws_idx] {
+                    next_ws_idx += 1;
+                }
+                if next_ws_idx >= assigned.len() {
+                    self.workspaces.get_or_create(next_ws_idx);
+                    assigned.push(false);
+                }
+                *assignment = Some(next_ws_idx);
+                assigned[next_ws_idx] = true;
+            }
+        }
+
+        for (mi, ws_idx) in monitor_assignments.into_iter().enumerate() {
+            let ws_idx = ws_idx.unwrap_or(0);
             self.monitors[mi].active_workspace = ws_idx;
             self.workspaces.get_mut(ws_idx).visible = true;
             self.workspaces.get_mut(ws_idx).last_monitor = Some(mi);
             self.workspaces.get_mut(ws_idx).last_display_id = Some(self.monitors[mi].id);
-            ws_idx += 1;
         }
 
         tracing::info!(
@@ -268,14 +342,13 @@ impl WmState {
     /// then size → position → size per window.
     pub fn apply_layout(&self) {
         for (mi, monitor) in self.monitors.iter().enumerate() {
-            let ws = self.workspaces.get(monitor.active_workspace);
+            let ws_idx = monitor.active_workspace;
+            let ws = self.workspaces.get(ws_idx);
             let screen_rect = self.monitor_rect(mi);
-            let geometries = ws.tree.calculate_geometries_with_gaps(
-                screen_rect,
-                self.gap_inner,
-                self.gap_outer,
-                true,
-            );
+            let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
+            let geometries =
+                ws.tree
+                    .calculate_geometries_with_gaps(screen_rect, gap_inner, gap_outer, true);
             tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
@@ -315,11 +388,13 @@ impl WmState {
         }
 
         for (mi, monitor) in self.monitors.iter().enumerate() {
-            let ws = self.workspaces.get(monitor.active_workspace);
+            let ws_idx = monitor.active_workspace;
+            let ws = self.workspaces.get(ws_idx);
             let sr = self.monitor_rect(mi);
-            let geoms =
-                ws.tree
-                    .calculate_geometries_with_gaps(sr, self.gap_inner, self.gap_outer, true);
+            let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
+            let geoms = ws
+                .tree
+                .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
             let focused = ws.focused;
 
             for (wid, rect) in &geoms {
@@ -1307,15 +1382,15 @@ impl WmState {
 
     // --- Workspace operations ---
 
-    pub fn switch_workspace(&mut self, num: u8) {
-        let target_idx = (num as usize).saturating_sub(1);
+    pub fn switch_workspace(&mut self, target: &WorkspaceTarget) {
+        let target_idx = self.workspace_index_for_target(target);
         let current_idx = self.monitors[self.focused_monitor].active_workspace;
 
         if target_idx == current_idx {
             return;
         }
 
-        tracing::info!(from = current_idx + 1, to = num, "switching workspace");
+        tracing::info!(from = current_idx + 1, to = %target, "switching workspace");
 
         // Case 1: Target workspace is already visible on some monitor → jump focus
         if let Some(other_mi) = self.monitor_showing_workspace(target_idx) {
@@ -1346,22 +1421,25 @@ impl WmState {
                 self.ffm_cooldown_until =
                     Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
             }
-            tracing::info!(ws = num, monitor = other_mi, "jumped to visible workspace");
+            tracing::info!(workspace = %target, monitor = other_mi, "jumped to visible workspace");
             return;
         }
 
         // Case 2: Target has windows and remembers a different monitor → jump there
         let target_has_windows = !self.workspaces.get(target_idx).is_empty();
         let target_last_monitor = self.workspaces.get(target_idx).last_monitor;
-        let show_on_monitor = if target_has_windows
-            && let Some(mi) = target_last_monitor
-            && mi < self.monitors.len()
-            && mi != self.focused_monitor
-        {
-            mi // Jump to the remembered monitor
-        } else {
-            self.focused_monitor // Show on current monitor
-        };
+        let show_on_monitor =
+            if let Some(preferred) = self.preferred_monitor_for_workspace(target_idx) {
+                preferred
+            } else if target_has_windows
+                && let Some(mi) = target_last_monitor
+                && mi < self.monitors.len()
+                && mi != self.focused_monitor
+            {
+                mi // Jump to the remembered monitor
+            } else {
+                self.focused_monitor // Show on current monitor
+            };
 
         // Hide the workspace currently on the target monitor
         let displaced_idx = self.monitors[show_on_monitor].active_workspace;
@@ -1411,7 +1489,7 @@ impl WmState {
             self.ffm_cooldown_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
         }
-        tracing::info!(ws = num, monitor = show_on_monitor, "switched workspace");
+        tracing::info!(workspace = %target, monitor = show_on_monitor, "switched workspace");
     }
 
     /// Hide all windows on a workspace by positioning them below the monitor
@@ -1575,23 +1653,46 @@ impl WmState {
     }
 
     pub fn workspace_next(&mut self) {
-        let current_ws = self.active_workspace();
-        let current = match &current_ws.id {
-            super::workspace::WorkspaceId::Numbered(n) => *n,
-            _ => return,
+        let current = self.active_workspace().id.as_regular_target();
+        let mut regular_targets: Vec<_> = self
+            .workspaces
+            .iter()
+            .filter_map(|ws| ws.id.as_regular_target())
+            .collect();
+        regular_targets.sort_by_key(|target| match target {
+            WorkspaceTarget::Numbered(num) => (0, format!("{num:03}")),
+            WorkspaceTarget::Lettered(ch) => (1, ch.to_string()),
+        });
+        let Some(current) = current else { return };
+        let Some(pos) = regular_targets.iter().position(|target| *target == current) else {
+            return;
         };
-        let next = if current >= 10 { 1 } else { current + 1 };
-        self.switch_workspace(next);
+        let next = regular_targets[(pos + 1) % regular_targets.len()].clone();
+        self.switch_workspace(&next);
     }
 
     pub fn workspace_prev(&mut self) {
-        let current_ws = self.active_workspace();
-        let current = match &current_ws.id {
-            super::workspace::WorkspaceId::Numbered(n) => *n,
-            _ => return,
+        let current = self.active_workspace().id.as_regular_target();
+        let mut regular_targets: Vec<_> = self
+            .workspaces
+            .iter()
+            .filter_map(|ws| ws.id.as_regular_target())
+            .collect();
+        regular_targets.sort_by_key(|target| match target {
+            WorkspaceTarget::Numbered(num) => (0, format!("{num:03}")),
+            WorkspaceTarget::Lettered(ch) => (1, ch.to_string()),
+        });
+        let Some(current) = current else { return };
+        let Some(pos) = regular_targets.iter().position(|target| *target == current) else {
+            return;
         };
-        let prev = if current <= 1 { 10 } else { current - 1 };
-        self.switch_workspace(prev);
+        let prev = regular_targets[if pos == 0 {
+            regular_targets.len() - 1
+        } else {
+            pos - 1
+        }]
+        .clone();
+        self.switch_workspace(&prev);
     }
 
     // --- Special workspaces (scratchpads) ---
@@ -2020,15 +2121,37 @@ impl WmState {
                 continue; // Already handled
             }
 
-            // New monitor — try reconnection by last_display_id first
+            // New monitor — prefer an explicitly assigned workspace first,
+            // then reconnect by last_display_id, then any hidden workspace.
             let ws_idx = (0..self.workspaces.count())
                 .find(|&i| {
                     !used_ws.get(i).copied().unwrap_or(false)
                         && !self.workspaces.get(i).visible
-                        && self.workspaces.get(i).last_display_id == Some(nd.id)
+                        && self.workspace_prefs(i).and_then(|prefs| {
+                            prefs.monitor.as_ref().map(|monitor| monitor.display_id)
+                        }) == Some(nd.id)
                 })
                 .or_else(|| {
-                    // Second preference: first invisible workspace
+                    (0..self.workspaces.count()).find(|&i| {
+                        !used_ws.get(i).copied().unwrap_or(false)
+                            && !self.workspaces.get(i).visible
+                            && self.workspaces.get(i).last_display_id == Some(nd.id)
+                    })
+                })
+                .or_else(|| {
+                    // Next preference: first hidden workspace assigned to no specific monitor.
+                    (0..self.workspaces.count()).find(|&i| {
+                        !used_ws.get(i).copied().unwrap_or(false)
+                            && !self.workspaces.get(i).visible
+                            && self
+                                .workspace_prefs(i)
+                                .and_then(|prefs| {
+                                    prefs.monitor.as_ref().map(|monitor| monitor.display_id)
+                                })
+                                .is_none()
+                    })
+                })
+                .or_else(|| {
                     (0..self.workspaces.count()).find(|&i| {
                         !used_ws.get(i).copied().unwrap_or(false) && !self.workspaces.get(i).visible
                     })
@@ -2100,8 +2223,8 @@ impl WmState {
         );
     }
 
-    pub fn move_to_workspace(&mut self, num: u8) {
-        let target_idx = (num as usize).saturating_sub(1);
+    pub fn move_to_workspace(&mut self, target: &WorkspaceTarget) {
+        let target_idx = self.workspace_index_for_target(target);
 
         let focused = match self.effective_focused() {
             Some(f) => f,
@@ -2155,11 +2278,16 @@ impl WmState {
         // Insert into target workspace
         let target_rect = self
             .monitor_showing_workspace(target_idx)
+            .or_else(|| self.preferred_monitor_for_workspace(target_idx))
             .map(|mi| self.monitor_rect(mi))
             .unwrap_or(self.focused_rect());
+        let target_monitor = self
+            .monitor_showing_workspace(target_idx)
+            .or_else(|| self.preferred_monitor_for_workspace(target_idx))
+            .unwrap_or(self.focused_monitor);
         let target_ws = self.workspaces.get_or_create(target_idx);
-        target_ws.last_monitor = Some(self.focused_monitor);
-        target_ws.last_display_id = Some(self.monitors[self.focused_monitor].id);
+        target_ws.last_monitor = Some(target_monitor);
+        target_ws.last_display_id = Some(self.monitors[target_monitor].id);
         if was_floating {
             target_ws.floating.push(super::workspace::FloatingWindow {
                 id: focused,
@@ -2191,7 +2319,7 @@ impl WmState {
         if let Some(next) = self.active_workspace().focused {
             self.focus_window(next);
         }
-        tracing::info!(id = focused, target = num, "moved window to workspace");
+        tracing::info!(id = focused, target = %target, "moved window to workspace");
     }
 
     /// After moving a window to a specific workspace, try swaps to fix overflow.
@@ -2487,26 +2615,12 @@ impl WmState {
             "add_window_to_active"
         );
 
-        // Check window rules for matching (case-insensitive, supports regex via /pattern/)
+        // Check window rules for matching
         let mut rule_float: Option<bool> = None;
         let mut rule_workspace: Option<String> = None;
         let mut rule_geometry: Option<(f64, f64, f64, f64)> = None;
-        let app_lower = app_name.to_lowercase();
-        let title_lower = title.to_lowercase();
         for rule in &self.rules {
-            let name_matches = rule
-                .app_name
-                .as_ref()
-                .is_none_or(|n| match_string_or_regex(n, &app_lower));
-            let bundle_matches = rule
-                .app_bundle
-                .as_ref()
-                .is_none_or(|b| app_bundle_id.to_lowercase().contains(&b.to_lowercase()));
-            let title_matches = rule
-                .title
-                .as_ref()
-                .is_none_or(|t| match_string_or_regex(t, &title_lower));
-            if name_matches && bundle_matches && title_matches {
+            if rule.matches_window(app_name, app_bundle_id, title) {
                 tracing::debug!(app_name, title, ?rule, "window rule matched");
                 if let Some(f) = rule.floating {
                     rule_float = Some(f);
@@ -2565,12 +2679,13 @@ impl WmState {
                     special_name,
                     "window assigned to special workspace by rule"
                 );
-            } else if let Ok(ws_num) = ws_str.parse::<u8>() {
-                // Numbered workspace rule
-                let target_idx = (ws_num as usize).saturating_sub(1);
+            } else if let Some(target) = WorkspaceTarget::parse(ws_str) {
+                // Regular workspace rule
+                let target_idx = self.workspace_index_for_target(&target);
                 let is_active = target_idx == self.active_ws_idx();
                 let target_rect = self
                     .monitor_showing_workspace(target_idx)
+                    .or_else(|| self.preferred_monitor_for_workspace(target_idx))
                     .map(|mi| self.monitor_rect(mi))
                     .unwrap_or(self.focused_rect());
 
@@ -2587,11 +2702,11 @@ impl WmState {
                     ws.tree.insert_with_rect(*id, ws.focused, target_rect);
                 }
                 ws.record_focus(*id);
-                tracing::info!(id, app_name, ws_num, "window assigned to workspace by rule");
+                tracing::info!(id, app_name, workspace = %target, "window assigned to workspace by rule");
 
                 if !is_active {
                     self.hide_window(*id);
-                    self.switch_workspace(ws_num);
+                    self.switch_workspace(&target);
                 }
             }
         } else {
@@ -2848,25 +2963,6 @@ fn resolve_app_name(pid: i32) -> Option<String> {
     use objc2_app_kit::NSRunningApplication;
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     app.localizedName().map(|n| n.to_string())
-}
-
-/// Match a string against a pattern. If pattern starts and ends with /,
-/// treat it as a regex. Otherwise, case-insensitive substring match.
-fn match_string_or_regex(pattern: &str, haystack: &str) -> bool {
-    if pattern.starts_with('/') && pattern.ends_with('/') && pattern.len() > 2 {
-        // Regex pattern: /pattern/
-        let regex_str = &pattern[1..pattern.len() - 1];
-        match regex::Regex::new(regex_str) {
-            Ok(re) => re.is_match(haystack),
-            Err(e) => {
-                tracing::warn!(pattern, err = %e, "invalid regex in window rule");
-                false
-            }
-        }
-    } else {
-        // Simple case-insensitive substring
-        haystack.contains(&pattern.to_lowercase())
-    }
 }
 
 fn hide_target_for_frame(

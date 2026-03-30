@@ -8,6 +8,7 @@ use std::ptr;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::core::input::{Action, Key, Modifiers};
+use crate::core::workspace::WorkspaceTarget;
 
 // Carbon types
 type OSStatus = i32;
@@ -249,28 +250,108 @@ impl HotkeyManager {
         self.register(ms, Key::Space, Action::ToggleFloat);
 
         // Workspaces: Cmd+1-9, Cmd+0
-        self.register(m, Key::Num1, Action::Workspace(1));
-        self.register(m, Key::Num2, Action::Workspace(2));
-        self.register(m, Key::Num3, Action::Workspace(3));
-        self.register(m, Key::Num4, Action::Workspace(4));
-        self.register(m, Key::Num5, Action::Workspace(5));
-        self.register(m, Key::Num6, Action::Workspace(6));
-        self.register(m, Key::Num7, Action::Workspace(7));
-        self.register(m, Key::Num8, Action::Workspace(8));
-        self.register(m, Key::Num9, Action::Workspace(9));
-        self.register(m, Key::Num0, Action::Workspace(10));
+        self.register(
+            m,
+            Key::Num1,
+            Action::Workspace(WorkspaceTarget::Numbered(1)),
+        );
+        self.register(
+            m,
+            Key::Num2,
+            Action::Workspace(WorkspaceTarget::Numbered(2)),
+        );
+        self.register(
+            m,
+            Key::Num3,
+            Action::Workspace(WorkspaceTarget::Numbered(3)),
+        );
+        self.register(
+            m,
+            Key::Num4,
+            Action::Workspace(WorkspaceTarget::Numbered(4)),
+        );
+        self.register(
+            m,
+            Key::Num5,
+            Action::Workspace(WorkspaceTarget::Numbered(5)),
+        );
+        self.register(
+            m,
+            Key::Num6,
+            Action::Workspace(WorkspaceTarget::Numbered(6)),
+        );
+        self.register(
+            m,
+            Key::Num7,
+            Action::Workspace(WorkspaceTarget::Numbered(7)),
+        );
+        self.register(
+            m,
+            Key::Num8,
+            Action::Workspace(WorkspaceTarget::Numbered(8)),
+        );
+        self.register(
+            m,
+            Key::Num9,
+            Action::Workspace(WorkspaceTarget::Numbered(9)),
+        );
+        self.register(
+            m,
+            Key::Num0,
+            Action::Workspace(WorkspaceTarget::Numbered(10)),
+        );
 
         // Move to workspace: Cmd+Shift+1-9, Cmd+Shift+0
-        self.register(ms, Key::Num1, Action::MoveToWorkspace(1));
-        self.register(ms, Key::Num2, Action::MoveToWorkspace(2));
-        self.register(ms, Key::Num3, Action::MoveToWorkspace(3));
-        self.register(ms, Key::Num4, Action::MoveToWorkspace(4));
-        self.register(ms, Key::Num5, Action::MoveToWorkspace(5));
-        self.register(ms, Key::Num6, Action::MoveToWorkspace(6));
-        self.register(ms, Key::Num7, Action::MoveToWorkspace(7));
-        self.register(ms, Key::Num8, Action::MoveToWorkspace(8));
-        self.register(ms, Key::Num9, Action::MoveToWorkspace(9));
-        self.register(ms, Key::Num0, Action::MoveToWorkspace(10));
+        self.register(
+            ms,
+            Key::Num1,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(1)),
+        );
+        self.register(
+            ms,
+            Key::Num2,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(2)),
+        );
+        self.register(
+            ms,
+            Key::Num3,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(3)),
+        );
+        self.register(
+            ms,
+            Key::Num4,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(4)),
+        );
+        self.register(
+            ms,
+            Key::Num5,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(5)),
+        );
+        self.register(
+            ms,
+            Key::Num6,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(6)),
+        );
+        self.register(
+            ms,
+            Key::Num7,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(7)),
+        );
+        self.register(
+            ms,
+            Key::Num8,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(8)),
+        );
+        self.register(
+            ms,
+            Key::Num9,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(9)),
+        );
+        self.register(
+            ms,
+            Key::Num0,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(10)),
+        );
     }
 }
 

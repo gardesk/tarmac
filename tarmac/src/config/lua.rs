@@ -1,26 +1,161 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use mlua::{Lua, Result as LuaResult, Value};
+use mlua::{Lua, Result as LuaResult, Value, Variadic};
+use regex::RegexBuilder;
 
 use super::settings::Settings;
 use crate::core::input::{Action, Key, Modifiers};
 use crate::core::tree::Direction;
+use crate::core::workspace::{
+    MonitorAssignment, WorkspaceDefinition, WorkspaceId, WorkspaceLayout, WorkspaceTarget,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuleMatchMode {
+    Contains,
+    Exact,
+    Regex,
+}
+
+impl RuleMatchMode {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "contains" => Some(Self::Contains),
+            "exact" => Some(Self::Exact),
+            "regex" => Some(Self::Regex),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Contains => "contains",
+            Self::Exact => "exact",
+            Self::Regex => "regex",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RulePattern {
+    pub value: String,
+    pub mode: RuleMatchMode,
+}
+
+impl RulePattern {
+    pub fn new(value: impl Into<String>, mode: RuleMatchMode) -> Self {
+        Self {
+            value: value.into(),
+            mode,
+        }
+    }
+
+    pub fn from_legacy(value: impl Into<String>, default_mode: RuleMatchMode) -> Self {
+        let value = value.into();
+        if value.starts_with('/') && value.ends_with('/') && value.len() > 2 {
+            Self::new(value[1..value.len() - 1].to_string(), RuleMatchMode::Regex)
+        } else {
+            Self::new(value, default_mode)
+        }
+    }
+
+    pub fn matches(&self, haystack: &str) -> bool {
+        match self.mode {
+            RuleMatchMode::Contains => haystack.to_lowercase().contains(&self.value.to_lowercase()),
+            RuleMatchMode::Exact => haystack.eq_ignore_ascii_case(&self.value),
+            RuleMatchMode::Regex => match RegexBuilder::new(&self.value)
+                .case_insensitive(true)
+                .build()
+            {
+                Ok(regex) => regex.is_match(haystack),
+                Err(err) => {
+                    tracing::warn!(pattern = self.value, %err, "invalid regex in window rule");
+                    false
+                }
+            },
+        }
+    }
+
+    pub fn legacy_display(&self) -> String {
+        match self.mode {
+            RuleMatchMode::Regex => format!("/{}/", self.value),
+            RuleMatchMode::Contains | RuleMatchMode::Exact => self.value.clone(),
+        }
+    }
+}
 
 /// A window rule parsed from Lua config.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WindowRule {
-    pub app_name: Option<String>,
-    pub app_bundle: Option<String>,
-    pub title: Option<String>,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub enabled: bool,
+    pub app_name: Option<RulePattern>,
+    pub app_bundle: Option<RulePattern>,
+    pub title: Option<RulePattern>,
     pub floating: Option<bool>,
     /// Workspace assignment: numeric ("1"-"10") or special ("special:terminal").
     pub workspace: Option<String>,
     pub geometry: Option<(f64, f64, f64, f64)>, // x, y, width, height
 }
 
+impl WindowRule {
+    pub fn new() -> Self {
+        Self {
+            id: None,
+            name: None,
+            enabled: true,
+            app_name: None,
+            app_bundle: None,
+            title: None,
+            floating: None,
+            workspace: None,
+            geometry: None,
+        }
+    }
+
+    pub fn effective_id(&self, index: usize) -> String {
+        self.id
+            .as_ref()
+            .filter(|id| !id.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("rule_{:03}", index + 1))
+    }
+
+    pub fn effective_name(&self, index: usize) -> String {
+        self.name
+            .as_ref()
+            .filter(|name| !name.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("Rule {}", index + 1))
+    }
+
+    pub fn matches_window(&self, app_name: &str, app_bundle: &str, title: &str) -> bool {
+        self.enabled
+            && self
+                .app_name
+                .as_ref()
+                .is_none_or(|pattern| pattern.matches(app_name))
+            && self
+                .app_bundle
+                .as_ref()
+                .is_none_or(|pattern| pattern.matches(app_bundle))
+            && self
+                .title
+                .as_ref()
+                .is_none_or(|pattern| pattern.matches(title))
+    }
+}
+
+impl Default for WindowRule {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A keybind parsed from Lua config.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LuaKeybind {
     pub modifiers: Modifiers,
     pub key: Key,
@@ -28,7 +163,7 @@ pub struct LuaKeybind {
 }
 
 /// Configuration for a special (scratchpad) workspace overlay.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpecialWorkspaceConfig {
     pub name: String,
     /// "center", "top", "bottom"
@@ -62,35 +197,51 @@ pub struct LuaConfig {
     pub keybinds: Vec<LuaKeybind>,
     pub rules: Vec<WindowRule>,
     pub special_configs: Vec<SpecialWorkspaceConfig>,
+    pub workspace_defs: Vec<WorkspaceDefinition>,
     pub lua: Option<Lua>,
     pub callbacks: Vec<EventCallback>,
 }
 
+fn default_lua_config(settings: Settings) -> LuaConfig {
+    LuaConfig {
+        settings: settings.clone(),
+        keybinds: default_keybinds(&settings),
+        rules: Vec::new(),
+        special_configs: Vec::new(),
+        workspace_defs: default_workspace_definitions(),
+        lua: None,
+        callbacks: Vec::new(),
+    }
+}
+
 /// Load and execute a Lua config file, returning settings, keybinds, and rules.
 pub fn load_config(path: &std::path::Path) -> LuaConfig {
+    if !path.exists() {
+        tracing::warn!(?path, "no config file found, using defaults");
+        return default_lua_config(Settings::default());
+    }
+
+    match std::fs::read_to_string(path) {
+        Ok(source) => load_config_from_source(&source, &path.to_string_lossy()),
+        Err(e) => {
+            tracing::error!(err = %e, "failed to read config file");
+            default_lua_config(Settings::default())
+        }
+    }
+}
+
+pub fn load_config_from_source(source: &str, chunk_name: &str) -> LuaConfig {
     let settings = Rc::new(RefCell::new(Settings::default()));
     let keybinds: Rc<RefCell<Vec<LuaKeybind>>> = Rc::new(RefCell::new(Vec::new()));
     let rules: Rc<RefCell<Vec<WindowRule>>> = Rc::new(RefCell::new(Vec::new()));
     let callbacks: Rc<RefCell<Vec<EventCallback>>> = Rc::new(RefCell::new(Vec::new()));
     let special_configs: Rc<RefCell<Vec<SpecialWorkspaceConfig>>> =
         Rc::new(RefCell::new(Vec::new()));
-
-    if !path.exists() {
-        tracing::warn!(?path, "no config file found, using defaults");
-        let s = settings.borrow().clone();
-        return LuaConfig {
-            settings: s,
-            keybinds: default_keybinds(&Settings::default()),
-            rules: Vec::new(),
-            special_configs: Vec::new(),
-            lua: None,
-            callbacks: Vec::new(),
-        };
-    }
+    let workspace_defs: Rc<RefCell<Vec<WorkspaceDefinition>>> =
+        Rc::new(RefCell::new(default_workspace_definitions()));
 
     let lua = Lua::new();
 
-    // Register gar table
     if let Err(e) = register_gar_api(
         &lua,
         Rc::clone(&settings),
@@ -98,31 +249,16 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
         Rc::clone(&rules),
         Rc::clone(&callbacks),
         Rc::clone(&special_configs),
+        Rc::clone(&workspace_defs),
     ) {
         tracing::error!(err = %e, "failed to register gar API");
-        let s = settings.borrow().clone();
-        return LuaConfig {
-            settings: s,
-            keybinds: default_keybinds(&Settings::default()),
-            rules: Vec::new(),
-            special_configs: Vec::new(),
-            lua: None,
-            callbacks: Vec::new(),
-        };
+        return default_lua_config(settings.borrow().clone());
     }
 
-    // Load and execute
-    match std::fs::read_to_string(path) {
-        Ok(source) => {
-            if let Err(e) = lua.load(&source).set_name(path.to_string_lossy()).exec() {
-                tracing::error!(err = %e, "lua config error");
-            } else {
-                tracing::info!(?path, "config loaded");
-            }
-        }
-        Err(e) => {
-            tracing::error!(err = %e, "failed to read config file");
-        }
+    if let Err(e) = lua.load(source).set_name(chunk_name).exec() {
+        tracing::error!(err = %e, chunk_name, "lua config error");
+    } else {
+        tracing::info!(chunk_name, "config loaded");
     }
 
     let s = settings.borrow().clone();
@@ -135,6 +271,9 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
 
     let r = rules.borrow().clone();
     let sc = special_configs.borrow().clone();
+    let mut wd = workspace_defs.borrow().clone();
+    wd.sort_by_key(workspace_sort_key);
+    wd.dedup_by(|a, b| a.id == b.id);
     let cbs = callbacks.borrow_mut().drain(..).collect::<Vec<_>>();
     tracing::info!(rules = r.len(), callbacks = cbs.len(), "config loaded");
 
@@ -143,6 +282,7 @@ pub fn load_config(path: &std::path::Path) -> LuaConfig {
         keybinds: binds,
         rules: r,
         special_configs: sc,
+        workspace_defs: wd,
         lua: Some(lua),
         callbacks: cbs,
     }
@@ -155,6 +295,7 @@ fn register_gar_api(
     rules: Rc<RefCell<Vec<WindowRule>>>,
     callbacks: Rc<RefCell<Vec<EventCallback>>>,
     special_configs: Rc<RefCell<Vec<SpecialWorkspaceConfig>>>,
+    workspace_defs: Rc<RefCell<Vec<WorkspaceDefinition>>>,
 ) -> LuaResult<()> {
     let gar = lua.create_table()?;
 
@@ -237,49 +378,16 @@ fn register_gar_api(
     )?;
 
     // gar.rule({ app_name = "Firefox" }, { workspace = 2, floating = true })
+    // gar.rule({ id = "rule_01", name = "...", enabled = true, match = {...}, actions = {...} })
     let rules_clone = Rc::clone(&rules);
     gar.set(
         "rule",
-        lua.create_function(
-            move |_, (match_table, actions_table): (mlua::Table, mlua::Table)| {
-                let app_name: Option<String> = match_table.get("app_name").ok();
-                let app_bundle: Option<String> = match_table.get("app_bundle").ok();
-                let title: Option<String> = match_table.get("title").ok();
-                // Also accept "class" as alias for "app_name" (gar Linux compat)
-                let app_name = app_name.or_else(|| match_table.get("class").ok());
-
-                let floating: Option<bool> = actions_table.get("floating").ok();
-                // Workspace: accept number (1-10) or string ("special:terminal")
-                let workspace: Option<String> = actions_table
-                    .get::<u8>("workspace")
-                    .ok()
-                    .map(|n| n.to_string())
-                    .or_else(|| actions_table.get::<String>("workspace").ok());
-
-                // Parse geometry table if present
-                let geometry: Option<(f64, f64, f64, f64)> =
-                    actions_table.get::<mlua::Table>("geometry").ok().map(|g| {
-                        (
-                            g.get("x").unwrap_or(100.0),
-                            g.get("y").unwrap_or(100.0),
-                            g.get("width").unwrap_or(800.0),
-                            g.get("height").unwrap_or(600.0),
-                        )
-                    });
-
-                let rule = WindowRule {
-                    app_name,
-                    app_bundle,
-                    title,
-                    floating,
-                    workspace,
-                    geometry,
-                };
-                tracing::debug!(?rule, "gar.rule");
-                rules_clone.borrow_mut().push(rule);
-                Ok(())
-            },
-        )?,
+        lua.create_function(move |_, args: Variadic<Value>| {
+            let rule = parse_rule_args(args)?;
+            tracing::debug!(?rule, "gar.rule");
+            rules_clone.borrow_mut().push(rule);
+            Ok(())
+        })?,
     )?;
 
     // gar.on("event_name", function(...) end)
@@ -327,8 +435,251 @@ fn register_gar_api(
         })?,
     )?;
 
+    let workspace_defs_clone = Rc::clone(&workspace_defs);
+    gar.set(
+        "workspace",
+        lua.create_function(move |_, (id, opts): (Value, Option<mlua::Table>)| {
+            let id = match id {
+                Value::Integer(num) if num > 0 => WorkspaceId::Numbered(num as u8),
+                Value::Number(num) if num > 0.0 => WorkspaceId::Numbered(num as u8),
+                Value::String(s) => WorkspaceId::parse(&s.to_string_lossy())
+                    .ok_or_else(|| mlua::Error::runtime("invalid workspace id"))?,
+                _ => return Err(mlua::Error::runtime("invalid workspace id")),
+            };
+
+            let mut def = WorkspaceDefinition::new(id);
+            if let Some(opts) = opts {
+                if let Ok(display_id) = opts.get::<u32>("monitor") {
+                    def.prefs.monitor = Some(MonitorAssignment { display_id });
+                }
+                if let Ok(layout) = opts.get::<String>("layout")
+                    && let Some(layout) = WorkspaceLayout::parse(&layout)
+                {
+                    def.prefs.default_layout = layout;
+                }
+                if let Ok(gap_inner) = opts.get::<f64>("gap_inner") {
+                    def.prefs.gap_inner = Some(gap_inner.max(0.0));
+                }
+                if let Ok(gap_outer) = opts.get::<f64>("gap_outer") {
+                    def.prefs.gap_outer = Some(gap_outer.max(0.0));
+                }
+            }
+
+            tracing::debug!(workspace = %def.id, "gar.workspace");
+            let mut defs = workspace_defs_clone.borrow_mut();
+            if let Some(existing) = defs.iter_mut().find(|existing| existing.id == def.id) {
+                *existing = def;
+            } else {
+                defs.push(def);
+            }
+            Ok(())
+        })?,
+    )?;
+
     lua.globals().set("gar", gar)?;
     Ok(())
+}
+
+fn parse_rule_args(args: Variadic<Value>) -> LuaResult<WindowRule> {
+    match args.as_slice() {
+        [Value::Table(rule_table)] => parse_structured_rule(rule_table.clone()),
+        [Value::Table(match_table), Value::Table(actions_table)] => {
+            parse_rule_tables(None, match_table.clone(), actions_table.clone())
+        }
+        _ => Err(mlua::Error::runtime(
+            "gar.rule expects (match, actions) or ({ id, name, enabled, match, actions })",
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ParsedRuleMetadata {
+    id: Option<String>,
+    name: Option<String>,
+    enabled: bool,
+}
+
+impl Default for ParsedRuleMetadata {
+    fn default() -> Self {
+        Self {
+            id: None,
+            name: None,
+            enabled: true,
+        }
+    }
+}
+
+fn parse_structured_rule(rule_table: mlua::Table) -> LuaResult<WindowRule> {
+    let metadata = ParsedRuleMetadata {
+        id: parse_optional_string_value(rule_table.get::<Value>("id")?),
+        name: parse_optional_string_value(rule_table.get::<Value>("name")?),
+        enabled: parse_optional_bool(rule_table.get::<Value>("enabled")?).unwrap_or(true),
+    };
+
+    let match_table = match rule_table.get::<Value>("match")? {
+        Value::Table(table) => table,
+        Value::Nil => rule_table.clone(),
+        _ => return Err(mlua::Error::runtime("rule.match must be a table")),
+    };
+    let actions_table = match rule_table.get::<Value>("actions")? {
+        Value::Table(table) => table,
+        Value::Nil => rule_table,
+        _ => return Err(mlua::Error::runtime("rule.actions must be a table")),
+    };
+
+    parse_rule_tables(Some(metadata), match_table, actions_table)
+}
+
+fn parse_rule_tables(
+    metadata: Option<ParsedRuleMetadata>,
+    match_table: mlua::Table,
+    actions_table: mlua::Table,
+) -> LuaResult<WindowRule> {
+    let metadata = metadata.unwrap_or_default();
+    let app_name = parse_match_pattern(
+        match_table.get::<Value>("app_name")?,
+        RuleMatchMode::Contains,
+    )?
+    .or_else(|| {
+        parse_match_pattern(
+            match_table.get::<Value>("class").unwrap_or(Value::Nil),
+            RuleMatchMode::Contains,
+        )
+        .ok()
+        .flatten()
+    })
+    .or_else(|| {
+        parse_match_pattern(
+            match_table.get::<Value>("app").unwrap_or(Value::Nil),
+            RuleMatchMode::Contains,
+        )
+        .ok()
+        .flatten()
+    });
+    let app_bundle = parse_match_pattern(
+        match_table.get::<Value>("app_bundle")?,
+        RuleMatchMode::Contains,
+    )?
+    .or_else(|| {
+        parse_match_pattern(
+            match_table.get::<Value>("bundle_id").unwrap_or(Value::Nil),
+            RuleMatchMode::Contains,
+        )
+        .ok()
+        .flatten()
+    });
+    let title = parse_match_pattern(match_table.get::<Value>("title")?, RuleMatchMode::Contains)?;
+
+    let floating = parse_optional_bool(actions_table.get::<Value>("floating")?)
+        .or_else(|| parse_optional_bool(actions_table.get::<Value>("float").unwrap_or(Value::Nil)));
+    let workspace = parse_workspace_value(actions_table.get::<Value>("workspace")?)?;
+    let geometry = parse_geometry_value(&actions_table)?;
+
+    Ok(WindowRule {
+        id: metadata.id,
+        name: metadata.name,
+        enabled: metadata.enabled,
+        app_name,
+        app_bundle,
+        title,
+        floating,
+        workspace,
+        geometry,
+    })
+}
+
+fn parse_match_pattern(
+    value: Value,
+    default_mode: RuleMatchMode,
+) -> LuaResult<Option<RulePattern>> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::String(text) => Ok(Some(RulePattern::from_legacy(
+            text.to_string_lossy().to_string(),
+            default_mode,
+        ))),
+        Value::Integer(number) => Ok(Some(RulePattern::new(number.to_string(), default_mode))),
+        Value::Number(number) => Ok(Some(RulePattern::new(number.to_string(), default_mode))),
+        Value::Table(table) => {
+            let raw_value = parse_optional_string_value(table.get::<Value>("value")?)
+                .ok_or_else(|| mlua::Error::runtime("rule match table requires value"))?;
+            let mode = parse_optional_string_value(table.get::<Value>("mode")?)
+                .and_then(|mode| RuleMatchMode::parse(&mode))
+                .unwrap_or(default_mode);
+            Ok(Some(RulePattern::new(raw_value, mode)))
+        }
+        _ => Err(mlua::Error::runtime("invalid rule match value")),
+    }
+}
+
+fn parse_workspace_value(value: Value) -> LuaResult<Option<String>> {
+    match value {
+        Value::Nil => Ok(None),
+        Value::String(text) => Ok(Some(text.to_string_lossy().to_string())),
+        Value::Integer(number) if number > 0 => Ok(Some(number.to_string())),
+        Value::Number(number) if number > 0.0 => Ok(Some((number as u8).to_string())),
+        _ => Err(mlua::Error::runtime("invalid workspace value for rule")),
+    }
+}
+
+fn parse_geometry_value(actions_table: &mlua::Table) -> LuaResult<Option<(f64, f64, f64, f64)>> {
+    if let Value::Table(geometry) = actions_table.get::<Value>("geometry")? {
+        return Ok(Some((
+            geometry.get("x").unwrap_or(100.0),
+            geometry.get("y").unwrap_or(100.0),
+            geometry.get("width").unwrap_or(800.0),
+            geometry.get("height").unwrap_or(600.0),
+        )));
+    }
+
+    let x = parse_optional_number(actions_table.get::<Value>("x")?);
+    let y = parse_optional_number(actions_table.get::<Value>("y")?);
+    let width = parse_optional_number(actions_table.get::<Value>("width")?);
+    let height = parse_optional_number(actions_table.get::<Value>("height")?);
+
+    if x.is_some() || y.is_some() || width.is_some() || height.is_some() {
+        Ok(Some((
+            x.unwrap_or(100.0),
+            y.unwrap_or(100.0),
+            width.unwrap_or(800.0),
+            height.unwrap_or(600.0),
+        )))
+    } else {
+        Ok(None)
+    }
+}
+
+fn parse_optional_bool(value: Value) -> Option<bool> {
+    match value {
+        Value::Boolean(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn parse_optional_number(value: Value) -> Option<f64> {
+    match value {
+        Value::Integer(value) => Some(value as f64),
+        Value::Number(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn parse_optional_string_value(value: Value) -> Option<String> {
+    match value {
+        Value::Nil => None,
+        Value::String(value) => {
+            let value = value.to_string_lossy().to_string();
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value)
+            }
+        }
+        Value::Integer(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Boolean(value) => Some(value.to_string()),
+        _ => None,
+    }
 }
 
 impl LuaConfig {
@@ -464,18 +815,18 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
             Ok(Action::Resize(dir))
         }
         "workspace" => {
-            let num: u8 = parts
+            let target = parts
                 .get(1)
-                .and_then(|s| s.parse().ok())
-                .ok_or("workspace requires a number")?;
-            Ok(Action::Workspace(num))
+                .and_then(|s| WorkspaceTarget::parse(s))
+                .ok_or("workspace requires a valid target")?;
+            Ok(Action::Workspace(target))
         }
         "move_to_workspace" => {
-            let num: u8 = parts
+            let target = parts
                 .get(1)
-                .and_then(|s| s.parse().ok())
-                .ok_or("move_to_workspace requires a number")?;
-            Ok(Action::MoveToWorkspace(num))
+                .and_then(|s| WorkspaceTarget::parse(s))
+                .ok_or("move_to_workspace requires a valid target")?;
+            Ok(Action::MoveToWorkspace(target))
         }
         "spawn_terminal" => Ok(Action::SpawnTerminal),
         "close" => Ok(Action::CloseWindow),
@@ -660,26 +1011,217 @@ pub fn default_keybinds(settings: &Settings) -> Vec<LuaKeybind> {
         binds.push(LuaKeybind {
             modifiers: m,
             key,
-            action: Action::Workspace(i),
+            action: Action::Workspace(WorkspaceTarget::Numbered(i)),
         });
         binds.push(LuaKeybind {
             modifiers: ms,
             key,
-            action: Action::MoveToWorkspace(i),
+            action: Action::MoveToWorkspace(WorkspaceTarget::Numbered(i)),
         });
     }
     binds.push(LuaKeybind {
         modifiers: m,
         key: Key::Num0,
-        action: Action::Workspace(10),
+        action: Action::Workspace(WorkspaceTarget::Numbered(10)),
     });
     binds.push(LuaKeybind {
         modifiers: ms,
         key: Key::Num0,
-        action: Action::MoveToWorkspace(10),
+        action: Action::MoveToWorkspace(WorkspaceTarget::Numbered(10)),
     });
 
     binds
+}
+
+pub fn default_workspace_definitions() -> Vec<WorkspaceDefinition> {
+    (1..=10)
+        .map(|num| WorkspaceDefinition::new(WorkspaceId::Numbered(num)))
+        .collect()
+}
+
+fn workspace_sort_key(def: &WorkspaceDefinition) -> (u8, String) {
+    match &def.id {
+        WorkspaceId::Numbered(num) => (0, format!("{num:02}")),
+        WorkspaceId::Lettered(ch) => (1, ch.to_string()),
+        WorkspaceId::Special(name) => (2, name.clone()),
+    }
+}
+
+pub fn key_name(key: Key) -> &'static str {
+    match key {
+        Key::A => "a",
+        Key::B => "b",
+        Key::C => "c",
+        Key::D => "d",
+        Key::E => "e",
+        Key::F => "f",
+        Key::G => "g",
+        Key::H => "h",
+        Key::I => "i",
+        Key::J => "j",
+        Key::K => "k",
+        Key::L => "l",
+        Key::M => "m",
+        Key::N => "n",
+        Key::O => "o",
+        Key::P => "p",
+        Key::Q => "q",
+        Key::R => "r",
+        Key::S => "s",
+        Key::T => "t",
+        Key::U => "u",
+        Key::V => "v",
+        Key::W => "w",
+        Key::X => "x",
+        Key::Y => "y",
+        Key::Z => "z",
+        Key::Num0 => "0",
+        Key::Num1 => "1",
+        Key::Num2 => "2",
+        Key::Num3 => "3",
+        Key::Num4 => "4",
+        Key::Num5 => "5",
+        Key::Num6 => "6",
+        Key::Num7 => "7",
+        Key::Num8 => "8",
+        Key::Num9 => "9",
+        Key::Return => "return",
+        Key::Space => "space",
+        Key::Tab => "tab",
+        Key::Escape => "escape",
+        Key::Delete => "delete",
+        Key::Grave => "grave",
+        Key::Minus => "minus",
+        Key::Equal => "equal",
+        Key::LeftBracket => "left_bracket",
+        Key::RightBracket => "right_bracket",
+        Key::Semicolon => "semicolon",
+        Key::Quote => "quote",
+        Key::Comma => "comma",
+        Key::Period => "period",
+        Key::Slash => "slash",
+        Key::Backslash => "backslash",
+        Key::Left => "left",
+        Key::Right => "right",
+        Key::Up => "up",
+        Key::Down => "down",
+        Key::F1 => "f1",
+        Key::F2 => "f2",
+        Key::F3 => "f3",
+        Key::F4 => "f4",
+        Key::F5 => "f5",
+        Key::F6 => "f6",
+        Key::F7 => "f7",
+        Key::F8 => "f8",
+        Key::F9 => "f9",
+        Key::F10 => "f10",
+        Key::F11 => "f11",
+        Key::F12 => "f12",
+    }
+}
+
+pub fn format_key_spec(modifiers: Modifiers, key: Key, mod_key: Modifiers) -> String {
+    let mut parts = Vec::new();
+    if modifiers.contains(mod_key) {
+        parts.push("mod");
+    }
+    if modifiers.contains(Modifiers::SHIFT) {
+        parts.push("shift");
+    }
+    if modifiers.contains(Modifiers::CONTROL) && mod_key != Modifiers::CONTROL {
+        parts.push("ctrl");
+    }
+    if modifiers.contains(Modifiers::OPTION) && mod_key != Modifiers::OPTION {
+        parts.push("option");
+    }
+    if modifiers.contains(Modifiers::COMMAND) && mod_key != Modifiers::COMMAND {
+        parts.push("command");
+    }
+    parts.push(key_name(key));
+    parts.join("+")
+}
+
+pub fn format_action(action: &Action) -> String {
+    match action {
+        Action::SpawnTerminal => "spawn_terminal".to_string(),
+        Action::CloseWindow => "close".to_string(),
+        Action::Focus(dir) => format!("focus {}", direction_name(*dir)),
+        Action::Swap(dir) => format!("swap {}", direction_name(*dir)),
+        Action::Resize(dir) => format!("resize {}", direction_name(*dir)),
+        Action::Equalize => "equalize".to_string(),
+        Action::Workspace(target) => format!("workspace {target}"),
+        Action::MoveToWorkspace(target) => format!("move_to_workspace {target}"),
+        Action::WorkspaceNext => "workspace_next".to_string(),
+        Action::WorkspacePrev => "workspace_prev".to_string(),
+        Action::ToggleFloat => "toggle_float".to_string(),
+        Action::ToggleSpecial(name) => format!("toggle_special {name}"),
+        Action::MoveToSpecial(name) => format!("move_to_special {name}"),
+        Action::FocusMonitorNext => "focus_monitor_next".to_string(),
+        Action::FocusMonitorPrev => "focus_monitor_prev".to_string(),
+        Action::MoveToMonitorNext => "move_to_monitor_next".to_string(),
+        Action::MoveToMonitorPrev => "move_to_monitor_prev".to_string(),
+        Action::Reload => "reload".to_string(),
+        Action::Exit => "exit".to_string(),
+    }
+}
+
+pub fn format_rule_match(rule: &WindowRule) -> String {
+    let mut parts = Vec::new();
+    if let Some(app_name) = &rule.app_name {
+        parts.push(format!("app_name={}", app_name.legacy_display()));
+    }
+    if let Some(app_bundle) = &rule.app_bundle {
+        parts.push(format!("app_bundle={}", app_bundle.legacy_display()));
+    }
+    if let Some(title) = &rule.title {
+        parts.push(format!("title={}", title.legacy_display()));
+    }
+    if parts.is_empty() {
+        "*".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+pub fn format_rule_action(rule: &WindowRule) -> String {
+    let mut parts = Vec::new();
+    if let Some(true) = rule.floating {
+        parts.push("floating=true".to_string());
+    }
+    if let Some(workspace) = &rule.workspace {
+        parts.push(format!("workspace={workspace}"));
+    }
+    if let Some((x, y, width, height)) = rule.geometry {
+        parts.push(format!("geometry={x:.0},{y:.0},{width:.0},{height:.0}"));
+    }
+    if parts.is_empty() {
+        "none".to_string()
+    } else {
+        parts.join(", ")
+    }
+}
+
+fn direction_name(direction: Direction) -> &'static str {
+    match direction {
+        Direction::Left => "left",
+        Direction::Right => "right",
+        Direction::Up => "up",
+        Direction::Down => "down",
+    }
+}
+
+pub fn lua_number(v: f64) -> String {
+    let i = v as i64;
+    if (v - i as f64).abs() < 0.01 {
+        i.to_string()
+    } else {
+        format!("{v:.2}")
+    }
+}
+
+pub fn lua_string(s: &str) -> String {
+    let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 #[cfg(test)]
@@ -716,7 +1258,13 @@ mod tests {
     #[test]
     fn parse_action_workspace() {
         let action = parse_action("workspace 5").unwrap();
-        assert_eq!(action, Action::Workspace(5));
+        assert_eq!(action, Action::Workspace(WorkspaceTarget::Numbered(5)));
+    }
+
+    #[test]
+    fn parse_action_lettered_workspace() {
+        let action = parse_action("workspace w").unwrap();
+        assert_eq!(action, Action::Workspace(WorkspaceTarget::Lettered('W')));
     }
 
     #[test]
@@ -724,6 +1272,73 @@ mod tests {
         assert_eq!(parse_action("equalize").unwrap(), Action::Equalize);
         assert_eq!(parse_action("close").unwrap(), Action::CloseWindow);
         assert_eq!(parse_action("toggle_float").unwrap(), Action::ToggleFloat);
+    }
+
+    #[test]
+    fn format_action_round_trip() {
+        let action = Action::MoveToWorkspace(WorkspaceTarget::Lettered('C'));
+        assert_eq!(format_action(&action), "move_to_workspace C");
+    }
+
+    #[test]
+    fn parse_structured_rule_with_modes_and_metadata() {
+        let config = load_config_from_source(
+            r#"
+                gar.rule({
+                    id = "rule_browser",
+                    name = "Browser",
+                    enabled = false,
+                    match = {
+                        app_name = { value = "Safari", mode = "exact" },
+                        title = { value = "Profile .*", mode = "regex" },
+                    },
+                    actions = {
+                        floating = true,
+                        workspace = "special:web",
+                        geometry = { x = 10, y = 20, width = 1100, height = 800 },
+                    },
+                })
+            "#,
+            "structured-rule",
+        );
+
+        let rule = config.rules.first().expect("structured rule missing");
+        assert_eq!(rule.id.as_deref(), Some("rule_browser"));
+        assert_eq!(rule.name.as_deref(), Some("Browser"));
+        assert!(!rule.enabled);
+        assert_eq!(
+            rule.app_name,
+            Some(RulePattern::new("Safari", RuleMatchMode::Exact))
+        );
+        assert_eq!(
+            rule.title,
+            Some(RulePattern::new("Profile .*", RuleMatchMode::Regex))
+        );
+        assert_eq!(rule.workspace.as_deref(), Some("special:web"));
+        assert_eq!(rule.geometry, Some((10.0, 20.0, 1100.0, 800.0)));
+    }
+
+    #[test]
+    fn parse_legacy_rule_infers_regex_mode() {
+        let config = load_config_from_source(
+            r#"gar.rule({ title = "/Preferences.*/" }, { floating = true })"#,
+            "legacy-rule",
+        );
+
+        let rule = config.rules.first().expect("legacy rule missing");
+        assert_eq!(
+            rule.title,
+            Some(RulePattern::new("Preferences.*", RuleMatchMode::Regex))
+        );
+        assert_eq!(rule.floating, Some(true));
+    }
+
+    #[test]
+    fn rule_pattern_matches_respect_mode() {
+        assert!(RulePattern::new("Safari", RuleMatchMode::Exact).matches("safari"));
+        assert!(RulePattern::new("Saf", RuleMatchMode::Contains).matches("Safari"));
+        assert!(RulePattern::new("^pro.*$", RuleMatchMode::Regex).matches("Profile"));
+        assert!(!RulePattern::new("Safari", RuleMatchMode::Exact).matches("Safari Tech"));
     }
 
     #[test]

@@ -3,6 +3,48 @@ use std::fmt;
 use super::tree::Node;
 use super::window::WindowId;
 
+/// A regular workspace target (special workspaces use dedicated actions).
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum WorkspaceTarget {
+    Numbered(u8),
+    Lettered(char),
+}
+
+impl WorkspaceTarget {
+    pub fn parse(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        if let Ok(num) = trimmed.parse::<u8>()
+            && num > 0
+        {
+            return Some(Self::Numbered(num));
+        }
+
+        let mut chars = trimmed.chars();
+        let c = chars.next()?;
+        if chars.next().is_none() && c.is_ascii_alphabetic() {
+            return Some(Self::Lettered(c.to_ascii_uppercase()));
+        }
+
+        None
+    }
+
+    pub fn to_workspace_id(&self) -> WorkspaceId {
+        match self {
+            Self::Numbered(num) => WorkspaceId::Numbered(*num),
+            Self::Lettered(ch) => WorkspaceId::Lettered(*ch),
+        }
+    }
+}
+
+impl fmt::Display for WorkspaceTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Numbered(num) => write!(f, "{num}"),
+            Self::Lettered(ch) => write!(f, "{ch}"),
+        }
+    }
+}
+
 /// Workspace identifier — numbered (1-10), lettered (A-Z), or special (scratchpads).
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum WorkspaceId {
@@ -12,11 +54,106 @@ pub enum WorkspaceId {
 }
 
 impl fmt::Display for WorkspaceId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WorkspaceId::Numbered(n) => write!(f, "{}", n),
             WorkspaceId::Lettered(c) => write!(f, "{}", c),
             WorkspaceId::Special(name) => write!(f, "special:{}", name),
+        }
+    }
+}
+
+impl WorkspaceId {
+    pub fn parse(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        if let Some(name) = trimmed.strip_prefix("special:") {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(Self::Special(name.to_string()));
+            }
+        }
+
+        WorkspaceTarget::parse(trimmed).map(|target| target.to_workspace_id())
+    }
+
+    pub fn as_regular_target(&self) -> Option<WorkspaceTarget> {
+        match self {
+            Self::Numbered(num) => Some(WorkspaceTarget::Numbered(*num)),
+            Self::Lettered(ch) => Some(WorkspaceTarget::Lettered(*ch)),
+            Self::Special(_) => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceKind {
+    Numbered,
+    Lettered,
+    Special,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceLayout {
+    Bsp,
+}
+
+impl WorkspaceLayout {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "bsp" => Some(Self::Bsp),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Bsp => "bsp",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorAssignment {
+    pub display_id: u32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspacePrefs {
+    pub monitor: Option<MonitorAssignment>,
+    pub default_layout: WorkspaceLayout,
+    pub gap_inner: Option<f64>,
+    pub gap_outer: Option<f64>,
+}
+
+impl Default for WorkspacePrefs {
+    fn default() -> Self {
+        Self {
+            monitor: None,
+            default_layout: WorkspaceLayout::Bsp,
+            gap_inner: None,
+            gap_outer: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceDefinition {
+    pub id: WorkspaceId,
+    pub kind: WorkspaceKind,
+    pub prefs: WorkspacePrefs,
+}
+
+impl WorkspaceDefinition {
+    pub fn new(id: WorkspaceId) -> Self {
+        let kind = match id {
+            WorkspaceId::Numbered(_) => WorkspaceKind::Numbered,
+            WorkspaceId::Lettered(_) => WorkspaceKind::Lettered,
+            WorkspaceId::Special(_) => WorkspaceKind::Special,
+        };
+        Self {
+            id,
+            kind,
+            prefs: WorkspacePrefs::default(),
         }
     }
 }
@@ -144,6 +281,33 @@ impl WorkspaceManager {
         self.workspaces.len()
     }
 
+    pub fn find_by_id(&self, id: &WorkspaceId) -> Option<usize> {
+        self.workspaces.iter().position(|ws| &ws.id == id)
+    }
+
+    pub fn get_or_create_by_id(&mut self, id: WorkspaceId) -> usize {
+        if let Some(idx) = self.find_by_id(&id) {
+            return idx;
+        }
+
+        match id {
+            WorkspaceId::Numbered(num) => {
+                let idx = (num as usize).saturating_sub(1);
+                self.get_or_create(idx);
+                idx
+            }
+            other => {
+                let idx = self.workspaces.len();
+                self.workspaces.push(Workspace::new(other));
+                idx
+            }
+        }
+    }
+
+    pub fn get_or_create_target(&mut self, target: &WorkspaceTarget) -> usize {
+        self.get_or_create_by_id(target.to_workspace_id())
+    }
+
     /// Find which workspace index contains a window (tiled or floating).
     pub fn find_window(&self, window_id: WindowId) -> Option<usize> {
         self.workspaces
@@ -159,12 +323,7 @@ impl WorkspaceManager {
     /// Find or create a special workspace by name. Returns its index.
     pub fn special_index(&mut self, name: &str) -> usize {
         let id = WorkspaceId::Special(name.to_string());
-        if let Some(idx) = self.workspaces.iter().position(|ws| ws.id == id) {
-            return idx;
-        }
-        let idx = self.workspaces.len();
-        self.workspaces.push(Workspace::new(id));
-        idx
+        self.get_or_create_by_id(id)
     }
 }
 
@@ -269,6 +428,29 @@ mod tests {
             WorkspaceId::Special("scratch".to_string()).to_string(),
             "special:scratch"
         );
+    }
+
+    #[test]
+    fn parses_workspace_targets() {
+        assert_eq!(
+            WorkspaceTarget::parse("7"),
+            Some(WorkspaceTarget::Numbered(7))
+        );
+        assert_eq!(
+            WorkspaceTarget::parse("w"),
+            Some(WorkspaceTarget::Lettered('W'))
+        );
+        assert_eq!(
+            WorkspaceId::parse("special:term"),
+            Some(WorkspaceId::Special("term".to_string()))
+        );
+    }
+
+    #[test]
+    fn creates_lettered_workspace_by_id() {
+        let mut mgr = WorkspaceManager::new();
+        let idx = mgr.get_or_create_by_id(WorkspaceId::Lettered('W'));
+        assert_eq!(mgr.get(idx).id, WorkspaceId::Lettered('W'));
     }
 
     #[test]

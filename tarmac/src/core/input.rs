@@ -1,5 +1,7 @@
 use bitflags::bitflags;
 
+use crate::core::workspace::WorkspaceTarget;
+
 bitflags! {
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct Modifiers: u32 {
@@ -178,19 +180,19 @@ pub enum Action {
     Swap(Direction),
     Resize(Direction),
     Equalize,
-    Workspace(u8),         // Switch to workspace 1-10
-    MoveToWorkspace(u8),   // Move focused window to workspace 1-10
-    WorkspaceNext,         // Cycle to next workspace
-    WorkspacePrev,         // Cycle to previous workspace
-    ToggleFloat,           // Toggle focused window between tiled and floating
-    ToggleSpecial(String), // Toggle scratchpad by name
-    MoveToSpecial(String), // Move focused window to scratchpad
-    FocusMonitorNext,      // Focus next monitor
-    FocusMonitorPrev,      // Focus previous monitor
-    MoveToMonitorNext,     // Move window to next monitor
-    MoveToMonitorPrev,     // Move window to previous monitor
-    Reload,                // Hot reload config
-    Exit,                  // Clean exit
+    Workspace(WorkspaceTarget),       // Switch to a regular workspace
+    MoveToWorkspace(WorkspaceTarget), // Move focused window to a regular workspace
+    WorkspaceNext,                    // Cycle to next workspace
+    WorkspacePrev,                    // Cycle to previous workspace
+    ToggleFloat,                      // Toggle focused window between tiled and floating
+    ToggleSpecial(String),            // Toggle scratchpad by name
+    MoveToSpecial(String),            // Move focused window to scratchpad
+    FocusMonitorNext,                 // Focus next monitor
+    FocusMonitorPrev,                 // Focus previous monitor
+    MoveToMonitorNext,                // Move window to next monitor
+    MoveToMonitorPrev,                // Move window to previous monitor
+    Reload,                           // Hot reload config
+    Exit,                             // Clean exit
 }
 
 /// A keybinding: modifier+key → action.
@@ -273,28 +275,108 @@ impl KeybindManager {
         mgr.add(m, Key::E, Action::Equalize);
 
         // Workspaces: Option+1-9, Option+0 for ws 10
-        mgr.add(m, Key::Num1, Action::Workspace(1));
-        mgr.add(m, Key::Num2, Action::Workspace(2));
-        mgr.add(m, Key::Num3, Action::Workspace(3));
-        mgr.add(m, Key::Num4, Action::Workspace(4));
-        mgr.add(m, Key::Num5, Action::Workspace(5));
-        mgr.add(m, Key::Num6, Action::Workspace(6));
-        mgr.add(m, Key::Num7, Action::Workspace(7));
-        mgr.add(m, Key::Num8, Action::Workspace(8));
-        mgr.add(m, Key::Num9, Action::Workspace(9));
-        mgr.add(m, Key::Num0, Action::Workspace(10));
+        mgr.add(
+            m,
+            Key::Num1,
+            Action::Workspace(WorkspaceTarget::Numbered(1)),
+        );
+        mgr.add(
+            m,
+            Key::Num2,
+            Action::Workspace(WorkspaceTarget::Numbered(2)),
+        );
+        mgr.add(
+            m,
+            Key::Num3,
+            Action::Workspace(WorkspaceTarget::Numbered(3)),
+        );
+        mgr.add(
+            m,
+            Key::Num4,
+            Action::Workspace(WorkspaceTarget::Numbered(4)),
+        );
+        mgr.add(
+            m,
+            Key::Num5,
+            Action::Workspace(WorkspaceTarget::Numbered(5)),
+        );
+        mgr.add(
+            m,
+            Key::Num6,
+            Action::Workspace(WorkspaceTarget::Numbered(6)),
+        );
+        mgr.add(
+            m,
+            Key::Num7,
+            Action::Workspace(WorkspaceTarget::Numbered(7)),
+        );
+        mgr.add(
+            m,
+            Key::Num8,
+            Action::Workspace(WorkspaceTarget::Numbered(8)),
+        );
+        mgr.add(
+            m,
+            Key::Num9,
+            Action::Workspace(WorkspaceTarget::Numbered(9)),
+        );
+        mgr.add(
+            m,
+            Key::Num0,
+            Action::Workspace(WorkspaceTarget::Numbered(10)),
+        );
 
         // Move to workspace: Option+Shift+1-9, Option+Shift+0
-        mgr.add(ms, Key::Num1, Action::MoveToWorkspace(1));
-        mgr.add(ms, Key::Num2, Action::MoveToWorkspace(2));
-        mgr.add(ms, Key::Num3, Action::MoveToWorkspace(3));
-        mgr.add(ms, Key::Num4, Action::MoveToWorkspace(4));
-        mgr.add(ms, Key::Num5, Action::MoveToWorkspace(5));
-        mgr.add(ms, Key::Num6, Action::MoveToWorkspace(6));
-        mgr.add(ms, Key::Num7, Action::MoveToWorkspace(7));
-        mgr.add(ms, Key::Num8, Action::MoveToWorkspace(8));
-        mgr.add(ms, Key::Num9, Action::MoveToWorkspace(9));
-        mgr.add(ms, Key::Num0, Action::MoveToWorkspace(10));
+        mgr.add(
+            ms,
+            Key::Num1,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(1)),
+        );
+        mgr.add(
+            ms,
+            Key::Num2,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(2)),
+        );
+        mgr.add(
+            ms,
+            Key::Num3,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(3)),
+        );
+        mgr.add(
+            ms,
+            Key::Num4,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(4)),
+        );
+        mgr.add(
+            ms,
+            Key::Num5,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(5)),
+        );
+        mgr.add(
+            ms,
+            Key::Num6,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(6)),
+        );
+        mgr.add(
+            ms,
+            Key::Num7,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(7)),
+        );
+        mgr.add(
+            ms,
+            Key::Num8,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(8)),
+        );
+        mgr.add(
+            ms,
+            Key::Num9,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(9)),
+        );
+        mgr.add(
+            ms,
+            Key::Num0,
+            Action::MoveToWorkspace(WorkspaceTarget::Numbered(10)),
+        );
 
         mgr
     }
@@ -414,7 +496,10 @@ mod tests {
             keycode: 0x13, // 2
             modifiers: Modifiers::COMMAND,
         };
-        assert_eq!(mgr.dispatch(&event), Some(Action::Workspace(2)));
+        assert_eq!(
+            mgr.dispatch(&event),
+            Some(Action::Workspace(WorkspaceTarget::Numbered(2)))
+        );
     }
 
     #[test]
@@ -424,7 +509,10 @@ mod tests {
             keycode: 0x14, // 3
             modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
         };
-        assert_eq!(mgr.dispatch(&event), Some(Action::MoveToWorkspace(3)));
+        assert_eq!(
+            mgr.dispatch(&event),
+            Some(Action::MoveToWorkspace(WorkspaceTarget::Numbered(3)))
+        );
     }
 
     #[test]

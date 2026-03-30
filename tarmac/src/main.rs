@@ -2,8 +2,11 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
 
+use tarmac::config::document::{ConfigSource, ManagedConfigDocument, RuleRow};
+use tarmac::config::lua::WindowRule;
 use tarmac::core::input::Action;
 use tarmac::core::state::WmState;
+use tarmac::core::workspace::WorkspaceTarget;
 use tarmac::platform::event_tap::EventTap;
 use tarmac::platform::hotkey::HotkeyManager;
 use tarmac::platform::permissions;
@@ -58,6 +61,7 @@ fn main() {
     state.bar_height = config.settings.bar_height;
     state.rules = config.rules.clone();
     state.special_configs = config.special_configs.clone();
+    state.set_workspace_defs(config.workspace_defs.clone());
     state.borders.border_width = config.settings.border_width;
     state.borders.focused_color =
         tarmac::platform::border::BorderColor::from_hex(&config.settings.border_color_focused);
@@ -202,9 +206,9 @@ fn handle_action(action: Action) {
                 Action::Swap(dir) => state.swap_direction(dir),
                 Action::Resize(dir) => state.resize_direction(dir),
                 Action::Equalize => state.equalize(),
-                Action::Workspace(num) => {
+                Action::Workspace(ref target) => {
                     let old = state.active_workspace().id.to_string();
-                    state.switch_workspace(num);
+                    state.switch_workspace(target);
                     let new = state.active_workspace().id.to_string();
                     fire_lua_event("workspace_changed", &[&old, &new]);
                     publish_event(tarmac::ipc::events::WmEvent::WorkspaceChanged {
@@ -212,7 +216,7 @@ fn handle_action(action: Action) {
                         new: new.clone(),
                     });
                 }
-                Action::MoveToWorkspace(num) => state.move_to_workspace(num),
+                Action::MoveToWorkspace(ref target) => state.move_to_workspace(target),
                 Action::WorkspaceNext => {
                     let old = state.active_workspace().id.to_string();
                     state.workspace_next();
@@ -467,19 +471,27 @@ fn process_ipc_command(
                 Response::ok_empty()
             }
             "workspace" => {
-                if let Some(n) = request.args.first().and_then(|a| a.parse::<u8>().ok()) {
-                    state.switch_workspace(n);
+                if let Some(target) = request
+                    .args
+                    .first()
+                    .and_then(|arg| WorkspaceTarget::parse(arg))
+                {
+                    state.switch_workspace(&target);
                     Response::ok_empty()
                 } else {
-                    Response::err("usage: workspace <1-10>")
+                    Response::err("usage: workspace <1-10|A-Z>")
                 }
             }
             "move-to-workspace" => {
-                if let Some(n) = request.args.first().and_then(|a| a.parse::<u8>().ok()) {
-                    state.move_to_workspace(n);
+                if let Some(target) = request
+                    .args
+                    .first()
+                    .and_then(|arg| WorkspaceTarget::parse(arg))
+                {
+                    state.move_to_workspace(&target);
                     Response::ok_empty()
                 } else {
-                    Response::err("usage: move-to-workspace <1-10>")
+                    Response::err("usage: move-to-workspace <1-10|A-Z>")
                 }
             }
             "toggle-floating" => {
@@ -773,6 +785,7 @@ fn reload_config() {
             state.bar_height = config.settings.bar_height;
             state.rules = config.rules.clone();
             state.special_configs = config.special_configs.clone();
+            state.set_workspace_defs(config.workspace_defs.clone());
             state.borders.border_width = config.settings.border_width;
             state.borders.focused_color = tarmac::platform::border::BorderColor::from_hex(
                 &config.settings.border_color_focused,
