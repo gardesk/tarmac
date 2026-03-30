@@ -5,6 +5,7 @@ use super::lua::{
     load_config, load_config_from_source, lua_number, lua_string,
 };
 use super::settings::Settings;
+use crate::core::input::Modifiers;
 use crate::core::workspace::{WorkspaceDefinition, WorkspaceId, WorkspaceKind};
 
 pub const MANAGED_BEGIN: &str = "-- BEGIN TARMAC SETTINGS";
@@ -24,6 +25,30 @@ impl ConfigSource {
             Self::Lua => "lua",
             Self::Default => "default",
         }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Managed => "Managed",
+            Self::Lua => "Lua",
+            Self::Default => "Default",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeybindRow {
+    pub id: String,
+    pub shortcut: String,
+    pub action: String,
+    pub source: ConfigSource,
+    pub editable: bool,
+    pub keybind: LuaKeybind,
+}
+
+impl KeybindRow {
+    pub fn source_label(&self) -> &'static str {
+        self.source.label()
     }
 }
 
@@ -47,11 +72,7 @@ impl RuleRow {
     }
 
     pub fn source_label(&self) -> &'static str {
-        match self.source {
-            ConfigSource::Managed => "Managed",
-            ConfigSource::Lua => "Lua",
-            ConfigSource::Default => "Default",
-        }
+        self.source.label()
     }
 }
 
@@ -141,6 +162,41 @@ impl ManagedConfigDocument {
         build_rule_rows(&self.managed.rules, ConfigSource::Managed)
     }
 
+    pub fn managed_keybind_rows(&self, mod_key: Modifiers) -> Vec<KeybindRow> {
+        build_keybind_rows(&self.managed.keybinds, ConfigSource::Managed, mod_key)
+    }
+
+    pub fn external_keybind_rows(&self, mod_key: Modifiers) -> Vec<KeybindRow> {
+        let defaults = super::lua::default_keybinds(&self.effective.settings);
+        self.effective
+            .keybinds
+            .iter()
+            .filter(|keybind| !self.managed.keybinds.contains(*keybind))
+            .enumerate()
+            .map(|(index, keybind)| {
+                let source = if defaults.contains(keybind) {
+                    ConfigSource::Default
+                } else {
+                    ConfigSource::Lua
+                };
+                KeybindRow {
+                    id: format!("{}:{index}", source.as_str()),
+                    shortcut: format_key_spec(keybind.modifiers, keybind.key, mod_key),
+                    action: format_action(&keybind.action),
+                    source,
+                    editable: false,
+                    keybind: keybind.clone(),
+                }
+            })
+            .collect()
+    }
+
+    pub fn keybind_rows(&self, mod_key: Modifiers) -> Vec<KeybindRow> {
+        let mut rows = self.managed_keybind_rows(mod_key);
+        rows.extend(self.external_keybind_rows(mod_key));
+        rows
+    }
+
     pub fn external_rule_rows(&self) -> Vec<RuleRow> {
         let rules = self
             .effective
@@ -170,6 +226,25 @@ fn build_rule_rows(rules: &[WindowRule], source: ConfigSource) -> Vec<RuleRow> {
             source,
             editable: source == ConfigSource::Managed,
             rule: rule.clone(),
+        })
+        .collect()
+}
+
+fn build_keybind_rows(
+    keybinds: &[LuaKeybind],
+    source: ConfigSource,
+    mod_key: Modifiers,
+) -> Vec<KeybindRow> {
+    keybinds
+        .iter()
+        .enumerate()
+        .map(|(index, keybind)| KeybindRow {
+            id: format!("{}:{index}", source.as_str()),
+            shortcut: format_key_spec(keybind.modifiers, keybind.key, mod_key),
+            action: format_action(&keybind.action),
+            source,
+            editable: source == ConfigSource::Managed,
+            keybind: keybind.clone(),
         })
         .collect()
 }
@@ -502,6 +577,53 @@ mod tests {
         assert!(text.contains("app_name = { value = \"Safari\", mode = \"exact\" }"));
         assert!(text.contains("title = { value = \"Profile .*\", mode = \"regex\" }"));
         assert!(text.contains("workspace = \"special:web\""));
+    }
+
+    #[test]
+    fn keybind_rows_preserve_sources_and_formatting() {
+        let settings = Settings::default();
+        let managed_keybind = LuaKeybind {
+            modifiers: Modifiers::COMMAND | Modifiers::SHIFT,
+            key: Key::Period,
+            action: Action::Reload,
+        };
+        let default_keybind = super::super::lua::default_keybinds(&settings)[0].clone();
+        let lua_keybind = LuaKeybind {
+            modifiers: Modifiers::OPTION | Modifiers::SHIFT,
+            key: Key::Period,
+            action: Action::Exit,
+        };
+        let doc = ManagedConfigDocument {
+            path: PathBuf::new(),
+            prefix: String::new(),
+            suffix: String::new(),
+            managed: ManagedConfig {
+                settings: settings.clone(),
+                keybinds: vec![managed_keybind.clone()],
+                rules: Vec::new(),
+                special_configs: Vec::new(),
+                workspace_defs: Vec::new(),
+            },
+            effective: LuaConfig {
+                settings,
+                keybinds: vec![managed_keybind, default_keybind, lua_keybind],
+                rules: Vec::new(),
+                special_configs: Vec::new(),
+                workspace_defs: Vec::new(),
+                lua: None,
+                callbacks: Vec::new(),
+            },
+        };
+
+        let rows = doc.keybind_rows(Modifiers::COMMAND);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].source, ConfigSource::Managed);
+        assert_eq!(rows[0].shortcut, "mod+shift+period");
+        assert_eq!(rows[0].action, "reload");
+        assert_eq!(rows[1].source, ConfigSource::Default);
+        assert_eq!(rows[2].source, ConfigSource::Lua);
+        assert!(!rows[2].editable);
     }
 
     #[test]

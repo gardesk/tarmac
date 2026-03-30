@@ -708,6 +708,14 @@ impl LuaConfig {
     }
 }
 
+pub fn parse_keybind(
+    keys: &str,
+    action: &str,
+    mod_key: Modifiers,
+) -> Result<LuaKeybind, &'static str> {
+    parse_keybind_and_action(keys, action, mod_key)
+}
+
 fn parse_keybind_and_action(
     keys: &str,
     action: &str,
