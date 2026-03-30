@@ -21,6 +21,9 @@ thread_local! {
     static LUA_CONFIG: RefCell<Option<tarmac::config::lua::LuaConfig>> = const { RefCell::new(None) };
     static HOTKEY_MGR: RefCell<Option<HotkeyManager>> = const { RefCell::new(None) };
     static CONFIG_PATH: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+    static TRAY: RefCell<Option<tarmac::ui::tray::TrayWidget>> = const { RefCell::new(None) };
+    static SETTINGS_WIN: RefCell<Option<tarmac::ui::settings::SettingsWindow>> = const { RefCell::new(None) };
+    static SETTINGS_SELECTED_RULE_ID: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -271,9 +274,14 @@ fn handle_action(action: Action) {
 
 fn spawn_terminal() {
     tracing::info!("spawning terminal");
-    std::process::Command::new("open")
-        .arg("-na")
-        .arg("WezTerm")
+    let command = LUA_CONFIG.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|config| config.settings.terminal_command.clone())
+            .unwrap_or_else(|| "open -na WezTerm".to_string())
+    });
+    std::process::Command::new("/bin/sh")
+        .args(["-c", &command])
         .spawn()
         .ok();
 }
@@ -288,6 +296,10 @@ fn generate_default_config_if_missing(path: &std::path::Path) {
     let default_config = r##"-- tarmac configuration
 -- ~/.config/tarmac/init.lua
 
+-- Custom Lua outside the managed block is preserved and still executed.
+-- The Settings window only rewrites the marked block below.
+
+-- BEGIN TARMAC SETTINGS
 -- Modifier key: "command", "option", or "control"
 gar.set("mod_key", "command")
 
@@ -365,10 +377,12 @@ gar.bind("mod+shift+r", "reload")
 -- gar.rule({ app_name = "Safari" }, { workspace = 2 })
 
 -- Borders (set border_width > 0 to enable ers)
-gar.set("border_width", "4")
+gar.set("border_width", 4)
 gar.set("border_color_focused", "#5294e2")
 gar.set("border_color_unfocused", "#59595980")
-gar.set("border_radius", "10")
+gar.set("border_radius", 10)
+
+-- END TARMAC SETTINGS
 
 -- Autostart (uncomment as needed)
 -- gar.exec_once("sketchybar")
@@ -418,6 +432,15 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             }
         }
     });
+
+    poll_tray_actions();
+    TRAY.with(|t| {
+        if let Some(tray) = t.borrow().as_ref() {
+            update_tray(tray);
+        }
+    });
+
+    poll_settings_actions();
 }
 
 fn process_ipc_command(
@@ -812,6 +835,7 @@ fn reload_config() {
         *c.borrow_mut() = Some(config);
     });
 
+    refresh_settings_window();
     tracing::info!("config reloaded successfully");
 }
 
@@ -836,6 +860,615 @@ fn cleanup_socket() {
     let _ = std::fs::remove_file(&path);
 }
 
+fn update_tray(tray: &tarmac::ui::tray::TrayWidget) {
+    WM_STATE.with(|s| {
+        if let Some(state) = s.borrow().as_ref() {
+            let active_id = state.active_workspace().id.to_string();
+            let workspaces: Vec<tarmac::ui::tray::TrayWorkspace> = state
+                .workspaces
+                .iter()
+                .filter_map(|ws| {
+                    let switch_target = ws.id.as_regular_target();
+                    if switch_target.is_none() && ws.all_window_ids().is_empty() {
+                        return None;
+                    }
+                    Some(tarmac::ui::tray::TrayWorkspace {
+                        id: ws.id.to_string(),
+                        active: ws.visible,
+                        windows: ws.all_window_ids().len(),
+                        switch_target,
+                    })
+                })
+                .collect();
+            tray.update(&workspaces, &active_id);
+        }
+    });
+}
+
+fn poll_tray_actions() {
+    TRAY.with(|t| {
+        let borrow = t.borrow();
+        let Some(tray) = borrow.as_ref() else { return };
+        let actions = tray.poll_actions();
+        drop(borrow);
+
+        for action in actions {
+            match action {
+                tarmac::ui::tray::TrayAction::SwitchWorkspace(target) => {
+                    handle_action(Action::Workspace(target));
+                }
+                tarmac::ui::tray::TrayAction::OpenSettings => open_settings(),
+                tarmac::ui::tray::TrayAction::Reload => reload_config(),
+                tarmac::ui::tray::TrayAction::Quit => {
+                    cleanup_socket();
+                    std::process::exit(0);
+                }
+            }
+        }
+    });
+}
+
+fn open_settings() {
+    SETTINGS_WIN.with(|slot| {
+        if slot.borrow().is_none() {
+            let mtm = unsafe { objc2::MainThreadMarker::new_unchecked() };
+            let win = tarmac::ui::settings::SettingsWindow::new(mtm);
+            *slot.borrow_mut() = Some(win);
+        }
+        refresh_settings_window();
+        if let Some(win) = slot.borrow().as_ref() {
+            win.open_or_focus();
+        }
+    });
+}
+
+fn refresh_settings_window() {
+    let Some(snapshot) = build_settings_snapshot() else {
+        return;
+    };
+    SETTINGS_WIN.with(|slot| {
+        if let Some(win) = slot.borrow().as_ref() {
+            win.populate(&snapshot);
+        }
+    });
+}
+
+fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
+    let path = CONFIG_PATH.with(|p| p.borrow().clone())?;
+    let doc = ManagedConfigDocument::load(&path).ok()?;
+    let mod_key = doc.managed.settings.mod_key;
+
+    let keybinds_external_text = doc
+        .effective
+        .keybinds
+        .iter()
+        .filter(|keybind| !doc.managed.keybinds.contains(*keybind))
+        .map(|keybind| {
+            let source = if tarmac::config::lua::default_keybinds(&doc.effective.settings)
+                .contains(keybind)
+            {
+                ConfigSource::Default
+            } else {
+                ConfigSource::Lua
+            };
+            format!(
+                "[{}] {} | {}",
+                source.as_str(),
+                tarmac::config::lua::format_key_spec(keybind.modifiers, keybind.key, mod_key),
+                tarmac::config::lua::format_action(&keybind.action)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let keybinds_managed_text = doc
+        .managed
+        .keybinds
+        .iter()
+        .map(|keybind| {
+            format!(
+                "{} | {}",
+                tarmac::config::lua::format_key_spec(keybind.modifiers, keybind.key, mod_key),
+                tarmac::config::lua::format_action(&keybind.action)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let rules = doc.rule_rows();
+    let previous_selected_rule_id = SETTINGS_SELECTED_RULE_ID.with(|slot| slot.borrow().clone());
+    let selected_rule_id = resolve_selected_rule_id(&rules, previous_selected_rule_id.as_deref());
+    SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = selected_rule_id.clone());
+
+    let workspaces_external_text = format_workspace_snapshot(&doc, false);
+    let workspaces_managed_text = format_workspace_snapshot(&doc, true);
+
+    Some(tarmac::ui::settings::SettingsSnapshot {
+        gap_inner: doc.managed.settings.gap_inner,
+        gap_outer: doc.managed.settings.gap_outer,
+        bar_height: doc.managed.settings.bar_height,
+        border_width: doc.managed.settings.border_width,
+        border_radius: doc.managed.settings.border_radius,
+        border_color_focused: doc.managed.settings.border_color_focused.clone(),
+        border_color_unfocused: doc.managed.settings.border_color_unfocused.clone(),
+        focus_follows_mouse: doc.managed.settings.focus_follows_mouse,
+        mouse_follows_focus: doc.managed.settings.mouse_follows_focus,
+        mod_key: match doc.managed.settings.mod_key {
+            mods if mods == tarmac::core::input::Modifiers::OPTION => "option".to_string(),
+            mods if mods == tarmac::core::input::Modifiers::CONTROL => "control".to_string(),
+            _ => "command".to_string(),
+        },
+        keybinds_external_text,
+        keybinds_managed_text,
+        rules,
+        selected_rule_id,
+        workspaces_external_text,
+        workspaces_managed_text,
+    })
+}
+
+fn resolve_selected_rule_id(rows: &[RuleRow], preferred_id: Option<&str>) -> Option<String> {
+    if let Some(preferred_id) = preferred_id
+        && rows.iter().any(|row| row.id == preferred_id)
+    {
+        return Some(preferred_id.to_string());
+    }
+
+    rows.iter()
+        .find(|row| row.editable)
+        .or_else(|| rows.first())
+        .map(|row| row.id.clone())
+}
+
+fn fallback_selected_rule_after_delete(rows: &[RuleRow], deleted_id: &str) -> Option<String> {
+    let deleted_index = rows.iter().position(|row| row.id == deleted_id)?;
+    rows.get(deleted_index + 1)
+        .or_else(|| {
+            deleted_index
+                .checked_sub(1)
+                .and_then(|index| rows.get(index))
+        })
+        .map(|row| row.id.clone())
+}
+
+fn format_workspace_snapshot(doc: &ManagedConfigDocument, managed: bool) -> String {
+    let defs = if managed {
+        &doc.managed.workspace_defs
+    } else {
+        &doc.effective.workspace_defs
+    };
+    let specials = if managed {
+        &doc.managed.special_configs
+    } else {
+        &doc.effective.special_configs
+    };
+
+    let mut lines = defs
+        .iter()
+        .filter(|def| {
+            if managed {
+                true
+            } else {
+                !doc.managed
+                    .workspace_defs
+                    .iter()
+                    .any(|managed_def| managed_def == *def)
+            }
+        })
+        .map(|def| {
+            let mut parts = Vec::new();
+            if let Some(monitor) = &def.prefs.monitor {
+                parts.push(format!("monitor={}", monitor.display_id));
+            }
+            parts.push(format!("layout={}", def.prefs.default_layout.as_str()));
+            if let Some(gap_inner) = def.prefs.gap_inner {
+                parts.push(format!(
+                    "gap_inner={}",
+                    tarmac::config::lua::lua_number(gap_inner)
+                ));
+            }
+            if let Some(gap_outer) = def.prefs.gap_outer {
+                parts.push(format!(
+                    "gap_outer={}",
+                    tarmac::config::lua::lua_number(gap_outer)
+                ));
+            }
+            format!("{} | {}", def.id, parts.join(" "))
+        })
+        .collect::<Vec<_>>();
+
+    for special in specials {
+        if !managed
+            && doc
+                .managed
+                .special_configs
+                .iter()
+                .any(|managed_cfg| managed_cfg == special)
+        {
+            continue;
+        }
+        lines.push(format!(
+            "special:{} | overlay.position={} overlay.width={} overlay.height={}",
+            special.name,
+            special.position,
+            tarmac::config::lua::lua_number(special.width),
+            tarmac::config::lua::lua_number(special.height)
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn managed_rule_index(rules: &[WindowRule], target_id: &str) -> Option<usize> {
+    rules
+        .iter()
+        .enumerate()
+        .find(|(index, rule)| rule.effective_id(*index) == target_id)
+        .map(|(index, _)| index)
+}
+
+fn next_managed_rule_id(rules: &[WindowRule]) -> String {
+    let used = rules
+        .iter()
+        .enumerate()
+        .map(|(index, rule)| rule.effective_id(index))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for candidate in 1..10_000 {
+        let id = format!("rule_{candidate:03}");
+        if !used.contains(&id) {
+            return id;
+        }
+    }
+
+    format!("rule_{}", used.len() + 1)
+}
+
+fn default_managed_rule(rules: &[WindowRule]) -> WindowRule {
+    WindowRule {
+        id: Some(next_managed_rule_id(rules)),
+        name: Some("New Rule".to_string()),
+        enabled: true,
+        app_name: None,
+        app_bundle: None,
+        title: None,
+        floating: None,
+        workspace: None,
+        geometry: None,
+    }
+}
+
+fn add_managed_rule(rules: &mut Vec<WindowRule>) -> String {
+    let rule = default_managed_rule(rules);
+    let id = rule.id.clone().expect("default managed rule id missing");
+    rules.push(rule);
+    id
+}
+
+fn duplicate_managed_rule(rules: &mut Vec<WindowRule>, target_id: &str) -> Option<String> {
+    let index = managed_rule_index(rules, target_id)?;
+    let mut duplicate = rules.get(index)?.clone();
+    let duplicate_id = next_managed_rule_id(rules);
+    duplicate.id = Some(duplicate_id.clone());
+    rules.insert(index + 1, duplicate);
+    Some(duplicate_id)
+}
+
+fn delete_managed_rule(rules: &mut Vec<WindowRule>, target_id: &str) -> bool {
+    let Some(index) = managed_rule_index(rules, target_id) else {
+        return false;
+    };
+    rules.remove(index);
+    true
+}
+
+fn move_managed_rule_up(rules: &mut [WindowRule], target_id: &str) -> bool {
+    let Some(index) = managed_rule_index(rules, target_id) else {
+        return false;
+    };
+    if index == 0 {
+        return false;
+    }
+    rules.swap(index, index - 1);
+    true
+}
+
+fn move_managed_rule_down(rules: &mut [WindowRule], target_id: &str) -> bool {
+    let Some(index) = managed_rule_index(rules, target_id) else {
+        return false;
+    };
+    if index + 1 >= rules.len() {
+        return false;
+    }
+    rules.swap(index, index + 1);
+    true
+}
+
+fn replace_managed_rule(
+    rules: &mut [WindowRule],
+    target_id: &str,
+    mut replacement: WindowRule,
+) -> bool {
+    let Some(index) = managed_rule_index(rules, target_id) else {
+        return false;
+    };
+    replacement.id = Some(target_id.to_string());
+    rules[index] = replacement;
+    true
+}
+
+fn toggle_managed_rule_enabled(rules: &mut [WindowRule], target_id: &str, enabled: bool) -> bool {
+    let Some(index) = managed_rule_index(rules, target_id) else {
+        return false;
+    };
+    if rules[index].id.is_none() {
+        rules[index].id = Some(target_id.to_string());
+    }
+    rules[index].enabled = enabled;
+    true
+}
+
+fn poll_settings_actions() {
+    use tarmac::ui::settings::SettingsAction;
+
+    SETTINGS_WIN.with(|slot| {
+        let borrow = slot.borrow();
+        let Some(win) = borrow.as_ref() else { return };
+        let actions = win.poll_actions();
+        if actions.is_empty() {
+            return;
+        }
+        win.refresh_labels();
+        drop(borrow);
+
+        let Some(path) = CONFIG_PATH.with(|p| p.borrow().clone()) else {
+            return;
+        };
+        let Ok(mut doc) = ManagedConfigDocument::load(&path) else {
+            return;
+        };
+
+        let mut should_write = false;
+        let mut should_refresh = false;
+        let mut pending_rule_draft = None;
+        for action in actions {
+            match action {
+                SettingsAction::GapInner(value) => {
+                    doc.managed.settings.gap_inner = value;
+                    should_write = true;
+                }
+                SettingsAction::GapOuter(value) => {
+                    doc.managed.settings.gap_outer = value;
+                    should_write = true;
+                }
+                SettingsAction::BarHeight(value) => {
+                    doc.managed.settings.bar_height = value;
+                    should_write = true;
+                }
+                SettingsAction::BorderWidth(value) => {
+                    doc.managed.settings.border_width = value;
+                    should_write = true;
+                }
+                SettingsAction::BorderRadius(value) => {
+                    doc.managed.settings.border_radius = value;
+                    should_write = true;
+                }
+                SettingsAction::BorderColorFocused(value) => {
+                    doc.managed.settings.border_color_focused = value;
+                    should_write = true;
+                }
+                SettingsAction::BorderColorUnfocused(value) => {
+                    doc.managed.settings.border_color_unfocused = value;
+                    should_write = true;
+                }
+                SettingsAction::FocusFollowsMouse(value) => {
+                    doc.managed.settings.focus_follows_mouse = value;
+                    should_write = true;
+                }
+                SettingsAction::MouseFollowsFocus(value) => {
+                    doc.managed.settings.mouse_follows_focus = value;
+                    should_write = true;
+                }
+                SettingsAction::ModKey(value) => {
+                    doc.managed.settings.mod_key = match value.as_str() {
+                        "option" => tarmac::core::input::Modifiers::OPTION,
+                        "control" => tarmac::core::input::Modifiers::CONTROL,
+                        _ => tarmac::core::input::Modifiers::COMMAND,
+                    };
+                    should_write = true;
+                }
+                SettingsAction::ApplyManagedKeybinds(text) => {
+                    if let Ok(keybinds) =
+                        parse_managed_keybinds(&text, doc.managed.settings.mod_key)
+                    {
+                        doc.managed.keybinds = keybinds;
+                        should_write = true;
+                    }
+                }
+                SettingsAction::ResetManagedKeybinds => {
+                    doc.managed.keybinds =
+                        tarmac::config::lua::default_keybinds(&doc.managed.settings);
+                    should_write = true;
+                }
+                SettingsAction::SelectRule(id) => {
+                    SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                    should_refresh = true;
+                }
+                SettingsAction::AddRule => {
+                    let id = add_managed_rule(&mut doc.managed.rules);
+                    SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                    should_write = true;
+                }
+                SettingsAction::DuplicateRule(id) => {
+                    if let Some(new_id) = duplicate_managed_rule(&mut doc.managed.rules, &id) {
+                        SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = Some(new_id));
+                        should_write = true;
+                    }
+                }
+                SettingsAction::DeleteRule(id) => {
+                    let fallback_id = fallback_selected_rule_after_delete(&doc.rule_rows(), &id);
+                    if delete_managed_rule(&mut doc.managed.rules, &id) {
+                        SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = fallback_id);
+                        should_write = true;
+                    }
+                }
+                SettingsAction::MoveRuleUp(id) => {
+                    if move_managed_rule_up(&mut doc.managed.rules, &id) {
+                        SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                        should_write = true;
+                    }
+                }
+                SettingsAction::MoveRuleDown(id) => {
+                    if move_managed_rule_down(&mut doc.managed.rules, &id) {
+                        SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                        should_write = true;
+                    }
+                }
+                SettingsAction::UpdateRuleDraft(rule) => {
+                    pending_rule_draft = Some(rule);
+                }
+                SettingsAction::ApplyRule(id) => {
+                    if let Some(rule) = pending_rule_draft.take()
+                        && replace_managed_rule(&mut doc.managed.rules, &id, rule)
+                    {
+                        SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                        should_write = true;
+                    }
+                }
+                SettingsAction::ToggleRuleEnabled(id, enabled) => {
+                    if toggle_managed_rule_enabled(&mut doc.managed.rules, &id, enabled) {
+                        SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                        should_write = true;
+                    }
+                }
+                SettingsAction::ApplyManagedWorkspaces(text) => {
+                    if let Ok((defs, specials)) = parse_managed_workspaces(&text) {
+                        doc.managed.workspace_defs = defs;
+                        doc.managed.special_configs = specials;
+                        should_write = true;
+                    }
+                }
+            }
+        }
+
+        if should_write && doc.write().is_ok() {
+            reload_config();
+            refresh_settings_window();
+        } else if should_refresh {
+            refresh_settings_window();
+        }
+    });
+}
+
+fn parse_managed_keybinds(
+    text: &str,
+    mod_key: tarmac::core::input::Modifiers,
+) -> Result<Vec<tarmac::config::lua::LuaKeybind>, String> {
+    let mod_key_name = match mod_key {
+        mods if mods == tarmac::core::input::Modifiers::OPTION => "option",
+        mods if mods == tarmac::core::input::Modifiers::CONTROL => "control",
+        _ => "command",
+    };
+    let mut source = format!("gar.set(\"mod_key\", \"{}\")\n", mod_key_name);
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some((key_spec, action)) = line.split_once('|') else {
+            return Err(format!("invalid keybind line: {line}"));
+        };
+        source.push_str(&format!(
+            "gar.bind({}, {})\n",
+            tarmac::config::lua::lua_string(key_spec.trim()),
+            tarmac::config::lua::lua_string(action.trim())
+        ));
+    }
+    Ok(tarmac::config::lua::load_config_from_source(&source, "managed-keybinds").keybinds)
+}
+
+fn parse_managed_workspaces(
+    text: &str,
+) -> Result<
+    (
+        Vec<tarmac::core::workspace::WorkspaceDefinition>,
+        Vec<tarmac::config::lua::SpecialWorkspaceConfig>,
+    ),
+    String,
+> {
+    let mut source = String::new();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Some((id, rest)) = line.split_once('|') else {
+            return Err(format!("invalid workspace line: {line}"));
+        };
+        let id = id.trim();
+        let entries = rest.trim();
+        let mut workspace_entries = Vec::new();
+        let mut overlay_entries = Vec::new();
+        for token in entries.split_whitespace() {
+            let Some((key, value)) = token.split_once('=') else {
+                continue;
+            };
+            if let Some(overlay_key) = key.strip_prefix("overlay.") {
+                overlay_entries.push((overlay_key.to_string(), value.to_string()));
+            } else {
+                workspace_entries.push((key.to_string(), value.to_string()));
+            }
+        }
+
+        source.push_str(&format!(
+            "gar.workspace({}, {{{}}})\n",
+            workspace_id_lua_literal(id),
+            workspace_tokens_to_lua(&workspace_entries)
+        ));
+        if let Some(name) = id.strip_prefix("special:")
+            && !overlay_entries.is_empty()
+        {
+            source.push_str(&format!(
+                "gar.special_workspace({}, {{{}}})\n",
+                tarmac::config::lua::lua_string(name),
+                workspace_tokens_to_lua(&overlay_entries)
+            ));
+        }
+    }
+
+    let config = tarmac::config::lua::load_config_from_source(&source, "managed-workspaces");
+    let defs = config
+        .workspace_defs
+        .into_iter()
+        .filter(|def| {
+            !matches!(
+                def.id,
+                tarmac::core::workspace::WorkspaceId::Numbered(1..=10)
+            ) || def.prefs.monitor.is_some()
+                || def.prefs.gap_inner.is_some()
+                || def.prefs.gap_outer.is_some()
+        })
+        .collect();
+    Ok((defs, config.special_configs))
+}
+
+fn workspace_id_lua_literal(id: &str) -> String {
+    if id.chars().all(|ch| ch.is_ascii_digit()) {
+        id.to_string()
+    } else {
+        tarmac::config::lua::lua_string(id)
+    }
+}
+
+fn workspace_tokens_to_lua(entries: &[(String, String)]) -> String {
+    entries
+        .iter()
+        .map(|(key, value)| format!("{key} = {}", lua_value(value)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn lua_value(value: &str) -> String {
+    if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
+        value.to_ascii_lowercase()
+    } else if value.parse::<f64>().is_ok() {
+        value.to_string()
+    } else {
+        tarmac::config::lua::lua_string(value)
+    }
+}
+
 fn run_app() {
     use objc2::MainThreadMarker;
     use objc2_app_kit::NSApplication;
@@ -845,6 +1478,114 @@ fn run_app() {
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 
+    let tray = tarmac::ui::tray::TrayWidget::new(mtm);
+    update_tray(&tray);
+    TRAY.with(|t| *t.borrow_mut() = Some(tray));
+
     tracing::info!("entering main event loop");
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tarmac::config::document::ConfigSource;
+
+    fn sample_rule(id: &str, name: &str) -> WindowRule {
+        WindowRule {
+            id: Some(id.to_string()),
+            name: Some(name.to_string()),
+            enabled: true,
+            app_name: None,
+            app_bundle: None,
+            title: None,
+            floating: None,
+            workspace: None,
+            geometry: None,
+        }
+    }
+
+    fn sample_rule_row(id: &str, editable: bool) -> RuleRow {
+        RuleRow {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            source: if editable {
+                ConfigSource::Managed
+            } else {
+                ConfigSource::Lua
+            },
+            editable,
+            rule: sample_rule(id, id),
+        }
+    }
+
+    #[test]
+    fn add_rule_uses_default_contents() {
+        let mut rules = vec![sample_rule("rule_001", "Existing")];
+        let id = add_managed_rule(&mut rules);
+        let added = rules.last().expect("missing added rule");
+        assert_eq!(id, "rule_002");
+        assert_eq!(added.id.as_deref(), Some("rule_002"));
+        assert_eq!(added.name.as_deref(), Some("New Rule"));
+        assert!(added.enabled);
+    }
+
+    #[test]
+    fn duplicate_rule_preserves_fields_but_reassigns_id() {
+        let mut rules = vec![sample_rule("rule_001", "Browser")];
+        let duplicated_id =
+            duplicate_managed_rule(&mut rules, "rule_001").expect("duplicate failed");
+        assert_eq!(duplicated_id, "rule_002");
+        assert_eq!(rules.len(), 2);
+        assert_eq!(rules[1].id.as_deref(), Some("rule_002"));
+        assert_eq!(rules[1].name, rules[0].name);
+    }
+
+    #[test]
+    fn move_rule_up_and_down_keep_order_stable() {
+        let mut rules = vec![
+            sample_rule("rule_001", "One"),
+            sample_rule("rule_002", "Two"),
+            sample_rule("rule_003", "Three"),
+        ];
+        assert!(move_managed_rule_up(&mut rules, "rule_003"));
+        assert_eq!(rules[1].id.as_deref(), Some("rule_003"));
+        assert!(move_managed_rule_down(&mut rules, "rule_003"));
+        assert_eq!(rules[2].id.as_deref(), Some("rule_003"));
+    }
+
+    #[test]
+    fn delete_rule_selection_falls_forward_then_backward() {
+        let rows = vec![
+            sample_rule_row("rule_001", true),
+            sample_rule_row("rule_002", true),
+            sample_rule_row("lua_rule", false),
+        ];
+        assert_eq!(
+            fallback_selected_rule_after_delete(&rows, "rule_001").as_deref(),
+            Some("rule_002")
+        );
+        assert_eq!(
+            fallback_selected_rule_after_delete(&rows, "lua_rule").as_deref(),
+            Some("rule_002")
+        );
+    }
+
+    #[test]
+    fn resolve_selected_rule_prefers_existing_then_first_managed() {
+        let rows = vec![
+            sample_rule_row("lua_rule", false),
+            sample_rule_row("rule_001", true),
+            sample_rule_row("rule_002", true),
+        ];
+        assert_eq!(
+            resolve_selected_rule_id(&rows, Some("rule_002")).as_deref(),
+            Some("rule_002")
+        );
+        assert_eq!(
+            resolve_selected_rule_id(&rows, Some("missing")).as_deref(),
+            Some("rule_001")
+        );
+    }
 }

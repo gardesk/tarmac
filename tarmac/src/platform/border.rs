@@ -28,7 +28,7 @@ impl BorderColor {
         Self { r, g, b, a }
     }
 
-    fn to_hex(&self) -> String {
+    fn hex_string(self) -> String {
         let r = (self.r * 255.0) as u8;
         let g = (self.g * 255.0) as u8;
         let b = (self.b * 255.0) as u8;
@@ -86,8 +86,8 @@ impl BorderManager {
             ers_bin,
             self.border_width,
             self.radius,
-            self.focused_color.to_hex(),
-            self.unfocused_color.to_hex(),
+            self.focused_color.hex_string(),
+            self.unfocused_color.hex_string(),
         );
         tracing::debug!(cmd, "spawning ers");
         match Command::new("/bin/sh").args(["-c", &cmd]).spawn() {
