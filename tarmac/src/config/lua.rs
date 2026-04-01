@@ -258,7 +258,7 @@ pub fn load_config_from_source(source: &str, chunk_name: &str) -> LuaConfig {
     if let Err(e) = lua.load(source).set_name(chunk_name).exec() {
         tracing::error!(err = %e, chunk_name, "lua config error");
     } else {
-        tracing::info!(chunk_name, "config loaded");
+        tracing::debug!(chunk_name, "lua chunk loaded");
     }
 
     let s = settings.borrow().clone();
@@ -275,7 +275,7 @@ pub fn load_config_from_source(source: &str, chunk_name: &str) -> LuaConfig {
     wd.sort_by_key(workspace_sort_key);
     wd.dedup_by(|a, b| a.id == b.id);
     let cbs = callbacks.borrow_mut().drain(..).collect::<Vec<_>>();
-    tracing::info!(rules = r.len(), callbacks = cbs.len(), "config loaded");
+    tracing::debug!(rules = r.len(), callbacks = cbs.len(), "lua config parsed");
 
     LuaConfig {
         settings: s,
