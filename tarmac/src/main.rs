@@ -1315,7 +1315,7 @@ fn poll_settings_actions() {
         };
 
         let mut should_write = false;
-        let mut should_refresh = false;
+        let should_refresh = false;
         let mut pending_keybind_draft = None;
         let mut pending_rule_draft = None;
         for action in actions {
@@ -1366,7 +1366,6 @@ fn poll_settings_actions() {
                 }
                 SettingsAction::SelectKeybind(id) => {
                     SETTINGS_SELECTED_KEYBIND_ID.with(|slot| *slot.borrow_mut() = Some(id));
-                    should_refresh = true;
                 }
                 SettingsAction::AddKeybind => {
                     let id = add_managed_keybind(
@@ -1422,7 +1421,6 @@ fn poll_settings_actions() {
                 }
                 SettingsAction::SelectRule(id) => {
                     SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = Some(id));
-                    should_refresh = true;
                 }
                 SettingsAction::AddRule => {
                     let id = add_managed_rule(&mut doc.managed.rules);
