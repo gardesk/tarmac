@@ -61,6 +61,7 @@ pub enum SettingsAction {
     SelectKeybind(String),
     AddKeybind,
     DeleteKeybind(String),
+    CopyKeybindToManaged(String),
     UpdateKeybindDraft(KeybindDraft),
     ApplyKeybind(String),
     ResetManagedKeybinds,
@@ -100,6 +101,7 @@ struct KeybindInspectorState {
     editable: bool,
     source_label: String,
     can_delete: bool,
+    can_copy_to_managed: bool,
     can_apply: bool,
     draft: Option<KeybindDraft>,
 }
@@ -125,6 +127,7 @@ struct KeybindingsUiRefs {
     shortcut_field: Retained<NSTextField>,
     action_field: Retained<NSTextField>,
     delete_button: Retained<NSButton>,
+    copy_button: Retained<NSButton>,
     apply_button: Retained<NSButton>,
 }
 
@@ -608,6 +611,14 @@ define_class!(
                 return;
             };
             self.emit(SettingsAction::DeleteKeybind(id));
+        }
+
+        #[unsafe(method(onKeybindCopyToManaged:))]
+        fn on_keybind_copy_to_managed(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.ivars().selected_keybind_id.borrow().clone() else {
+                return;
+            };
+            self.emit(SettingsAction::CopyKeybindToManaged(id));
         }
 
         #[unsafe(method(onKeybindApply:))]
@@ -1496,6 +1507,17 @@ fn build_keybindings_tab(mtm: MainThreadMarker, handler: &SettingsHandler) -> Ke
         44.0,
     );
 
+    let copy_button = add_button(
+        mtm,
+        &right,
+        handler,
+        "Copy To Managed",
+        right_frame.size.width - 332.0,
+        34.0,
+        142.0,
+        sel!(onKeybindCopyToManaged:),
+    );
+
     let apply_button = add_button(
         mtm,
         &right,
@@ -1522,6 +1544,7 @@ fn build_keybindings_tab(mtm: MainThreadMarker, handler: &SettingsHandler) -> Ke
             shortcut_field,
             action_field,
             delete_button,
+            copy_button,
             apply_button,
         },
     }
@@ -1896,6 +1919,7 @@ fn derive_keybind_inspector_state(
             editable: false,
             source_label: String::new(),
             can_delete: false,
+            can_copy_to_managed: false,
             can_apply: false,
             draft: None,
         };
@@ -1906,6 +1930,7 @@ fn derive_keybind_inspector_state(
             editable: false,
             source_label: String::new(),
             can_delete: false,
+            can_copy_to_managed: false,
             can_apply: false,
             draft: None,
         };
@@ -1915,6 +1940,7 @@ fn derive_keybind_inspector_state(
         editable: row.editable,
         source_label: row.source_label().to_string(),
         can_delete: row.editable,
+        can_copy_to_managed: !row.editable,
         can_apply: row.editable,
         draft: if row.editable {
             draft_keybind
@@ -1932,6 +1958,7 @@ fn apply_keybind_inspector_state(ui: &KeybindingsUiRefs, state: &KeybindInspecto
     ui.source_value
         .setStringValue(&NSString::from_str(&state.source_label));
     ui.delete_button.setEnabled(state.can_delete);
+    ui.copy_button.setEnabled(state.can_copy_to_managed);
     ui.apply_button.setEnabled(state.can_apply);
 
     let Some(draft) = state.draft.as_ref() else {
@@ -2730,6 +2757,7 @@ mod tests {
         ];
         let state = derive_keybind_inspector_state(&rows, Some("default:0"), None);
         assert!(!state.editable);
+        assert!(state.can_copy_to_managed);
         assert!(!state.can_apply);
         assert_eq!(state.source_label, "Default");
     }
@@ -2742,6 +2770,7 @@ mod tests {
         ];
         let state = derive_keybind_inspector_state(&rows, Some("managed:0"), None);
         assert!(state.editable);
+        assert!(!state.can_copy_to_managed);
         assert!(state.can_apply);
         assert_eq!(state.source_label, "Managed");
     }

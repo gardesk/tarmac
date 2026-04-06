@@ -49,7 +49,7 @@ fn main() {
         .join("tarmac")
         .join("init.lua");
     generate_default_config_if_missing(&config_path);
-    let config = tarmac::config::lua::load_config(&config_path);
+    let config = load_runtime_config(&config_path);
     tracing::info!(
         keybinds = config.keybinds.len(),
         mod_key = ?config.settings.mod_key,
@@ -789,6 +789,26 @@ fn register_hotkeys_from_config(config: &tarmac::config::lua::LuaConfig) {
     HOTKEY_MGR.with(|h| *h.borrow_mut() = Some(mgr));
 }
 
+fn load_runtime_config(path: &std::path::Path) -> tarmac::config::lua::LuaConfig {
+    match ManagedConfigDocument::load(path) {
+        Ok(doc) => {
+            let mod_key = doc.effective.settings.mod_key;
+            let resolved_keybinds = doc.resolved_keybinds(mod_key);
+            let mut config = doc.effective;
+            config.keybinds = resolved_keybinds;
+            config
+        }
+        Err(err) => {
+            tracing::warn!(
+                ?path,
+                err,
+                "failed to load managed config document, falling back"
+            );
+            tarmac::config::lua::load_config(path)
+        }
+    }
+}
+
 fn reload_config() {
     let path = CONFIG_PATH.with(|p| p.borrow().clone());
     let Some(path) = path else {
@@ -797,7 +817,7 @@ fn reload_config() {
     };
 
     tracing::info!("reloading config...");
-    let config = tarmac::config::lua::load_config(&path);
+    let config = load_runtime_config(&path);
 
     // Update WmState settings
     WM_STATE.with(|s| {
@@ -937,8 +957,8 @@ fn refresh_settings_window() {
 fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
     let path = CONFIG_PATH.with(|p| p.borrow().clone())?;
     let doc = ManagedConfigDocument::load(&path).ok()?;
-    let mod_key = doc.managed.settings.mod_key;
-    let keybinds = doc.keybind_rows(mod_key);
+    let mod_key = doc.effective.settings.mod_key;
+    let keybinds = doc.resolved_keybind_rows(mod_key);
     let previous_selected_keybind_id =
         SETTINGS_SELECTED_KEYBIND_ID.with(|slot| slot.borrow().clone());
     let selected_keybind_id =
@@ -1173,6 +1193,18 @@ fn add_managed_keybind(keybinds: &mut Vec<LuaKeybind>, mod_key: Modifiers) -> St
     format!("managed:{}", keybinds.len() - 1)
 }
 
+fn copy_keybind_to_managed(
+    rows: &[KeybindRow],
+    keybinds: &mut Vec<LuaKeybind>,
+    target_id: &str,
+) -> Option<String> {
+    let row = rows
+        .iter()
+        .find(|row| row.id == target_id && !row.editable)?;
+    keybinds.push(row.keybind.clone());
+    Some(format!("managed:{}", keybinds.len() - 1))
+}
+
 fn delete_managed_keybind(keybinds: &mut Vec<LuaKeybind>, target_id: &str) -> bool {
     let Some(index) = managed_keybind_index(keybinds, target_id) else {
         return false;
@@ -1377,11 +1409,20 @@ fn poll_settings_actions() {
                 }
                 SettingsAction::DeleteKeybind(id) => {
                     let fallback_id = fallback_selected_keybind_after_delete(
-                        &doc.keybind_rows(doc.managed.settings.mod_key),
+                        &doc.resolved_keybind_rows(doc.effective.settings.mod_key),
                         &id,
                     );
                     if delete_managed_keybind(&mut doc.managed.keybinds, &id) {
                         SETTINGS_SELECTED_KEYBIND_ID.with(|slot| *slot.borrow_mut() = fallback_id);
+                        should_write = true;
+                    }
+                }
+                SettingsAction::CopyKeybindToManaged(id) => {
+                    let rows = doc.resolved_keybind_rows(doc.effective.settings.mod_key);
+                    if let Some(new_id) =
+                        copy_keybind_to_managed(&rows, &mut doc.managed.keybinds, &id)
+                    {
+                        SETTINGS_SELECTED_KEYBIND_ID.with(|slot| *slot.borrow_mut() = Some(new_id));
                         should_write = true;
                     }
                 }
@@ -1657,6 +1698,16 @@ mod tests {
         assert_eq!(keybinds.len(), 2);
         assert_ne!(keybinds[0].key, keybinds[1].key);
         assert_eq!(keybinds[1].action, Action::Reload);
+    }
+
+    #[test]
+    fn copy_keybind_to_managed_promotes_external_binding() {
+        let rows = vec![sample_keybind_row("lua:0", false)];
+        let mut keybinds = Vec::new();
+        let id = copy_keybind_to_managed(&rows, &mut keybinds, "lua:0").expect("copy failed");
+        assert_eq!(id, "managed:0");
+        assert_eq!(keybinds.len(), 1);
+        assert_eq!(keybinds[0], rows[0].keybind);
     }
 
     #[test]
