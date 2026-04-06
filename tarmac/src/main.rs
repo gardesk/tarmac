@@ -886,6 +886,25 @@ fn cleanup_socket() {
     let _ = std::fs::remove_file(&path);
 }
 
+fn workspace_last_active_title(
+    workspace: &tarmac::core::workspace::Workspace,
+    registry: &tarmac::core::window::WindowRegistry,
+) -> Option<String> {
+    workspace
+        .focused
+        .or_else(|| workspace.focus_history.last().copied())
+        .and_then(|window_id| registry.get(window_id))
+        .and_then(|window| {
+            let title = window.title.trim();
+            if !title.is_empty() {
+                Some(title.to_string())
+            } else {
+                let app_name = window.app_name.trim();
+                (!app_name.is_empty()).then(|| app_name.to_string())
+            }
+        })
+}
+
 fn update_tray(tray: &tarmac::ui::tray::TrayWidget) {
     WM_STATE.with(|s| {
         if let Some(state) = s.borrow().as_ref() {
@@ -902,6 +921,7 @@ fn update_tray(tray: &tarmac::ui::tray::TrayWidget) {
                         id: ws.id.to_string(),
                         active: ws.visible,
                         windows: ws.all_window_ids().len(),
+                        last_active_title: workspace_last_active_title(ws, &state.registry),
                         switch_target,
                     })
                 })
@@ -1728,6 +1748,7 @@ fn run_app() {
 mod tests {
     use super::*;
     use tarmac::config::document::ConfigSource;
+    use tarmac::core::window::{WindowRegistry, WindowState};
 
     fn sample_keybind(key: Key) -> LuaKeybind {
         LuaKeybind {
@@ -1794,6 +1815,24 @@ mod tests {
                 width: 0.7,
                 height: 0.7,
             }),
+        }
+    }
+
+    fn sample_window(id: u32, app: &str, title: &str) -> WindowState {
+        WindowState {
+            id,
+            app_pid: 100,
+            app_name: app.to_string(),
+            app_bundle_id: format!("com.test.{app}"),
+            title: title.to_string(),
+            role: "AXWindow".to_string(),
+            subrole: "AXStandardWindow".to_string(),
+            x: 0.0,
+            y: 0.0,
+            width: 800.0,
+            height: 600.0,
+            floating: false,
+            minimized: false,
         }
     }
 
@@ -1969,4 +2008,27 @@ mod tests {
         assert_eq!(specials[0].name, "term");
     }
 
+    #[test]
+    fn workspace_last_active_title_prefers_window_title_then_app_name() {
+        let mut registry = WindowRegistry::new();
+        registry.add(sample_window(1, "Firefox", "New Tab"));
+        registry.add(sample_window(2, "Firefox", ""));
+
+        let mut workspace = tarmac::core::workspace::Workspace::new(WorkspaceId::Numbered(1));
+        workspace.focused = Some(1);
+        assert_eq!(
+            workspace_last_active_title(&workspace, &registry).as_deref(),
+            Some("New Tab")
+        );
+
+        workspace.focused = Some(2);
+        assert_eq!(
+            workspace_last_active_title(&workspace, &registry).as_deref(),
+            Some("Firefox")
+        );
+
+        workspace.focused = Some(99);
+        workspace.focus_history.clear();
+        assert_eq!(workspace_last_active_title(&workspace, &registry), None);
+    }
 }

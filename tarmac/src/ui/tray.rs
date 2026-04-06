@@ -29,6 +29,7 @@ pub struct TrayWorkspace {
     pub id: String,
     pub active: bool,
     pub windows: usize,
+    pub last_active_title: Option<String>,
     pub switch_target: Option<WorkspaceTarget>,
 }
 
@@ -181,12 +182,22 @@ fn build_menu(
             continue;
         }
         let label = if workspace.windows > 0 {
-            format!(
-                "{}  ({} window{})",
-                workspace.id,
-                workspace.windows,
-                if workspace.windows == 1 { "" } else { "s" }
-            )
+            if let Some(title) = workspace.last_active_title.as_deref() {
+                format!(
+                    "{}  ({} window{}, {})",
+                    workspace.id,
+                    workspace.windows,
+                    if workspace.windows == 1 { "" } else { "s" },
+                    title
+                )
+            } else {
+                format!(
+                    "{}  ({} window{})",
+                    workspace.id,
+                    workspace.windows,
+                    if workspace.windows == 1 { "" } else { "s" }
+                )
+            }
         } else {
             workspace.id.clone()
         };
