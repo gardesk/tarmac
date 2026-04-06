@@ -14,10 +14,7 @@ pub fn get_usable_frame() -> Rect {
         // We can approximate by checking NSScreen.
         let visible = get_nsscreen_visible_frame();
 
-        // NSScreen origin is bottom-left; convert to top-left
-        let menu_bar_y = full_height - visible.y - visible.height;
-
-        Rect::new(visible.x, menu_bar_y, visible.width, visible.height)
+        top_left_rect_from_visible_frame(visible, full_height)
     }
 }
 
@@ -42,6 +39,11 @@ struct NSRect {
     y: f64,
     width: f64,
     height: f64,
+}
+
+fn top_left_rect_from_visible_frame(visible: NSRect, main_height: f64) -> Rect {
+    let top_y = main_height - visible.y - visible.height;
+    Rect::new(visible.x, top_y, visible.width, visible.height)
 }
 
 /// Get NSScreen.mainScreen.visibleFrame (bottom-left origin)
@@ -151,16 +153,10 @@ pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
             cg_bounds.size.height,
         );
 
-        // Find matching NSScreen for visible frame
-        // NSScreen uses bottom-left origin; CG uses top-left
-        let usable_frame = find_nsscreen_for_display(
-            &ns_screens,
-            ns_count,
-            cg_bounds.origin.x,
-            cg_bounds.size.width,
-            main_height,
-        )
-        .unwrap_or(frame);
+        // Match by the actual CGDirectDisplayID to avoid ambiguous geometry
+        // when monitors share the same width or are stacked vertically.
+        let usable_frame =
+            find_nsscreen_for_display(&ns_screens, ns_count, did, main_height).unwrap_or(frame);
 
         monitors.push(Monitor {
             id: did,
@@ -187,22 +183,23 @@ pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
     monitors
 }
 
-/// Find the NSScreen matching a CGDisplay by x position and width,
+/// Find the NSScreen matching a CGDisplay by display ID,
 /// and return its visible frame converted to top-left origin.
 fn find_nsscreen_for_display(
     screens: &objc2_foundation::NSArray<objc2_app_kit::NSScreen>,
     count: usize,
-    cg_x: f64,
-    cg_width: f64,
+    display_id: u32,
     main_height: f64,
 ) -> Option<Rect> {
     for i in 0..count {
         let screen = screens.objectAtIndex(i);
         let frame = screen.frame();
         let visible = screen.visibleFrame();
+        let screen_display_id = screen.CGDirectDisplayID();
 
         tracing::debug!(
             ns_idx = i,
+            ns_display_id = screen_display_id,
             ns_frame_x = frame.origin.x,
             ns_frame_y = frame.origin.y,
             ns_frame_w = frame.size.width,
@@ -211,35 +208,34 @@ fn find_nsscreen_for_display(
             ns_vis_y = visible.origin.y,
             ns_vis_w = visible.size.width,
             ns_vis_h = visible.size.height,
-            cg_x,
-            cg_width,
+            display_id,
             "NSScreen candidate"
         );
 
-        // Match by x position and width (NSScreen frame origin is bottom-left)
-        if (frame.origin.x - cg_x).abs() < 1.0 && (frame.size.width - cg_width).abs() < 1.0 {
-            // Convert visible frame from bottom-left to top-left origin
-            let top_y = main_height - visible.origin.y - visible.size.height;
+        if screen_display_id == display_id {
+            let usable_frame = top_left_rect_from_visible_frame(
+                NSRect {
+                    x: visible.origin.x,
+                    y: visible.origin.y,
+                    width: visible.size.width,
+                    height: visible.size.height,
+                },
+                main_height,
+            );
             tracing::debug!(
                 ns_idx = i,
-                converted_x = visible.origin.x,
-                converted_y = top_y,
-                converted_w = visible.size.width,
-                converted_h = visible.size.height,
+                converted_x = usable_frame.x,
+                converted_y = usable_frame.y,
+                converted_w = usable_frame.width,
+                converted_h = usable_frame.height,
                 main_height,
                 "NSScreen matched → usable_frame"
             );
-            return Some(Rect::new(
-                visible.origin.x,
-                top_y,
-                visible.size.width,
-                visible.size.height,
-            ));
+            return Some(usable_frame);
         }
     }
     tracing::warn!(
-        cg_x,
-        cg_width,
+        display_id,
         "no NSScreen match found — falling back to CG bounds"
     );
     None
@@ -247,16 +243,12 @@ fn find_nsscreen_for_display(
 
 /// Register a callback for display configuration changes (hotplug).
 /// The callback receives a boolean: true = display added/changed, false = display removed.
-pub fn register_display_change_callback(callback: Box<dyn Fn()>) {
+pub fn register_display_change_callback(callback: Box<dyn Fn() + Send>) {
     // Store callback in a static to keep it alive
     use std::sync::Mutex;
     static CALLBACK: Mutex<Option<Box<dyn Fn() + Send>>> = Mutex::new(None);
 
-    // Safety: the callback is only called from the main thread's CFRunLoop.
-    // We use transmute to add Send since Mutex requires it.
-    let send_cb: Box<dyn Fn() + Send> = unsafe { std::mem::transmute(callback) };
-
-    *CALLBACK.lock().unwrap() = Some(send_cb);
+    *CALLBACK.lock().unwrap() = Some(callback);
 
     unsafe extern "C" fn display_reconfiguration_callback(
         _display: u32,
@@ -317,4 +309,40 @@ unsafe extern "C" {
     fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
     fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
     fn CFRelease(cf: *const std::ffi::c_void);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NSRect, top_left_rect_from_visible_frame};
+    use crate::core::tree::Rect;
+
+    #[test]
+    fn converts_main_display_visible_frame_to_top_left_space() {
+        let visible = NSRect {
+            x: 0.0,
+            y: 0.0,
+            width: 1920.0,
+            height: 1055.0,
+        };
+
+        assert_eq!(
+            top_left_rect_from_visible_frame(visible, 1080.0),
+            Rect::new(0.0, 25.0, 1920.0, 1055.0)
+        );
+    }
+
+    #[test]
+    fn converts_display_below_main_to_top_left_space() {
+        let visible = NSRect {
+            x: 0.0,
+            y: -1080.0,
+            width: 1920.0,
+            height: 1080.0,
+        };
+
+        assert_eq!(
+            top_left_rect_from_visible_frame(visible, 1080.0),
+            Rect::new(0.0, 1080.0, 1920.0, 1080.0)
+        );
+    }
 }
