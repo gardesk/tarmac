@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::sync::Mutex;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, TrySendError};
 
 /// Events emitted by the window manager for IPC subscribers.
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +55,51 @@ impl EventBus {
     /// Disconnected subscribers are automatically removed.
     pub fn publish(&self, event: WmEvent) {
         let mut subs = self.subscribers.lock().unwrap();
-        subs.retain(|tx| tx.try_send(event.clone()).is_ok());
+        subs.retain(|tx| match tx.try_send(event.clone()) {
+            Ok(()) | Err(TrySendError::Full(_)) => true,
+            Err(TrySendError::Disconnected(_)) => false,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EventBus, WmEvent};
+    use std::time::Duration;
+
+    #[test]
+    fn full_subscriber_is_not_dropped() {
+        let bus = EventBus::new();
+        let rx = bus.subscribe();
+
+        for window_id in 0..256 {
+            bus.publish(WmEvent::WindowClosed { window_id });
+        }
+
+        bus.publish(WmEvent::WindowClosed { window_id: 999 });
+
+        for _ in 0..256 {
+            rx.recv_timeout(Duration::from_millis(50))
+                .expect("buffered event missing");
+        }
+
+        bus.publish(WmEvent::WindowClosed { window_id: 1000 });
+        let event = rx
+            .recv_timeout(Duration::from_millis(50))
+            .expect("subscriber should still be registered");
+        assert!(matches!(event, WmEvent::WindowClosed { window_id: 1000 }));
+    }
+
+    #[test]
+    fn disconnected_subscriber_is_removed() {
+        let bus = EventBus::new();
+        let rx = bus.subscribe();
+        drop(rx);
+
+        bus.publish(WmEvent::WindowClosed { window_id: 1 });
+
+        let mut subscribers = bus.subscribers.lock().unwrap();
+        assert!(subscribers.is_empty());
+        subscribers.clear();
     }
 }

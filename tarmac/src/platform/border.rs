@@ -2,6 +2,7 @@
 //! ers is a standalone border renderer that handles its own window events,
 //! focus detection, and rendering. Tarmac just spawns and manages the process.
 
+use std::path::PathBuf;
 use std::process::{Child, Command};
 
 /// RGBA color for border configuration.
@@ -17,15 +18,34 @@ impl BorderColor {
     /// Parse a hex color string (#RRGGBB or #RRGGBBAA).
     pub fn from_hex(hex: &str) -> Self {
         let hex = hex.trim_start_matches('#');
-        let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0) as f64 / 255.0;
-        let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0) as f64 / 255.0;
-        let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f64 / 255.0;
-        let a = if hex.len() >= 8 {
-            u8::from_str_radix(&hex[6..8], 16).unwrap_or(255) as f64 / 255.0
+        match Self::try_from_hex(hex) {
+            Some(color) => color,
+            None => {
+                tracing::warn!(input = hex, "invalid border color, falling back to black");
+                Self {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                }
+            }
+        }
+    }
+
+    fn try_from_hex(hex: &str) -> Option<Self> {
+        if hex.len() != 6 && hex.len() != 8 {
+            return None;
+        }
+
+        let r = u8::from_str_radix(hex.get(0..2)?, 16).ok()? as f64 / 255.0;
+        let g = u8::from_str_radix(hex.get(2..4)?, 16).ok()? as f64 / 255.0;
+        let b = u8::from_str_radix(hex.get(4..6)?, 16).ok()? as f64 / 255.0;
+        let a = if hex.len() == 8 {
+            u8::from_str_radix(hex.get(6..8)?, 16).ok()? as f64 / 255.0
         } else {
             1.0
         };
-        Self { r, g, b, a }
+        Some(Self { r, g, b, a })
     }
 
     fn hex_string(self) -> String {
@@ -78,24 +98,34 @@ impl BorderManager {
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("ers")))
             .filter(|p| p.exists())
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| "ers".to_string());
+            .unwrap_or_else(|| PathBuf::from("ers"));
 
-        let cmd = format!(
-            "{} --active-only --width {} --radius {} --color '{}' --inactive '{}'",
-            ers_bin,
-            self.border_width,
-            self.radius,
-            self.focused_color.hex_string(),
-            self.unfocused_color.hex_string(),
+        tracing::debug!(
+            ers_bin = ?ers_bin,
+            border_width = self.border_width,
+            radius = self.radius,
+            focused = %self.focused_color.hex_string(),
+            unfocused = %self.unfocused_color.hex_string(),
+            "spawning ers"
         );
-        tracing::debug!(cmd, "spawning ers");
-        match Command::new("/bin/sh").args(["-c", &cmd]).spawn() {
+
+        match Command::new(&ers_bin)
+            .arg("--active-only")
+            .arg("--width")
+            .arg(self.border_width.to_string())
+            .arg("--radius")
+            .arg(self.radius.to_string())
+            .arg("--color")
+            .arg(self.focused_color.hex_string())
+            .arg("--inactive")
+            .arg(self.unfocused_color.hex_string())
+            .spawn()
+        {
             Ok(child) => {
                 self.child = Some(child);
             }
             Err(e) => {
-                tracing::warn!(err = %e, "failed to spawn ers");
+                tracing::warn!(err = %e, ers_bin = ?ers_bin, "failed to spawn ers");
             }
         }
     }
@@ -130,5 +160,25 @@ impl BorderManager {
 impl Drop for BorderManager {
     fn drop(&mut self) {
         self.kill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BorderColor;
+
+    #[test]
+    fn malformed_hex_falls_back_without_panicking() {
+        let color = BorderColor::from_hex("#fff");
+        assert_eq!(color.r, 0.0);
+        assert_eq!(color.g, 0.0);
+        assert_eq!(color.b, 0.0);
+        assert_eq!(color.a, 1.0);
+    }
+
+    #[test]
+    fn parses_rgba_hex() {
+        let color = BorderColor::from_hex("#11223380");
+        assert_eq!(color.hex_string(), "#11223380");
     }
 }
