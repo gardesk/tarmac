@@ -10,14 +10,16 @@ use objc2_app_kit::{
     NSBackingStoreType, NSButton, NSColorWell, NSImage, NSPopUpButton, NSScrollView, NSSlider,
     NSSplitView, NSSplitViewDividerStyle, NSTabViewController, NSTabViewControllerTabStyle,
     NSTabViewItem, NSTableColumn, NSTableView, NSTableViewRowSizeStyle, NSTableViewStyle,
-    NSTextField, NSTextView, NSView, NSViewController, NSWindow, NSWindowStyleMask,
-    NSWindowToolbarStyle,
+    NSTextField, NSView, NSViewController, NSWindow, NSWindowStyleMask, NSWindowToolbarStyle,
 };
 use objc2_core_foundation::{CGFloat, CGPoint, CGRect, CGSize};
 use objc2_foundation::{NSIndexSet, NSInteger, NSNotification, NSObject, NSString};
 
-use crate::config::document::{KeybindRow, RuleRow};
-use crate::config::lua::{RuleMatchMode, RulePattern, WindowRule};
+use crate::config::document::{KeybindRow, RuleRow, WorkspaceRow};
+use crate::config::lua::{RuleMatchMode, RulePattern, SpecialWorkspaceConfig, WindowRule};
+use crate::core::workspace::{
+    MonitorAssignment, WorkspaceDefinition, WorkspaceKind, WorkspaceLayout,
+};
 
 const WIN_W: f64 = 920.0;
 const WIN_H: f64 = 660.0;
@@ -30,6 +32,11 @@ const RULE_COLUMN_SOURCE: &str = "source";
 const KEYBIND_COLUMN_SHORTCUT: &str = "shortcut";
 const KEYBIND_COLUMN_ACTION: &str = "action";
 const KEYBIND_COLUMN_SOURCE: &str = "source";
+const WORKSPACE_COLUMN_ID: &str = "id";
+const WORKSPACE_COLUMN_KIND: &str = "kind";
+const WORKSPACE_COLUMN_MONITOR: &str = "monitor";
+const WORKSPACE_COLUMN_SUMMARY: &str = "summary";
+const WORKSPACE_COLUMN_SOURCE: &str = "source";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeybindDraft {
@@ -43,6 +50,76 @@ impl KeybindDraft {
             shortcut: row.shortcut.clone(),
             action: row.action.clone(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceDisplayOption {
+    pub display_id: u32,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceDraft {
+    pub id: String,
+    pub kind: WorkspaceKind,
+    pub monitor_display_id: Option<u32>,
+    pub layout: WorkspaceLayout,
+    pub gap_inner: Option<f64>,
+    pub gap_outer: Option<f64>,
+    pub overlay_position: String,
+    pub overlay_width: f64,
+    pub overlay_height: f64,
+}
+
+impl WorkspaceDraft {
+    fn from_row(row: &WorkspaceRow) -> Self {
+        let special = row
+            .special
+            .clone()
+            .unwrap_or_else(|| SpecialWorkspaceConfig::default_for(&row.id));
+        Self {
+            id: row.id.clone(),
+            kind: row.kind,
+            monitor_display_id: row.definition.prefs.monitor.as_ref().map(|m| m.display_id),
+            layout: row.definition.prefs.default_layout,
+            gap_inner: row.definition.prefs.gap_inner,
+            gap_outer: row.definition.prefs.gap_outer,
+            overlay_position: special.position,
+            overlay_width: special.width,
+            overlay_height: special.height,
+        }
+    }
+
+    pub fn to_definition(&self) -> WorkspaceDefinition {
+        let mut definition = WorkspaceDefinition::new(
+            crate::core::workspace::WorkspaceId::parse(&self.id)
+                .unwrap_or_else(|| crate::core::workspace::WorkspaceId::Special(self.id.clone())),
+        );
+        definition.kind = self.kind;
+        definition.prefs.monitor = self
+            .monitor_display_id
+            .map(|display_id| MonitorAssignment { display_id });
+        definition.prefs.default_layout = self.layout;
+        definition.prefs.gap_inner = self.gap_inner;
+        definition.prefs.gap_outer = self.gap_outer;
+        definition
+    }
+
+    pub fn special_config(&self) -> Option<SpecialWorkspaceConfig> {
+        if self.kind != WorkspaceKind::Special {
+            return None;
+        }
+        Some(SpecialWorkspaceConfig {
+            name: self
+                .id
+                .strip_prefix("special:")
+                .unwrap_or(&self.id)
+                .to_string(),
+            position: self.overlay_position.clone(),
+            width: self.overlay_width,
+            height: self.overlay_height,
+        })
     }
 }
 
@@ -74,7 +151,13 @@ pub enum SettingsAction {
     UpdateRuleDraft(WindowRule),
     ApplyRule(String),
     ToggleRuleEnabled(String, bool),
-    ApplyManagedWorkspaces(String),
+    SelectWorkspace(String),
+    AddLetteredWorkspace(String),
+    AddSpecialWorkspace(String),
+    CopyWorkspaceToManaged(String),
+    DeleteWorkspace(String),
+    UpdateWorkspaceDraft(WorkspaceDraft),
+    ApplyWorkspace(String),
 }
 
 pub struct SettingsSnapshot {
@@ -92,8 +175,9 @@ pub struct SettingsSnapshot {
     pub selected_keybind_id: Option<String>,
     pub rules: Vec<RuleRow>,
     pub selected_rule_id: Option<String>,
-    pub workspaces_external_text: String,
-    pub workspaces_managed_text: String,
+    pub workspaces: Vec<WorkspaceRow>,
+    pub selected_workspace_id: Option<String>,
+    pub displays: Vec<WorkspaceDisplayOption>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,6 +202,19 @@ struct RuleInspectorState {
     can_apply: bool,
     geometry_enabled: bool,
     rule: Option<WindowRule>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WorkspaceInspectorState {
+    editable: bool,
+    source_label: String,
+    kind_label: String,
+    can_copy_to_managed: bool,
+    can_delete: bool,
+    delete_label: String,
+    can_apply: bool,
+    is_special: bool,
+    draft: Option<WorkspaceDraft>,
 }
 
 struct KeybindingsUiRefs {
@@ -157,9 +254,27 @@ struct RulesUiRefs {
     apply_button: Retained<NSButton>,
 }
 
+struct WorkspacesUiRefs {
+    table: Retained<NSTableView>,
+    placeholder_label: Retained<NSTextField>,
+    source_value: Retained<NSTextField>,
+    kind_value: Retained<NSTextField>,
+    workspace_id_value: Retained<NSTextField>,
+    monitor_popup: Retained<NSPopUpButton>,
+    layout_popup: Retained<NSPopUpButton>,
+    gap_inner_field: Retained<NSTextField>,
+    gap_outer_field: Retained<NSTextField>,
+    overlay_position_popup: Retained<NSPopUpButton>,
+    overlay_width_field: Retained<NSTextField>,
+    overlay_height_field: Retained<NSTextField>,
+    overlay_section_label: Retained<NSTextField>,
+    copy_button: Retained<NSButton>,
+    delete_button: Retained<NSButton>,
+    apply_button: Retained<NSButton>,
+}
+
 struct SettingsHandlerIvars {
     tx: mpsc::Sender<SettingsAction>,
-    workspaces_editor: RefCell<Option<Retained<NSTextView>>>,
     keybind_rows: RefCell<Vec<KeybindRow>>,
     selected_keybind_id: RefCell<Option<String>>,
     draft_keybind: RefCell<Option<KeybindDraft>>,
@@ -170,13 +285,18 @@ struct SettingsHandlerIvars {
     draft_rule: RefCell<Option<WindowRule>>,
     suppress_rule_selection_change: RefCell<bool>,
     rules_ui: RefCell<Option<RulesUiRefs>>,
+    workspace_rows: RefCell<Vec<WorkspaceRow>>,
+    selected_workspace_id: RefCell<Option<String>>,
+    draft_workspace: RefCell<Option<WorkspaceDraft>>,
+    workspace_displays: RefCell<Vec<WorkspaceDisplayOption>>,
+    suppress_workspace_selection_change: RefCell<bool>,
+    workspaces_ui: RefCell<Option<WorkspacesUiRefs>>,
 }
 
 impl SettingsHandler {
     fn new(mtm: MainThreadMarker, tx: mpsc::Sender<SettingsAction>) -> Retained<Self> {
         let this = mtm.alloc().set_ivars(SettingsHandlerIvars {
             tx,
-            workspaces_editor: RefCell::new(None),
             keybind_rows: RefCell::new(Vec::new()),
             selected_keybind_id: RefCell::new(None),
             draft_keybind: RefCell::new(None),
@@ -187,6 +307,12 @@ impl SettingsHandler {
             draft_rule: RefCell::new(None),
             suppress_rule_selection_change: RefCell::new(false),
             rules_ui: RefCell::new(None),
+            workspace_rows: RefCell::new(Vec::new()),
+            selected_workspace_id: RefCell::new(None),
+            draft_workspace: RefCell::new(None),
+            workspace_displays: RefCell::new(Vec::new()),
+            suppress_workspace_selection_change: RefCell::new(false),
+            workspaces_ui: RefCell::new(None),
         });
         unsafe { msg_send![super(this), init] }
     }
@@ -199,12 +325,12 @@ impl SettingsHandler {
         *self.ivars().keybindings_ui.borrow_mut() = Some(ui);
     }
 
-    fn set_workspaces_editor(&self, editor: Retained<NSTextView>) {
-        *self.ivars().workspaces_editor.borrow_mut() = Some(editor);
-    }
-
     fn set_rules_ui(&self, ui: RulesUiRefs) {
         *self.ivars().rules_ui.borrow_mut() = Some(ui);
+    }
+
+    fn set_workspaces_ui(&self, ui: WorkspacesUiRefs) {
+        *self.ivars().workspaces_ui.borrow_mut() = Some(ui);
     }
 
     fn load_keybinds(&self, rows: Vec<KeybindRow>, selected_keybind_id: Option<String>) {
@@ -245,6 +371,31 @@ impl SettingsHandler {
         self.refresh_rule_inspector();
     }
 
+    fn load_workspaces(
+        &self,
+        rows: Vec<WorkspaceRow>,
+        selected_workspace_id: Option<String>,
+        displays: Vec<WorkspaceDisplayOption>,
+    ) {
+        let resolved_selection = if let Some(selected) = selected_workspace_id {
+            rows.iter().find(|row| row.id == selected).map(|_| selected)
+        } else {
+            None
+        };
+        let draft = resolved_selection
+            .as_deref()
+            .and_then(|id| rows.iter().find(|row| row.id == id))
+            .and_then(|row| row.editable.then(|| WorkspaceDraft::from_row(row)));
+
+        *self.ivars().workspace_rows.borrow_mut() = rows;
+        *self.ivars().selected_workspace_id.borrow_mut() = resolved_selection;
+        *self.ivars().draft_workspace.borrow_mut() = draft;
+        *self.ivars().workspace_displays.borrow_mut() = displays;
+
+        self.reload_workspace_table();
+        self.refresh_workspace_inspector();
+    }
+
     fn selected_keybind_row(&self) -> Option<KeybindRow> {
         let selected = self.ivars().selected_keybind_id.borrow().clone()?;
         self.ivars()
@@ -283,6 +434,25 @@ impl SettingsHandler {
             .position(|row| row.id == selected)
     }
 
+    fn selected_workspace_row(&self) -> Option<WorkspaceRow> {
+        let selected = self.ivars().selected_workspace_id.borrow().clone()?;
+        self.ivars()
+            .workspace_rows
+            .borrow()
+            .iter()
+            .find(|row| row.id == selected)
+            .cloned()
+    }
+
+    fn selected_workspace_row_index(&self) -> Option<usize> {
+        let selected = self.ivars().selected_workspace_id.borrow().clone()?;
+        self.ivars()
+            .workspace_rows
+            .borrow()
+            .iter()
+            .position(|row| row.id == selected)
+    }
+
     fn current_keybind_inspector_state(&self) -> KeybindInspectorState {
         let rows = self.ivars().keybind_rows.borrow().clone();
         let selected_keybind_id = self.ivars().selected_keybind_id.borrow().clone();
@@ -299,6 +469,17 @@ impl SettingsHandler {
         let selected_rule_id = self.ivars().selected_rule_id.borrow().clone();
         let draft_rule = self.ivars().draft_rule.borrow().clone();
         derive_rule_inspector_state(&rows, selected_rule_id.as_deref(), draft_rule.as_ref())
+    }
+
+    fn current_workspace_inspector_state(&self) -> WorkspaceInspectorState {
+        let rows = self.ivars().workspace_rows.borrow().clone();
+        let selected_workspace_id = self.ivars().selected_workspace_id.borrow().clone();
+        let draft_workspace = self.ivars().draft_workspace.borrow().clone();
+        derive_workspace_inspector_state(
+            &rows,
+            selected_workspace_id.as_deref(),
+            draft_workspace.as_ref(),
+        )
     }
 
     fn reload_keybind_table(&self) {
@@ -339,6 +520,31 @@ impl SettingsHandler {
         *self.ivars().suppress_rule_selection_change.borrow_mut() = false;
     }
 
+    fn reload_workspace_table(&self) {
+        let selected_index = self.selected_workspace_row_index();
+        let ui_borrow = self.ivars().workspaces_ui.borrow();
+        let Some(ui) = ui_borrow.as_ref() else { return };
+        ui.table.reloadData();
+
+        *self
+            .ivars()
+            .suppress_workspace_selection_change
+            .borrow_mut() = true;
+        if let Some(index) = selected_index {
+            let indexes = NSIndexSet::indexSetWithIndex(index);
+            ui.table
+                .selectRowIndexes_byExtendingSelection(&indexes, false);
+        } else {
+            let empty = NSIndexSet::indexSet();
+            ui.table
+                .selectRowIndexes_byExtendingSelection(&empty, false);
+        }
+        *self
+            .ivars()
+            .suppress_workspace_selection_change
+            .borrow_mut() = false;
+    }
+
     fn refresh_keybind_inspector(&self) {
         let state = self.current_keybind_inspector_state();
         let ui_borrow = self.ivars().keybindings_ui.borrow();
@@ -351,6 +557,14 @@ impl SettingsHandler {
         let ui_borrow = self.ivars().rules_ui.borrow();
         let Some(ui) = ui_borrow.as_ref() else { return };
         apply_rule_inspector_state(ui, &state);
+    }
+
+    fn refresh_workspace_inspector(&self) {
+        let state = self.current_workspace_inspector_state();
+        let displays = self.ivars().workspace_displays.borrow().clone();
+        let ui_borrow = self.ivars().workspaces_ui.borrow();
+        let Some(ui) = ui_borrow.as_ref() else { return };
+        apply_workspace_inspector_state(ui, &state, &displays);
     }
 
     fn select_keybind_by_row_index(&self, row_index: usize, emit_action: bool) {
@@ -375,6 +589,19 @@ impl SettingsHandler {
         self.refresh_rule_inspector();
         if emit_action {
             self.emit(SettingsAction::SelectRule(row.id));
+        }
+    }
+
+    fn select_workspace_by_row_index(&self, row_index: usize, emit_action: bool) {
+        let Some(row) = self.ivars().workspace_rows.borrow().get(row_index).cloned() else {
+            return;
+        };
+        *self.ivars().selected_workspace_id.borrow_mut() = Some(row.id.clone());
+        *self.ivars().draft_workspace.borrow_mut() =
+            row.editable.then(|| WorkspaceDraft::from_row(&row));
+        self.refresh_workspace_inspector();
+        if emit_action {
+            self.emit(SettingsAction::SelectWorkspace(row.id));
         }
     }
 
@@ -515,6 +742,39 @@ impl SettingsHandler {
             self.refresh_rule_inspector();
         }
     }
+
+    fn sync_workspace_draft_from_controls(&self) -> Option<WorkspaceDraft> {
+        let row = self.selected_workspace_row()?;
+        if !row.editable {
+            return None;
+        }
+        let ui_borrow = self.ivars().workspaces_ui.borrow();
+        let ui = ui_borrow.as_ref()?;
+
+        let mut draft = self
+            .ivars()
+            .draft_workspace
+            .borrow()
+            .clone()
+            .unwrap_or_else(|| WorkspaceDraft::from_row(&row));
+        draft.monitor_display_id = popup_selected_display_id(&ui.monitor_popup);
+        draft.layout = WorkspaceLayout::Bsp;
+        draft.gap_inner = parse_optional_f64_field(&ui.gap_inner_field);
+        draft.gap_outer = parse_optional_f64_field(&ui.gap_outer_field);
+        draft.overlay_position = popup_overlay_position(&ui.overlay_position_popup);
+        draft.overlay_width = parse_f64_field(&ui.overlay_width_field, draft.overlay_width);
+        draft.overlay_height = parse_f64_field(&ui.overlay_height_field, draft.overlay_height);
+
+        *self.ivars().draft_workspace.borrow_mut() = Some(draft.clone());
+        Some(draft)
+    }
+
+    fn emit_current_workspace_draft(&self) {
+        if let Some(draft) = self.sync_workspace_draft_from_controls() {
+            self.emit(SettingsAction::UpdateWorkspaceDraft(draft));
+            self.refresh_workspace_inspector();
+        }
+    }
 }
 
 define_class!(
@@ -642,14 +902,76 @@ define_class!(
             self.emit(SettingsAction::ResetManagedKeybinds);
         }
 
-        #[unsafe(method(onApplyManagedWorkspaces:))]
-        fn on_apply_managed_workspaces(&self, _sender: Option<&AnyObject>) {
-            let text = {
-                let editor = self.ivars().workspaces_editor.borrow();
-                let Some(editor) = editor.as_ref() else { return };
-                editor.string().to_string()
+        #[unsafe(method(onWorkspaceAddLettered:))]
+        fn on_workspace_add_lettered(&self, _sender: Option<&AnyObject>) {
+            let existing = self
+                .ivars()
+                .workspace_rows
+                .borrow()
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>();
+            if let Some(letter) = prompt_for_workspace_text(
+                self.mtm(),
+                "Add Lettered Workspace",
+                "Enter a single unused letter.",
+                "W",
+                |value| validate_lettered_workspace_id(value, &existing),
+            ) {
+                self.emit(SettingsAction::AddLetteredWorkspace(letter));
+            }
+        }
+
+        #[unsafe(method(onWorkspaceAddSpecial:))]
+        fn on_workspace_add_special(&self, _sender: Option<&AnyObject>) {
+            let existing = self
+                .ivars()
+                .workspace_rows
+                .borrow()
+                .iter()
+                .map(|row| row.id.clone())
+                .collect::<Vec<_>>();
+            if let Some(name) = prompt_for_workspace_text(
+                self.mtm(),
+                "Add Special Workspace",
+                "Enter a non-empty special workspace name.",
+                "terminal",
+                |value| validate_special_workspace_name(value, &existing),
+            ) {
+                self.emit(SettingsAction::AddSpecialWorkspace(name));
+            }
+        }
+
+        #[unsafe(method(onWorkspaceCopyToManaged:))]
+        fn on_workspace_copy_to_managed(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.ivars().selected_workspace_id.borrow().clone() else {
+                return;
             };
-            self.emit(SettingsAction::ApplyManagedWorkspaces(text));
+            self.emit(SettingsAction::CopyWorkspaceToManaged(id));
+        }
+
+        #[unsafe(method(onWorkspaceDelete:))]
+        fn on_workspace_delete(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.ivars().selected_workspace_id.borrow().clone() else {
+                return;
+            };
+            self.emit(SettingsAction::DeleteWorkspace(id));
+        }
+
+        #[unsafe(method(onWorkspaceApply:))]
+        fn on_workspace_apply(&self, _sender: Option<&AnyObject>) {
+            let Some(id) = self.ivars().selected_workspace_id.borrow().clone() else {
+                return;
+            };
+            if let Some(draft) = self.sync_workspace_draft_from_controls() {
+                self.emit(SettingsAction::UpdateWorkspaceDraft(draft));
+                self.emit(SettingsAction::ApplyWorkspace(id));
+            }
+        }
+
+        #[unsafe(method(onWorkspaceDraftChanged:))]
+        fn on_workspace_draft_changed(&self, _sender: Option<&AnyObject>) {
+            self.emit_current_workspace_draft();
         }
 
         #[unsafe(method(onRuleAdd:))]
@@ -729,7 +1051,13 @@ define_class!(
                 usize::from(std::ptr::eq(_table_view, &*ui.table))
             });
             if rule_count == 1 {
-                self.ivars().rule_rows.borrow().len() as NSInteger
+                return self.ivars().rule_rows.borrow().len() as NSInteger;
+            }
+            let workspace_count = self.ivars().workspaces_ui.borrow().as_ref().map_or(0, |ui| {
+                usize::from(std::ptr::eq(_table_view, &*ui.table))
+            });
+            if workspace_count == 1 {
+                self.ivars().workspace_rows.borrow().len() as NSInteger
             } else {
                 0
             }
@@ -773,6 +1101,33 @@ define_class!(
                         add_table_label(mtm, &container, &row_data.action, width);
                     }
                     KEYBIND_COLUMN_SOURCE => {
+                        add_table_label(mtm, &container, row_data.source_label(), width);
+                    }
+                    _ => {}
+                }
+                return Retained::into_raw(container);
+            }
+
+            if let Some(row_data) = self
+                .ivars()
+                .workspaces_ui
+                .borrow()
+                .as_ref()
+                .filter(|ui| std::ptr::eq(table_view, &*ui.table))
+                .and_then(|_| self.ivars().workspace_rows.borrow().get(row).cloned())
+            {
+                match identifier.as_str() {
+                    WORKSPACE_COLUMN_ID => add_table_label(mtm, &container, &row_data.id, width),
+                    WORKSPACE_COLUMN_KIND => {
+                        add_table_label(mtm, &container, row_data.kind_label(), width);
+                    }
+                    WORKSPACE_COLUMN_MONITOR => {
+                        add_table_label(mtm, &container, &row_data.monitor_summary(), width);
+                    }
+                    WORKSPACE_COLUMN_SUMMARY => {
+                        add_table_label(mtm, &container, &row_data.summary(), width);
+                    }
+                    WORKSPACE_COLUMN_SOURCE => {
                         add_table_label(mtm, &container, row_data.source_label(), width);
                     }
                     _ => {}
@@ -843,6 +1198,34 @@ define_class!(
                 }
             }
 
+            if !*self.ivars().suppress_workspace_selection_change.borrow() {
+                let selected_row = {
+                    let ui_borrow = self.ivars().workspaces_ui.borrow();
+                    match ui_borrow.as_ref() {
+                        Some(ui) => ui.table.selectedRow(),
+                        None => -1,
+                    }
+                };
+                if selected_row >= 0 {
+                    let row_index = selected_row as usize;
+                    let should_select = self
+                        .ivars()
+                        .workspace_rows
+                        .borrow()
+                        .get(row_index)
+                        .is_some_and(|row| {
+                            self.ivars()
+                                .selected_workspace_id
+                                .borrow()
+                                .as_deref()
+                                != Some(row.id.as_str())
+                        });
+                    if should_select {
+                        self.select_workspace_by_row_index(row_index, true);
+                    }
+                }
+            }
+
             if *self.ivars().suppress_rule_selection_change.borrow() {
                 return;
             }
@@ -879,8 +1262,6 @@ pub struct SettingsWindow {
     bar_height_label: Retained<NSTextField>,
     border_width_label: Retained<NSTextField>,
     border_radius_label: Retained<NSTextField>,
-    workspaces_external: Retained<NSTextView>,
-    workspaces_editor: Retained<NSTextView>,
 }
 
 impl SettingsWindow {
@@ -920,18 +1301,8 @@ impl SettingsWindow {
         let rules = build_rules_tab(mtm, &handler);
         handler.set_rules_ui(rules.ui);
 
-        let workspaces = build_editor_tab(
-            mtm,
-            &handler,
-            "Use `id | monitor=<display_id> layout=bsp gap_inner=<n> gap_outer=<n>` or `special:name | ... overlay.position=<pos> overlay.width=<f> overlay.height=<f>`.",
-            "Read-only rows (effective config)",
-            "Managed rows",
-            Some(sel!(onApplyManagedWorkspaces:)),
-            None,
-            "Apply",
-            "",
-        );
-        handler.set_workspaces_editor(workspaces.editor.clone());
+        let workspaces = build_workspaces_tab(mtm, &handler);
+        handler.set_workspaces_ui(workspaces.ui);
 
         let about_view = build_about_view(mtm);
 
@@ -981,8 +1352,6 @@ impl SettingsWindow {
             bar_height_label: general.bar_height_label,
             border_width_label: general.border_width_label,
             border_radius_label: general.border_radius_label,
-            workspaces_external: workspaces.read_only,
-            workspaces_editor: workspaces.editor,
         }
     }
 
@@ -1027,11 +1396,11 @@ impl SettingsWindow {
         );
         self.handler
             .load_rules(snapshot.rules.clone(), snapshot.selected_rule_id.clone());
-        set_text_view(
-            &self.workspaces_external,
-            &snapshot.workspaces_external_text,
+        self.handler.load_workspaces(
+            snapshot.workspaces.clone(),
+            snapshot.selected_workspace_id.clone(),
+            snapshot.displays.clone(),
         );
-        set_text_view(&self.workspaces_editor, &snapshot.workspaces_managed_text);
     }
 
     pub fn poll_actions(&self) -> Vec<SettingsAction> {
@@ -1076,12 +1445,6 @@ struct GeneralTab {
     border_radius_label: Retained<NSTextField>,
 }
 
-struct EditorTab {
-    root: Retained<NSView>,
-    read_only: Retained<NSTextView>,
-    editor: Retained<NSTextView>,
-}
-
 struct RulesTab {
     root: Retained<NSView>,
     ui: RulesUiRefs,
@@ -1090,6 +1453,11 @@ struct RulesTab {
 struct KeybindingsTab {
     root: Retained<NSView>,
     ui: KeybindingsUiRefs,
+}
+
+struct WorkspacesTab {
+    root: Retained<NSView>,
+    ui: WorkspacesUiRefs,
 }
 
 fn add_tab(
@@ -1289,66 +1657,269 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_editor_tab(
-    mtm: MainThreadMarker,
-    handler: &SettingsHandler,
-    description: &str,
-    read_only_title: &str,
-    editor_title: &str,
-    primary_action: Option<objc2::runtime::Sel>,
-    secondary_action: Option<objc2::runtime::Sel>,
-    primary_label: &str,
-    secondary_label: &str,
-) -> EditorTab {
+fn build_workspaces_tab(mtm: MainThreadMarker, handler: &SettingsHandler) -> WorkspacesTab {
     let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(WIN_W, WIN_H));
     let root: Retained<NSView> = unsafe { msg_send![NSView::alloc(mtm), initWithFrame: frame] };
 
+    let split: Retained<NSSplitView> =
+        unsafe { msg_send![NSSplitView::alloc(mtm), initWithFrame: frame] };
+    split.setVertical(true);
+    split.setDividerStyle(NSSplitViewDividerStyle::Thin);
+    split.setAutosaveName(Some(&NSString::from_str("TarmacWorkspacesSplitView")));
+
+    let left_width = 372.0;
+    let left_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(left_width, WIN_H));
+    let right_frame = CGRect::new(
+        CGPoint::new(left_width + 1.0, 0.0),
+        CGSize::new(WIN_W - left_width - 1.0, WIN_H),
+    );
+    let left: Retained<NSView> =
+        unsafe { msg_send![NSView::alloc(mtm), initWithFrame: left_frame] };
+    let right: Retained<NSView> =
+        unsafe { msg_send![NSView::alloc(mtm), initWithFrame: right_frame] };
+
+    add_section_label(mtm, &left, "Workspaces", 24.0, WIN_H - 46.0);
     add_wrapped_label(
         mtm,
-        &root,
-        description,
-        28.0,
-        WIN_H - 56.0,
-        WIN_W - 56.0,
-        32.0,
+        &left,
+        "Numbered workspaces 1 through 10 are always shown. Copy a default or Lua-authored workspace into managed settings before editing it here.",
+        24.0,
+        WIN_H - 76.0,
+        left_width - 48.0,
+        40.0,
     );
-    add_section_label(mtm, &root, read_only_title, 28.0, WIN_H - 108.0);
-    let read_only = add_text_editor(mtm, &root, 28.0, WIN_H - 324.0, WIN_W - 56.0, 190.0, false);
-    add_section_label(mtm, &root, editor_title, 28.0, WIN_H - 360.0);
-    let editor = add_text_editor(mtm, &root, 28.0, 90.0, WIN_W - 56.0, 230.0, true);
 
-    if let Some(primary_action) = primary_action {
-        let button = add_button(
-            mtm,
-            &root,
-            handler,
-            primary_label,
-            WIN_W - 160.0,
-            34.0,
-            120.0,
-            primary_action,
-        );
-        let _ = button;
-    }
-    if let Some(secondary_action) = secondary_action {
-        let button = add_button(
-            mtm,
-            &root,
-            handler,
-            secondary_label,
-            WIN_W - 300.0,
-            34.0,
-            120.0,
-            secondary_action,
-        );
-        let _ = button;
+    let table_scroll_frame = CGRect::new(
+        CGPoint::new(20.0, 96.0),
+        CGSize::new(left_width - 40.0, WIN_H - 196.0),
+    );
+    let table_scroll: Retained<NSScrollView> =
+        unsafe { msg_send![NSScrollView::alloc(mtm), initWithFrame: table_scroll_frame] };
+    table_scroll.setHasVerticalScroller(true);
+    table_scroll.setBorderType(objc2_app_kit::NSBorderType(2));
+
+    let table_frame = CGRect::new(
+        CGPoint::new(0.0, 0.0),
+        CGSize::new(left_width - 40.0, WIN_H - 196.0),
+    );
+    let table: Retained<NSTableView> =
+        unsafe { msg_send![NSTableView::alloc(mtm), initWithFrame: table_frame] };
+    table.setUsesAlternatingRowBackgroundColors(true);
+    table.setAllowsEmptySelection(true);
+    table.setColumnAutoresizingStyle(
+        objc2_app_kit::NSTableViewColumnAutoresizingStyle::SequentialColumnAutoresizingStyle,
+    );
+    table.setStyle(NSTableViewStyle::Inset);
+    table.setRowSizeStyle(NSTableViewRowSizeStyle::Medium);
+    table.setRowHeight(28.0);
+    table.setIntercellSpacing(CGSize::new(8.0, 4.0));
+
+    add_workspace_table_column(mtm, &table, WORKSPACE_COLUMN_ID, "ID", 64.0);
+    add_workspace_table_column(mtm, &table, WORKSPACE_COLUMN_KIND, "Kind", 84.0);
+    add_workspace_table_column(mtm, &table, WORKSPACE_COLUMN_MONITOR, "Monitor", 112.0);
+    add_workspace_table_column(mtm, &table, WORKSPACE_COLUMN_SUMMARY, "Summary", 210.0);
+    add_workspace_table_column(mtm, &table, WORKSPACE_COLUMN_SOURCE, "Source", 72.0);
+
+    unsafe {
+        let _: () = msg_send![&*table, setDataSource: handler];
+        let _: () = msg_send![&*table, setDelegate: handler];
     }
 
-    EditorTab {
+    table_scroll.setDocumentView(Some(&table));
+    left.addSubview(&table_scroll);
+
+    let _add_lettered_button = add_button(
+        mtm,
+        &left,
+        handler,
+        "Add Lettered…",
+        20.0,
+        34.0,
+        114.0,
+        sel!(onWorkspaceAddLettered:),
+    );
+    let _add_special_button = add_button(
+        mtm,
+        &left,
+        handler,
+        "Add Special…",
+        142.0,
+        34.0,
+        108.0,
+        sel!(onWorkspaceAddSpecial:),
+    );
+
+    add_section_label(mtm, &right, "Workspace Inspector", 28.0, WIN_H - 46.0);
+    let placeholder_label = add_wrapped_label_field(
+        mtm,
+        &right,
+        "Select a workspace to inspect. Managed rows can be edited here and applied back into the managed config block.",
+        28.0,
+        WIN_H - 122.0,
+        460.0,
+        44.0,
+    );
+
+    let mut y = WIN_H - 96.0;
+    add_section_label(mtm, &right, "General", 28.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Source", 28.0, y);
+    let source_value = add_value_label(mtm, &right, "", 198.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Kind", 28.0, y);
+    let kind_value = add_value_label(mtm, &right, "", 198.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Workspace ID", 28.0, y);
+    let workspace_id_value = add_value_label(mtm, &right, "", 198.0, y);
+
+    y -= 50.0;
+    add_section_label(mtm, &right, "Placement", 28.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Monitor", 28.0, y);
+    let monitor_popup = add_popup(
+        mtm,
+        &right,
+        handler,
+        198.0,
+        y - 3.0,
+        250.0,
+        &["No preference"],
+        sel!(onWorkspaceDraftChanged:),
+    );
+    y -= 36.0;
+    add_label(mtm, &right, "Layout", 28.0, y);
+    let layout_popup = add_popup(
+        mtm,
+        &right,
+        handler,
+        198.0,
+        y - 3.0,
+        180.0,
+        &["Bsp"],
+        sel!(onWorkspaceDraftChanged:),
+    );
+
+    y -= 50.0;
+    add_section_label(mtm, &right, "Gaps", 28.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Inner Gap", 28.0, y);
+    let gap_inner_field = add_input_field(
+        mtm,
+        &right,
+        handler,
+        198.0,
+        y - 3.0,
+        96.0,
+        "default",
+        sel!(onWorkspaceDraftChanged:),
+    );
+    add_label(mtm, &right, "Outer Gap", 312.0, y);
+    let gap_outer_field = add_input_field(
+        mtm,
+        &right,
+        handler,
+        392.0,
+        y - 3.0,
+        96.0,
+        "default",
+        sel!(onWorkspaceDraftChanged:),
+    );
+
+    y -= 54.0;
+    let overlay_section_label = add_section_label_field(mtm, &right, "Special Overlay", 28.0, y);
+    y -= 34.0;
+    add_label(mtm, &right, "Position", 28.0, y);
+    let overlay_position_popup = add_popup(
+        mtm,
+        &right,
+        handler,
+        198.0,
+        y - 3.0,
+        140.0,
+        &["Center", "Top", "Bottom"],
+        sel!(onWorkspaceDraftChanged:),
+    );
+    y -= 36.0;
+    add_label(mtm, &right, "Width", 28.0, y);
+    let overlay_width_field = add_input_field(
+        mtm,
+        &right,
+        handler,
+        198.0,
+        y - 3.0,
+        96.0,
+        "0.7",
+        sel!(onWorkspaceDraftChanged:),
+    );
+    add_label(mtm, &right, "Height", 312.0, y);
+    let overlay_height_field = add_input_field(
+        mtm,
+        &right,
+        handler,
+        392.0,
+        y - 3.0,
+        96.0,
+        "0.7",
+        sel!(onWorkspaceDraftChanged:),
+    );
+
+    let copy_button = add_button(
+        mtm,
+        &right,
+        handler,
+        "Copy To Managed",
+        right_frame.size.width - 338.0,
+        34.0,
+        142.0,
+        sel!(onWorkspaceCopyToManaged:),
+    );
+    let delete_button = add_button(
+        mtm,
+        &right,
+        handler,
+        "Delete",
+        right_frame.size.width - 188.0,
+        34.0,
+        82.0,
+        sel!(onWorkspaceDelete:),
+    );
+    let apply_button = add_button(
+        mtm,
+        &right,
+        handler,
+        "Apply Workspace",
+        right_frame.size.width - 144.0,
+        34.0,
+        120.0,
+        sel!(onWorkspaceApply:),
+    );
+
+    split.addSubview(&left);
+    split.addSubview(&right);
+    split.adjustSubviews();
+    split.setPosition_ofDividerAtIndex(left_width, 0);
+    root.addSubview(&split);
+
+    WorkspacesTab {
         root,
-        read_only,
-        editor,
+        ui: WorkspacesUiRefs {
+            table,
+            placeholder_label,
+            source_value,
+            kind_value,
+            workspace_id_value,
+            monitor_popup,
+            layout_popup,
+            gap_inner_field,
+            gap_outer_field,
+            overlay_position_popup,
+            overlay_width_field,
+            overlay_height_field,
+            overlay_section_label,
+            copy_button,
+            delete_button,
+            apply_button,
+        },
     }
 }
 
@@ -2184,7 +2755,157 @@ fn set_rule_inspector_enabled(ui: &RulesUiRefs, editable: bool, geometry_enabled
         .setEnabled(editable && geometry_enabled);
 }
 
+fn derive_workspace_inspector_state(
+    rows: &[WorkspaceRow],
+    selected_workspace_id: Option<&str>,
+    draft_workspace: Option<&WorkspaceDraft>,
+) -> WorkspaceInspectorState {
+    let Some(selected_workspace_id) = selected_workspace_id else {
+        return WorkspaceInspectorState {
+            editable: false,
+            source_label: String::new(),
+            kind_label: String::new(),
+            can_copy_to_managed: false,
+            can_delete: false,
+            delete_label: "Delete".to_string(),
+            can_apply: false,
+            is_special: false,
+            draft: None,
+        };
+    };
+
+    let Some(row) = rows.iter().find(|row| row.id == selected_workspace_id) else {
+        return WorkspaceInspectorState {
+            editable: false,
+            source_label: String::new(),
+            kind_label: String::new(),
+            can_copy_to_managed: false,
+            can_delete: false,
+            delete_label: "Delete".to_string(),
+            can_apply: false,
+            is_special: false,
+            draft: None,
+        };
+    };
+
+    let is_special = row.kind == WorkspaceKind::Special;
+    let delete_label = match row.kind {
+        WorkspaceKind::Numbered if row.editable => "Reset Override".to_string(),
+        _ => "Delete".to_string(),
+    };
+
+    WorkspaceInspectorState {
+        editable: row.editable,
+        source_label: row.source_label().to_string(),
+        kind_label: row.kind_label().to_string(),
+        can_copy_to_managed: !row.editable,
+        can_delete: row.editable,
+        delete_label,
+        can_apply: row.editable,
+        is_special,
+        draft: if row.editable {
+            draft_workspace
+                .cloned()
+                .or_else(|| Some(WorkspaceDraft::from_row(row)))
+        } else {
+            Some(WorkspaceDraft::from_row(row))
+        },
+    }
+}
+
+fn apply_workspace_inspector_state(
+    ui: &WorkspacesUiRefs,
+    state: &WorkspaceInspectorState,
+    displays: &[WorkspaceDisplayOption],
+) {
+    let show_placeholder = state.draft.is_none();
+    ui.placeholder_label.setHidden(!show_placeholder);
+    ui.source_value
+        .setStringValue(&NSString::from_str(&state.source_label));
+    ui.kind_value
+        .setStringValue(&NSString::from_str(&state.kind_label));
+    ui.copy_button.setEnabled(state.can_copy_to_managed);
+    ui.delete_button.setEnabled(state.can_delete);
+    ui.delete_button
+        .setTitle(&NSString::from_str(&state.delete_label));
+    ui.apply_button.setEnabled(state.can_apply);
+
+    let Some(draft) = state.draft.as_ref() else {
+        ui.workspace_id_value
+            .setStringValue(&NSString::from_str(""));
+        rebuild_monitor_popup(&ui.monitor_popup, displays, None);
+        ui.layout_popup.selectItemAtIndex(0);
+        set_text_field_value(&ui.gap_inner_field, "");
+        set_text_field_value(&ui.gap_outer_field, "");
+        ui.overlay_position_popup.selectItemAtIndex(0);
+        set_text_field_value(&ui.overlay_width_field, "");
+        set_text_field_value(&ui.overlay_height_field, "");
+        set_workspace_inspector_enabled(ui, false, false);
+        return;
+    };
+
+    ui.workspace_id_value
+        .setStringValue(&NSString::from_str(&draft.id));
+    rebuild_monitor_popup(&ui.monitor_popup, displays, draft.monitor_display_id);
+    ui.layout_popup.selectItemAtIndex(match draft.layout {
+        WorkspaceLayout::Bsp => 0,
+    });
+    set_text_field_value(
+        &ui.gap_inner_field,
+        &draft.gap_inner.map(format_number_field).unwrap_or_default(),
+    );
+    set_text_field_value(
+        &ui.gap_outer_field,
+        &draft.gap_outer.map(format_number_field).unwrap_or_default(),
+    );
+    ui.overlay_position_popup
+        .selectItemAtIndex(match draft.overlay_position.as_str() {
+            "top" => 1,
+            "bottom" => 2,
+            _ => 0,
+        });
+    set_text_field_value(
+        &ui.overlay_width_field,
+        &format_number_field(draft.overlay_width),
+    );
+    set_text_field_value(
+        &ui.overlay_height_field,
+        &format_number_field(draft.overlay_height),
+    );
+    set_workspace_inspector_enabled(ui, state.editable, state.is_special);
+}
+
+fn set_workspace_inspector_enabled(ui: &WorkspacesUiRefs, editable: bool, is_special: bool) {
+    ui.monitor_popup.setEnabled(editable);
+    ui.layout_popup.setEnabled(editable);
+    ui.gap_inner_field.setEnabled(editable);
+    ui.gap_outer_field.setEnabled(editable);
+    ui.overlay_position_popup.setEnabled(editable && is_special);
+    ui.overlay_width_field.setEnabled(editable && is_special);
+    ui.overlay_height_field.setEnabled(editable && is_special);
+    ui.overlay_section_label.setHidden(!is_special);
+    ui.overlay_position_popup.setHidden(!is_special);
+    ui.overlay_width_field.setHidden(!is_special);
+    ui.overlay_height_field.setHidden(!is_special);
+}
+
 fn add_keybind_table_column(
+    mtm: MainThreadMarker,
+    table: &NSTableView,
+    identifier: &str,
+    title: &str,
+    width: CGFloat,
+) {
+    let identifier = NSString::from_str(identifier);
+    let column: Retained<NSTableColumn> =
+        unsafe { msg_send![NSTableColumn::alloc(mtm), initWithIdentifier: &*identifier] };
+    column.setTitle(&NSString::from_str(title));
+    column.setWidth(width);
+    column.setMinWidth(width.min(180.0));
+    table.addTableColumn(&column);
+}
+
+fn add_workspace_table_column(
     mtm: MainThreadMarker,
     table: &NSTableView,
     identifier: &str,
@@ -2321,7 +3042,13 @@ fn add_wrapped_label_field(
     label
 }
 
-fn add_section_label(mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64, y: f64) {
+fn add_section_label_field(
+    mtm: MainThreadMarker,
+    parent: &NSView,
+    text: &str,
+    x: f64,
+    y: f64,
+) -> Retained<NSTextField> {
     let frame = CGRect::new(CGPoint::new(x, y), CGSize::new(260.0, 24.0));
     let label: Retained<NSTextField> =
         unsafe { msg_send![NSTextField::alloc(mtm), initWithFrame: frame] };
@@ -2335,6 +3062,11 @@ fn add_section_label(mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64,
         label.setFont(Some(&font));
     }
     parent.addSubview(&label);
+    label
+}
+
+fn add_section_label(mtm: MainThreadMarker, parent: &NSView, text: &str, x: f64, y: f64) {
+    let _ = add_section_label_field(mtm, parent, text, x, y);
 }
 
 fn add_value_label(
@@ -2474,39 +3206,6 @@ fn add_input_field(
     field
 }
 
-fn add_text_editor(
-    mtm: MainThreadMarker,
-    parent: &NSView,
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    editable: bool,
-) -> Retained<NSTextView> {
-    let scroll_frame = CGRect::new(CGPoint::new(x, y), CGSize::new(width, height));
-    let scroll: Retained<NSScrollView> =
-        unsafe { msg_send![NSScrollView::alloc(mtm), initWithFrame: scroll_frame] };
-    scroll.setHasVerticalScroller(true);
-    scroll.setBorderType(objc2_app_kit::NSBorderType(2));
-
-    let text_frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(width - 24.0, height));
-    let text: Retained<NSTextView> =
-        unsafe { msg_send![NSTextView::alloc(mtm), initWithFrame: text_frame] };
-    text.setEditable(editable);
-    unsafe {
-        let mono: Retained<objc2_app_kit::NSFont> = msg_send![
-            objc2_app_kit::NSFont::class(),
-            monospacedSystemFontOfSize: 11.0_f64,
-            weight: 0.0_f64
-        ];
-        text.setFont(Some(&mono));
-    }
-
-    scroll.setDocumentView(Some(&text));
-    parent.addSubview(&scroll);
-    text
-}
-
 #[allow(clippy::too_many_arguments)]
 fn add_button(
     mtm: MainThreadMarker,
@@ -2528,10 +3227,6 @@ fn add_button(
     }
     parent.addSubview(&button);
     button
-}
-
-fn set_text_view(text_view: &NSTextView, content: &str) {
-    text_view.setString(&NSString::from_str(content));
 }
 
 fn set_text_field_value(text_field: &NSTextField, content: &str) {
@@ -2632,12 +3327,131 @@ fn parse_f64_field(field: &NSTextField, fallback: f64) -> f64 {
         .unwrap_or(fallback)
 }
 
+fn parse_optional_f64_field(field: &NSTextField) -> Option<f64> {
+    let value = field.stringValue().to_string();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        trimmed.parse::<f64>().ok()
+    }
+}
+
 fn format_number_field(value: f64) -> String {
     if (value.fract()).abs() < f64::EPSILON {
         format!("{value:.0}")
     } else {
         format!("{value:.2}")
     }
+}
+
+fn reset_popup_items(popup: &NSPopUpButton, items: &[String], selected_index: NSInteger) {
+    popup.removeAllItems();
+    for item in items {
+        popup.addItemWithTitle(&NSString::from_str(item));
+    }
+    popup.selectItemAtIndex(selected_index.max(0));
+}
+
+fn rebuild_monitor_popup(
+    popup: &NSPopUpButton,
+    displays: &[WorkspaceDisplayOption],
+    selected_display_id: Option<u32>,
+) {
+    let mut items = vec!["No preference".to_string()];
+    items.extend(displays.iter().map(|display| display.label.clone()));
+
+    let selected_index = if let Some(display_id) = selected_display_id {
+        if let Some(index) = displays
+            .iter()
+            .position(|display| display.display_id == display_id)
+        {
+            index as NSInteger + 1
+        } else {
+            items.push(format!("Disconnected ({display_id})"));
+            items.len() as NSInteger - 1
+        }
+    } else {
+        0
+    };
+
+    reset_popup_items(popup, &items, selected_index);
+}
+
+fn popup_selected_display_id(popup: &NSPopUpButton) -> Option<u32> {
+    let title = popup.titleOfSelectedItem()?.to_string();
+    let start = title.rfind('(')? + 1;
+    let end = title.rfind(')')?;
+    title[start..end].parse::<u32>().ok()
+}
+
+fn popup_overlay_position(popup: &NSPopUpButton) -> String {
+    match popup.indexOfSelectedItem() {
+        1 => "top".to_string(),
+        2 => "bottom".to_string(),
+        _ => "center".to_string(),
+    }
+}
+
+fn validate_lettered_workspace_id(value: &str, existing_ids: &[String]) -> Option<String> {
+    let trimmed = value.trim();
+    let mut chars = trimmed.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() || !ch.is_ascii_alphabetic() {
+        return None;
+    }
+    let letter = ch.to_ascii_uppercase().to_string();
+    (!existing_ids
+        .iter()
+        .any(|id| id.eq_ignore_ascii_case(&letter)))
+    .then_some(letter)
+}
+
+fn validate_special_workspace_name(value: &str, existing_ids: &[String]) -> Option<String> {
+    let trimmed = value
+        .trim()
+        .strip_prefix("special:")
+        .unwrap_or(value.trim());
+    if trimmed.is_empty() {
+        return None;
+    }
+    let id = format!("special:{trimmed}");
+    (!existing_ids.iter().any(|existing| existing == &id)).then(|| trimmed.to_string())
+}
+
+fn prompt_for_workspace_text(
+    mtm: MainThreadMarker,
+    title: &str,
+    message: &str,
+    placeholder: &str,
+    validate: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let alert: Retained<objc2_app_kit::NSAlert> =
+        unsafe { msg_send![objc2_app_kit::NSAlert::alloc(mtm), init] };
+    let title = NSString::from_str(title);
+    let message = NSString::from_str(message);
+    unsafe {
+        let _: () = msg_send![&*alert, setMessageText: &*title];
+        let _: () = msg_send![&*alert, setInformativeText: &*message];
+        let _: Retained<NSButton> =
+            msg_send![&*alert, addButtonWithTitle: &*NSString::from_str("OK")];
+        let _: Retained<NSButton> =
+            msg_send![&*alert, addButtonWithTitle: &*NSString::from_str("Cancel")];
+    }
+
+    let frame = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(240.0, 24.0));
+    let input: Retained<NSTextField> =
+        unsafe { msg_send![NSTextField::alloc(mtm), initWithFrame: frame] };
+    input.setPlaceholderString(Some(&NSString::from_str(placeholder)));
+    unsafe {
+        let _: () = msg_send![&*alert, setAccessoryView: &*input];
+        let response: NSInteger = msg_send![&*alert, runModal];
+        if response != 1000 {
+            return None;
+        }
+    }
+
+    validate(&input.stringValue().to_string())
 }
 
 #[cfg(test)]
@@ -2719,6 +3533,31 @@ mod tests {
         }
     }
 
+    fn workspace_row(id: &str, source: ConfigSource, kind: WorkspaceKind) -> WorkspaceRow {
+        WorkspaceRow {
+            id: id.to_string(),
+            kind,
+            source,
+            editable: source == ConfigSource::Managed,
+            definition: WorkspaceDefinition {
+                id: crate::core::workspace::WorkspaceId::parse(id).expect("invalid workspace id"),
+                kind,
+                prefs: crate::core::workspace::WorkspacePrefs {
+                    monitor: None,
+                    default_layout: WorkspaceLayout::Bsp,
+                    gap_inner: None,
+                    gap_outer: None,
+                },
+            },
+            special: (kind == WorkspaceKind::Special).then(|| SpecialWorkspaceConfig {
+                name: id.trim_start_matches("special:").to_string(),
+                position: "center".to_string(),
+                width: 0.7,
+                height: 0.7,
+            }),
+        }
+    }
+
     #[test]
     fn selecting_lua_rule_is_read_only() {
         let rows = vec![managed_row("rule_001", None), lua_row("lua_rule")];
@@ -2784,5 +3623,71 @@ mod tests {
         };
         let state = derive_keybind_inspector_state(&rows, Some("managed:0"), Some(&draft));
         assert_eq!(state.draft, Some(draft));
+    }
+
+    #[test]
+    fn selecting_default_workspace_is_read_only() {
+        let rows = vec![
+            workspace_row("1", ConfigSource::Default, WorkspaceKind::Numbered),
+            workspace_row("A", ConfigSource::Managed, WorkspaceKind::Lettered),
+        ];
+        let state = derive_workspace_inspector_state(&rows, Some("1"), None);
+        assert!(!state.editable);
+        assert!(state.can_copy_to_managed);
+        assert!(!state.can_apply);
+        assert_eq!(state.source_label, "Default");
+    }
+
+    #[test]
+    fn selecting_managed_workspace_is_editable() {
+        let rows = vec![
+            workspace_row("1", ConfigSource::Default, WorkspaceKind::Numbered),
+            workspace_row("A", ConfigSource::Managed, WorkspaceKind::Lettered),
+        ];
+        let state = derive_workspace_inspector_state(&rows, Some("A"), None);
+        assert!(state.editable);
+        assert!(state.can_delete);
+        assert!(state.can_apply);
+        assert_eq!(state.source_label, "Managed");
+    }
+
+    #[test]
+    fn special_workspace_draft_enables_overlay_fields() {
+        let rows = vec![workspace_row(
+            "special:term",
+            ConfigSource::Managed,
+            WorkspaceKind::Special,
+        )];
+        let state = derive_workspace_inspector_state(&rows, Some("special:term"), None);
+        assert!(state.is_special);
+        assert_eq!(
+            state.draft.expect("draft missing").overlay_position,
+            "center".to_string()
+        );
+    }
+
+    #[test]
+    fn validate_lettered_workspace_normalizes_and_rejects_duplicates() {
+        assert_eq!(
+            validate_lettered_workspace_id("w", &["A".to_string()]),
+            Some("W".to_string())
+        );
+        assert_eq!(
+            validate_lettered_workspace_id("a", &["A".to_string()]),
+            None
+        );
+    }
+
+    #[test]
+    fn validate_special_workspace_name_rejects_empty_and_duplicates() {
+        assert_eq!(
+            validate_special_workspace_name("terminal", &[]),
+            Some("terminal".to_string())
+        );
+        assert_eq!(
+            validate_special_workspace_name("special:terminal", &["special:terminal".to_string()]),
+            None
+        );
+        assert_eq!(validate_special_workspace_name("   ", &[]), None);
     }
 }

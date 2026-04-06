@@ -2,11 +2,11 @@ use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
 
-use tarmac::config::document::{KeybindRow, ManagedConfigDocument, RuleRow};
-use tarmac::config::lua::{LuaKeybind, WindowRule};
+use tarmac::config::document::{KeybindRow, ManagedConfigDocument, RuleRow, WorkspaceRow};
+use tarmac::config::lua::{LuaKeybind, SpecialWorkspaceConfig, WindowRule};
 use tarmac::core::input::{Action, Key, Modifiers};
 use tarmac::core::state::WmState;
-use tarmac::core::workspace::WorkspaceTarget;
+use tarmac::core::workspace::{WorkspaceDefinition, WorkspaceId, WorkspaceKind, WorkspaceTarget};
 use tarmac::platform::event_tap::EventTap;
 use tarmac::platform::hotkey::HotkeyManager;
 use tarmac::platform::permissions;
@@ -25,6 +25,7 @@ thread_local! {
     static SETTINGS_WIN: RefCell<Option<tarmac::ui::settings::SettingsWindow>> = const { RefCell::new(None) };
     static SETTINGS_SELECTED_KEYBIND_ID: RefCell<Option<String>> = const { RefCell::new(None) };
     static SETTINGS_SELECTED_RULE_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+    static SETTINGS_SELECTED_WORKSPACE_ID: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn main() {
@@ -794,8 +795,12 @@ fn load_runtime_config(path: &std::path::Path) -> tarmac::config::lua::LuaConfig
         Ok(doc) => {
             let mod_key = doc.effective.settings.mod_key;
             let resolved_keybinds = doc.resolved_keybinds(mod_key);
+            let (resolved_workspace_defs, resolved_special_configs) =
+                doc.resolved_workspace_defs_and_specials();
             let mut config = doc.effective;
             config.keybinds = resolved_keybinds;
+            config.workspace_defs = resolved_workspace_defs;
+            config.special_configs = resolved_special_configs;
             config
         }
         Err(err) => {
@@ -970,8 +975,30 @@ fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
     let selected_rule_id = resolve_selected_rule_id(&rules, previous_selected_rule_id.as_deref());
     SETTINGS_SELECTED_RULE_ID.with(|slot| *slot.borrow_mut() = selected_rule_id.clone());
 
-    let workspaces_external_text = format_workspace_snapshot(&doc, false);
-    let workspaces_managed_text = format_workspace_snapshot(&doc, true);
+    let workspaces = doc.workspace_rows();
+    let previous_selected_workspace_id =
+        SETTINGS_SELECTED_WORKSPACE_ID.with(|slot| slot.borrow().clone());
+    let selected_workspace_id =
+        resolve_selected_workspace_id(&workspaces, previous_selected_workspace_id.as_deref());
+    SETTINGS_SELECTED_WORKSPACE_ID.with(|slot| *slot.borrow_mut() = selected_workspace_id.clone());
+    let displays = WM_STATE.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|state| {
+                state
+                    .monitors
+                    .iter()
+                    .enumerate()
+                    .map(
+                        |(index, monitor)| tarmac::ui::settings::WorkspaceDisplayOption {
+                            display_id: monitor.id,
+                            label: format!("Display {} ({})", index + 1, monitor.id),
+                        },
+                    )
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    });
 
     Some(tarmac::ui::settings::SettingsSnapshot {
         gap_inner: doc.managed.settings.gap_inner,
@@ -992,8 +1019,9 @@ fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
         selected_keybind_id,
         rules,
         selected_rule_id,
-        workspaces_external_text,
-        workspaces_managed_text,
+        workspaces,
+        selected_workspace_id,
+        displays,
     })
 }
 
@@ -1045,72 +1073,39 @@ fn fallback_selected_rule_after_delete(rows: &[RuleRow], deleted_id: &str) -> Op
         .map(|row| row.id.clone())
 }
 
-fn format_workspace_snapshot(doc: &ManagedConfigDocument, managed: bool) -> String {
-    let defs = if managed {
-        &doc.managed.workspace_defs
-    } else {
-        &doc.effective.workspace_defs
-    };
-    let specials = if managed {
-        &doc.managed.special_configs
-    } else {
-        &doc.effective.special_configs
-    };
-
-    let mut lines = defs
-        .iter()
-        .filter(|def| {
-            if managed {
-                true
-            } else {
-                !doc.managed
-                    .workspace_defs
-                    .iter()
-                    .any(|managed_def| managed_def == *def)
-            }
-        })
-        .map(|def| {
-            let mut parts = Vec::new();
-            if let Some(monitor) = &def.prefs.monitor {
-                parts.push(format!("monitor={}", monitor.display_id));
-            }
-            parts.push(format!("layout={}", def.prefs.default_layout.as_str()));
-            if let Some(gap_inner) = def.prefs.gap_inner {
-                parts.push(format!(
-                    "gap_inner={}",
-                    tarmac::config::lua::lua_number(gap_inner)
-                ));
-            }
-            if let Some(gap_outer) = def.prefs.gap_outer {
-                parts.push(format!(
-                    "gap_outer={}",
-                    tarmac::config::lua::lua_number(gap_outer)
-                ));
-            }
-            format!("{} | {}", def.id, parts.join(" "))
-        })
-        .collect::<Vec<_>>();
-
-    for special in specials {
-        if !managed
-            && doc
-                .managed
-                .special_configs
-                .iter()
-                .any(|managed_cfg| managed_cfg == special)
-        {
-            continue;
-        }
-        lines.push(format!(
-            "special:{} | overlay.position={} overlay.width={} overlay.height={}",
-            special.name,
-            special.position,
-            tarmac::config::lua::lua_number(special.width),
-            tarmac::config::lua::lua_number(special.height)
-        ));
+fn resolve_selected_workspace_id(
+    rows: &[WorkspaceRow],
+    preferred_id: Option<&str>,
+) -> Option<String> {
+    if let Some(preferred_id) = preferred_id
+        && rows.iter().any(|row| row.id == preferred_id)
+    {
+        return Some(preferred_id.to_string());
     }
 
-    lines.join("\n")
+    rows.iter()
+        .find(|row| row.editable)
+        .or_else(|| rows.first())
+        .map(|row| row.id.clone())
+}
+
+fn fallback_selected_workspace_after_delete(
+    rows: &[WorkspaceRow],
+    deleted_id: &str,
+) -> Option<String> {
+    let deleted_row = rows.iter().find(|row| row.id == deleted_id)?;
+    if deleted_row.kind == WorkspaceKind::Numbered {
+        return Some(deleted_id.to_string());
+    }
+
+    let deleted_index = rows.iter().position(|row| row.id == deleted_id)?;
+    rows.get(deleted_index + 1)
+        .or_else(|| {
+            deleted_index
+                .checked_sub(1)
+                .and_then(|index| rows.get(index))
+        })
+        .map(|row| row.id.clone())
 }
 
 fn managed_rule_index(rules: &[WindowRule], target_id: &str) -> Option<usize> {
@@ -1326,6 +1321,131 @@ fn toggle_managed_rule_enabled(rules: &mut [WindowRule], target_id: &str, enable
     true
 }
 
+fn managed_workspace_def_index(defs: &[WorkspaceDefinition], target_id: &str) -> Option<usize> {
+    let target = WorkspaceId::parse(target_id)?;
+    defs.iter().position(|def| def.id == target)
+}
+
+fn managed_special_index(specials: &[SpecialWorkspaceConfig], target_id: &str) -> Option<usize> {
+    let name = target_id.strip_prefix("special:")?;
+    specials.iter().position(|special| special.name == name)
+}
+
+fn upsert_managed_workspace_def(
+    defs: &mut Vec<WorkspaceDefinition>,
+    definition: WorkspaceDefinition,
+) {
+    if let Some(index) = defs.iter().position(|def| def.id == definition.id) {
+        defs[index] = definition;
+    } else {
+        defs.push(definition);
+    }
+}
+
+fn upsert_managed_special_config(
+    specials: &mut Vec<SpecialWorkspaceConfig>,
+    special: SpecialWorkspaceConfig,
+) {
+    if let Some(index) = specials
+        .iter()
+        .position(|existing| existing.name == special.name)
+    {
+        specials[index] = special;
+    } else {
+        specials.push(special);
+    }
+}
+
+fn add_managed_lettered_workspace(
+    defs: &mut Vec<WorkspaceDefinition>,
+    letter: &str,
+) -> Option<String> {
+    let id = WorkspaceId::parse(letter)?;
+    if !matches!(id, WorkspaceId::Lettered(_)) {
+        return None;
+    }
+    let definition = WorkspaceDefinition::new(id.clone());
+    upsert_managed_workspace_def(defs, definition);
+    Some(id.to_string())
+}
+
+fn add_managed_special_workspace(
+    defs: &mut Vec<WorkspaceDefinition>,
+    specials: &mut Vec<SpecialWorkspaceConfig>,
+    name: &str,
+) -> Option<String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let id = WorkspaceId::Special(name.to_string());
+    upsert_managed_workspace_def(defs, WorkspaceDefinition::new(id.clone()));
+    upsert_managed_special_config(specials, SpecialWorkspaceConfig::default_for(name));
+    Some(id.to_string())
+}
+
+fn copy_workspace_to_managed(
+    rows: &[WorkspaceRow],
+    defs: &mut Vec<WorkspaceDefinition>,
+    specials: &mut Vec<SpecialWorkspaceConfig>,
+    target_id: &str,
+) -> Option<String> {
+    let row = rows
+        .iter()
+        .find(|row| row.id == target_id && !row.editable)?;
+    upsert_managed_workspace_def(defs, row.definition.clone());
+    if let Some(special) = row.special.clone() {
+        upsert_managed_special_config(specials, special);
+    }
+    Some(row.id.clone())
+}
+
+fn delete_managed_workspace(
+    rows: &[WorkspaceRow],
+    defs: &mut Vec<WorkspaceDefinition>,
+    specials: &mut Vec<SpecialWorkspaceConfig>,
+    target_id: &str,
+) -> bool {
+    let Some(row) = rows.iter().find(|row| row.id == target_id && row.editable) else {
+        return false;
+    };
+
+    let mut changed = false;
+    if let Some(index) = managed_workspace_def_index(defs, target_id) {
+        defs.remove(index);
+        changed = true;
+    }
+    if row.kind == WorkspaceKind::Special
+        && let Some(index) = managed_special_index(specials, target_id)
+    {
+        specials.remove(index);
+        changed = true;
+    }
+    changed
+}
+
+fn replace_managed_workspace(
+    defs: &mut Vec<WorkspaceDefinition>,
+    specials: &mut Vec<SpecialWorkspaceConfig>,
+    target_id: &str,
+    draft: tarmac::ui::settings::WorkspaceDraft,
+) -> bool {
+    if target_id != draft.id {
+        return false;
+    }
+
+    upsert_managed_workspace_def(defs, draft.to_definition());
+    match draft.special_config() {
+        Some(special) => upsert_managed_special_config(specials, special),
+        None => {
+            if let Some(index) = managed_special_index(specials, target_id) {
+                specials.remove(index);
+            }
+        }
+    }
+    true
+}
+
 fn poll_settings_actions() {
     use tarmac::ui::settings::SettingsAction;
 
@@ -1350,6 +1470,7 @@ fn poll_settings_actions() {
         let should_refresh = false;
         let mut pending_keybind_draft = None;
         let mut pending_rule_draft = None;
+        let mut pending_workspace_draft = None;
         for action in actions {
             match action {
                 SettingsAction::GapInner(value) => {
@@ -1510,10 +1631,67 @@ fn poll_settings_actions() {
                         should_write = true;
                     }
                 }
-                SettingsAction::ApplyManagedWorkspaces(text) => {
-                    if let Ok((defs, specials)) = parse_managed_workspaces(&text) {
-                        doc.managed.workspace_defs = defs;
-                        doc.managed.special_configs = specials;
+                SettingsAction::SelectWorkspace(id) => {
+                    SETTINGS_SELECTED_WORKSPACE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                }
+                SettingsAction::AddLetteredWorkspace(letter) => {
+                    if let Some(id) =
+                        add_managed_lettered_workspace(&mut doc.managed.workspace_defs, &letter)
+                    {
+                        SETTINGS_SELECTED_WORKSPACE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                        should_write = true;
+                    }
+                }
+                SettingsAction::AddSpecialWorkspace(name) => {
+                    if let Some(id) = add_managed_special_workspace(
+                        &mut doc.managed.workspace_defs,
+                        &mut doc.managed.special_configs,
+                        &name,
+                    ) {
+                        SETTINGS_SELECTED_WORKSPACE_ID.with(|slot| *slot.borrow_mut() = Some(id));
+                        should_write = true;
+                    }
+                }
+                SettingsAction::CopyWorkspaceToManaged(id) => {
+                    let rows = doc.workspace_rows();
+                    if let Some(new_id) = copy_workspace_to_managed(
+                        &rows,
+                        &mut doc.managed.workspace_defs,
+                        &mut doc.managed.special_configs,
+                        &id,
+                    ) {
+                        SETTINGS_SELECTED_WORKSPACE_ID
+                            .with(|slot| *slot.borrow_mut() = Some(new_id));
+                        should_write = true;
+                    }
+                }
+                SettingsAction::DeleteWorkspace(id) => {
+                    let rows = doc.workspace_rows();
+                    let fallback_id = fallback_selected_workspace_after_delete(&rows, &id);
+                    if delete_managed_workspace(
+                        &rows,
+                        &mut doc.managed.workspace_defs,
+                        &mut doc.managed.special_configs,
+                        &id,
+                    ) {
+                        SETTINGS_SELECTED_WORKSPACE_ID
+                            .with(|slot| *slot.borrow_mut() = fallback_id);
+                        should_write = true;
+                    }
+                }
+                SettingsAction::UpdateWorkspaceDraft(draft) => {
+                    pending_workspace_draft = Some(draft);
+                }
+                SettingsAction::ApplyWorkspace(id) => {
+                    if let Some(draft) = pending_workspace_draft.take()
+                        && replace_managed_workspace(
+                            &mut doc.managed.workspace_defs,
+                            &mut doc.managed.special_configs,
+                            &id,
+                            draft,
+                        )
+                    {
+                        SETTINGS_SELECTED_WORKSPACE_ID.with(|slot| *slot.borrow_mut() = Some(id));
                         should_write = true;
                     }
                 }
@@ -1527,93 +1705,6 @@ fn poll_settings_actions() {
             refresh_settings_window();
         }
     });
-}
-
-fn parse_managed_workspaces(
-    text: &str,
-) -> Result<
-    (
-        Vec<tarmac::core::workspace::WorkspaceDefinition>,
-        Vec<tarmac::config::lua::SpecialWorkspaceConfig>,
-    ),
-    String,
-> {
-    let mut source = String::new();
-    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
-        let Some((id, rest)) = line.split_once('|') else {
-            return Err(format!("invalid workspace line: {line}"));
-        };
-        let id = id.trim();
-        let entries = rest.trim();
-        let mut workspace_entries = Vec::new();
-        let mut overlay_entries = Vec::new();
-        for token in entries.split_whitespace() {
-            let Some((key, value)) = token.split_once('=') else {
-                continue;
-            };
-            if let Some(overlay_key) = key.strip_prefix("overlay.") {
-                overlay_entries.push((overlay_key.to_string(), value.to_string()));
-            } else {
-                workspace_entries.push((key.to_string(), value.to_string()));
-            }
-        }
-
-        source.push_str(&format!(
-            "gar.workspace({}, {{{}}})\n",
-            workspace_id_lua_literal(id),
-            workspace_tokens_to_lua(&workspace_entries)
-        ));
-        if let Some(name) = id.strip_prefix("special:")
-            && !overlay_entries.is_empty()
-        {
-            source.push_str(&format!(
-                "gar.special_workspace({}, {{{}}})\n",
-                tarmac::config::lua::lua_string(name),
-                workspace_tokens_to_lua(&overlay_entries)
-            ));
-        }
-    }
-
-    let config = tarmac::config::lua::load_config_from_source(&source, "managed-workspaces");
-    let defs = config
-        .workspace_defs
-        .into_iter()
-        .filter(|def| {
-            !matches!(
-                def.id,
-                tarmac::core::workspace::WorkspaceId::Numbered(1..=10)
-            ) || def.prefs.monitor.is_some()
-                || def.prefs.gap_inner.is_some()
-                || def.prefs.gap_outer.is_some()
-        })
-        .collect();
-    Ok((defs, config.special_configs))
-}
-
-fn workspace_id_lua_literal(id: &str) -> String {
-    if id.chars().all(|ch| ch.is_ascii_digit()) {
-        id.to_string()
-    } else {
-        tarmac::config::lua::lua_string(id)
-    }
-}
-
-fn workspace_tokens_to_lua(entries: &[(String, String)]) -> String {
-    entries
-        .iter()
-        .map(|(key, value)| format!("{key} = {}", lua_value(value)))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn lua_value(value: &str) -> String {
-    if value.eq_ignore_ascii_case("true") || value.eq_ignore_ascii_case("false") {
-        value.to_ascii_lowercase()
-    } else if value.parse::<f64>().is_ok() {
-        value.to_string()
-    } else {
-        tarmac::config::lua::lua_string(value)
-    }
 }
 
 fn run_app() {
@@ -1687,6 +1778,22 @@ mod tests {
             },
             editable,
             rule: sample_rule(id, id),
+        }
+    }
+
+    fn sample_workspace_row(id: &str, source: ConfigSource, kind: WorkspaceKind) -> WorkspaceRow {
+        WorkspaceRow {
+            id: id.to_string(),
+            kind,
+            source,
+            editable: source == ConfigSource::Managed,
+            definition: WorkspaceDefinition::new(WorkspaceId::parse(id).expect("invalid id")),
+            special: (kind == WorkspaceKind::Special).then(|| SpecialWorkspaceConfig {
+                name: id.trim_start_matches("special:").to_string(),
+                position: "center".to_string(),
+                width: 0.7,
+                height: 0.7,
+            }),
         }
     }
 
@@ -1812,4 +1919,54 @@ mod tests {
             Some("rule_001")
         );
     }
+
+    #[test]
+    fn add_lettered_workspace_normalizes_to_uppercase() {
+        let mut defs = Vec::new();
+        let id = add_managed_lettered_workspace(&mut defs, "w").expect("workspace add failed");
+        assert_eq!(id, "W");
+        assert_eq!(defs[0].id, WorkspaceId::Lettered('W'));
+    }
+
+    #[test]
+    fn add_special_workspace_rejects_empty_name() {
+        let mut defs = Vec::new();
+        let mut specials = Vec::new();
+        assert!(add_managed_special_workspace(&mut defs, &mut specials, "   ").is_none());
+        assert!(defs.is_empty());
+        assert!(specials.is_empty());
+    }
+
+    #[test]
+    fn delete_workspace_selection_keeps_numbered_row_selected() {
+        let rows = vec![
+            sample_workspace_row("1", ConfigSource::Managed, WorkspaceKind::Numbered),
+            sample_workspace_row("A", ConfigSource::Managed, WorkspaceKind::Lettered),
+        ];
+        assert_eq!(
+            fallback_selected_workspace_after_delete(&rows, "1").as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            fallback_selected_workspace_after_delete(&rows, "A").as_deref(),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn copy_workspace_to_managed_promotes_inherited_row() {
+        let rows = vec![sample_workspace_row(
+            "special:term",
+            ConfigSource::Lua,
+            WorkspaceKind::Special,
+        )];
+        let mut defs = Vec::new();
+        let mut specials = Vec::new();
+        let id = copy_workspace_to_managed(&rows, &mut defs, &mut specials, "special:term")
+            .expect("copy failed");
+        assert_eq!(id, "special:term");
+        assert_eq!(defs[0].id, WorkspaceId::Special("term".to_string()));
+        assert_eq!(specials[0].name, "term");
+    }
+
 }

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
 use super::lua::{
@@ -74,6 +74,77 @@ impl RuleRow {
 
     pub fn source_label(&self) -> &'static str {
         self.source.label()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct WorkspaceRow {
+    pub id: String,
+    pub kind: WorkspaceKind,
+    pub source: ConfigSource,
+    pub editable: bool,
+    pub definition: WorkspaceDefinition,
+    pub special: Option<SpecialWorkspaceConfig>,
+}
+
+impl WorkspaceRow {
+    pub fn source_label(&self) -> &'static str {
+        self.source.label()
+    }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self.kind {
+            WorkspaceKind::Numbered => "Numbered",
+            WorkspaceKind::Lettered => "Lettered",
+            WorkspaceKind::Special => "Special",
+        }
+    }
+
+    pub fn monitor_summary(&self) -> String {
+        self.definition
+            .prefs
+            .monitor
+            .as_ref()
+            .map(|monitor| format!("Display {}", monitor.display_id))
+            .unwrap_or_else(|| "No preference".to_string())
+    }
+
+    pub fn summary(&self) -> String {
+        let mut parts = vec![format!(
+            "Layout {}",
+            self.definition
+                .prefs
+                .default_layout
+                .as_str()
+                .to_ascii_uppercase()
+        )];
+
+        if self.definition.prefs.gap_inner.is_some() || self.definition.prefs.gap_outer.is_some() {
+            let gap_inner = self
+                .definition
+                .prefs
+                .gap_inner
+                .map(lua_number)
+                .unwrap_or_else(|| "default".to_string());
+            let gap_outer = self
+                .definition
+                .prefs
+                .gap_outer
+                .map(lua_number)
+                .unwrap_or_else(|| "default".to_string());
+            parts.push(format!("Gaps {gap_inner}/{gap_outer}"));
+        }
+
+        if let Some(special) = &self.special {
+            parts.push(format!(
+                "{} {}×{}",
+                special.position,
+                lua_number(special.width),
+                lua_number(special.height)
+            ));
+        }
+
+        parts.join(" · ")
     }
 }
 
@@ -228,6 +299,166 @@ impl ManagedConfigDocument {
         rows.extend(self.external_rule_rows());
         rows
     }
+
+    pub fn resolved_workspace_defs_and_specials(
+        &self,
+    ) -> (Vec<WorkspaceDefinition>, Vec<SpecialWorkspaceConfig>) {
+        let managed_defs = self
+            .managed
+            .workspace_defs
+            .iter()
+            .cloned()
+            .map(|def| (def.id.clone(), def))
+            .collect::<std::collections::HashMap<_, _>>();
+        let effective_defs = self
+            .effective
+            .workspace_defs
+            .iter()
+            .cloned()
+            .map(|def| (def.id.clone(), def))
+            .collect::<std::collections::HashMap<_, _>>();
+        let managed_specials = self
+            .managed
+            .special_configs
+            .iter()
+            .cloned()
+            .map(|special| (special.name.clone(), special))
+            .collect::<std::collections::HashMap<_, _>>();
+        let effective_specials = self
+            .effective
+            .special_configs
+            .iter()
+            .cloned()
+            .map(|special| (special.name.clone(), special))
+            .collect::<std::collections::HashMap<_, _>>();
+
+        let mut defs = Vec::new();
+        for default_def in super::lua::default_workspace_definitions() {
+            let resolved = managed_defs
+                .get(&default_def.id)
+                .cloned()
+                .or_else(|| effective_defs.get(&default_def.id).cloned())
+                .unwrap_or(default_def);
+            defs.push(resolved);
+        }
+
+        let mut extra_ids = Vec::new();
+        let mut seen_extra_ids = HashSet::new();
+        for id in managed_defs.keys().chain(effective_defs.keys()) {
+            match id {
+                WorkspaceId::Numbered(1..=10) => {}
+                _ => {
+                    if seen_extra_ids.insert(id.clone()) {
+                        extra_ids.push(id.clone());
+                    }
+                }
+            }
+        }
+        for name in managed_specials.keys().chain(effective_specials.keys()) {
+            let id = WorkspaceId::Special(name.clone());
+            if seen_extra_ids.insert(id.clone()) {
+                extra_ids.push(id);
+            }
+        }
+
+        extra_ids.sort_by_key(workspace_id_sort_key);
+        for id in extra_ids {
+            let resolved = managed_defs
+                .get(&id)
+                .cloned()
+                .or_else(|| effective_defs.get(&id).cloned())
+                .unwrap_or_else(|| WorkspaceDefinition::new(id));
+            defs.push(resolved);
+        }
+
+        let mut special_names = BTreeSet::new();
+        for def in &defs {
+            if let WorkspaceId::Special(name) = &def.id {
+                special_names.insert(name.clone());
+            }
+        }
+        for name in managed_specials.keys().chain(effective_specials.keys()) {
+            special_names.insert(name.clone());
+        }
+
+        let mut specials = special_names
+            .into_iter()
+            .filter_map(|name| {
+                managed_specials
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| effective_specials.get(&name).cloned())
+            })
+            .collect::<Vec<_>>();
+        specials.sort_by(|a, b| a.name.cmp(&b.name));
+
+        (defs, specials)
+    }
+
+    pub fn workspace_rows(&self) -> Vec<WorkspaceRow> {
+        let managed_defs = self
+            .managed
+            .workspace_defs
+            .iter()
+            .cloned()
+            .map(|def| (def.id.clone(), def))
+            .collect::<std::collections::HashMap<_, _>>();
+        let effective_defs = self
+            .effective
+            .workspace_defs
+            .iter()
+            .cloned()
+            .map(|def| (def.id.clone(), def))
+            .collect::<std::collections::HashMap<_, _>>();
+        let managed_specials = self
+            .managed
+            .special_configs
+            .iter()
+            .cloned()
+            .map(|special| (special.name.clone(), special))
+            .collect::<std::collections::HashMap<_, _>>();
+        let effective_specials = self
+            .effective
+            .special_configs
+            .iter()
+            .cloned()
+            .map(|special| (special.name.clone(), special))
+            .collect::<std::collections::HashMap<_, _>>();
+        let (resolved_defs, _) = self.resolved_workspace_defs_and_specials();
+
+        let mut rows = resolved_defs
+            .into_iter()
+            .map(|definition| {
+                let source = workspace_row_source(
+                    &definition.id,
+                    &definition,
+                    &managed_defs,
+                    &effective_defs,
+                    &managed_specials,
+                    &effective_specials,
+                );
+                let special = match &definition.id {
+                    WorkspaceId::Special(name) => managed_specials
+                        .get(name)
+                        .cloned()
+                        .or_else(|| effective_specials.get(name).cloned())
+                        .or_else(|| Some(SpecialWorkspaceConfig::default_for(name))),
+                    _ => None,
+                };
+
+                WorkspaceRow {
+                    id: definition.id.to_string(),
+                    kind: definition.kind,
+                    source,
+                    editable: source == ConfigSource::Managed,
+                    definition,
+                    special,
+                }
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| workspace_id_sort_key(&row.definition.id));
+        rows
+    }
 }
 
 fn build_rule_rows(rules: &[WindowRule], source: ConfigSource) -> Vec<RuleRow> {
@@ -311,6 +542,51 @@ fn resolve_keybind_rows(
     }
 
     resolved
+}
+
+fn workspace_row_source(
+    id: &WorkspaceId,
+    resolved: &WorkspaceDefinition,
+    managed_defs: &std::collections::HashMap<WorkspaceId, WorkspaceDefinition>,
+    effective_defs: &std::collections::HashMap<WorkspaceId, WorkspaceDefinition>,
+    managed_specials: &std::collections::HashMap<String, SpecialWorkspaceConfig>,
+    effective_specials: &std::collections::HashMap<String, SpecialWorkspaceConfig>,
+) -> ConfigSource {
+    if managed_defs.contains_key(id)
+        || matches!(id, WorkspaceId::Special(name) if managed_specials.contains_key(name))
+    {
+        return ConfigSource::Managed;
+    }
+
+    match id {
+        WorkspaceId::Numbered(1..=10) => {
+            let default = WorkspaceDefinition::new(id.clone());
+            if effective_defs.get(id).is_some_and(|def| def != &default) {
+                ConfigSource::Lua
+            } else {
+                ConfigSource::Default
+            }
+        }
+        WorkspaceId::Numbered(_) => ConfigSource::Lua,
+        WorkspaceId::Special(name) => {
+            if effective_defs.contains_key(id) || effective_specials.contains_key(name) {
+                ConfigSource::Lua
+            } else if resolved == &WorkspaceDefinition::new(id.clone()) {
+                ConfigSource::Default
+            } else {
+                ConfigSource::Lua
+            }
+        }
+        WorkspaceId::Lettered(_) => ConfigSource::Lua,
+    }
+}
+
+fn workspace_id_sort_key(id: &WorkspaceId) -> (u8, String) {
+    match id {
+        WorkspaceId::Numbered(num) => (0, format!("{num:02}")),
+        WorkspaceId::Lettered(ch) => (1, ch.to_string()),
+        WorkspaceId::Special(name) => (2, name.clone()),
+    }
 }
 
 fn split_managed_block(content: &str) -> (String, Option<String>, String) {
@@ -422,15 +698,6 @@ fn write_workspace_defs(out: &mut String, defs: &[WorkspaceDefinition]) {
 
     let mut wrote_any = false;
     for def in defs {
-        let is_default_numbered = matches!(def.id, WorkspaceId::Numbered(1..=10))
-            && def.kind == WorkspaceKind::Numbered
-            && def.prefs.monitor.is_none()
-            && def.prefs.gap_inner.is_none()
-            && def.prefs.gap_outer.is_none();
-        if is_default_numbered {
-            continue;
-        }
-
         if !wrote_any {
             out.push_str("-- Workspaces\n");
             wrote_any = true;
@@ -579,7 +846,7 @@ mod tests {
     use super::*;
     use crate::config::lua::{RuleMatchMode, RulePattern};
     use crate::core::input::{Action, Key, Modifiers};
-    use crate::core::workspace::WorkspaceTarget;
+    use crate::core::workspace::{WorkspaceLayout, WorkspaceTarget};
 
     #[test]
     fn splits_and_rewrites_managed_block() {
@@ -768,5 +1035,158 @@ mod tests {
         let serialized = serialize_rules(&rules);
         let parsed = load_config_from_source(&serialized, "rules-roundtrip").rules;
         assert_eq!(parsed, rules);
+    }
+
+    #[test]
+    fn workspace_rows_prefer_managed_numbered_override() {
+        let managed_def = WorkspaceDefinition {
+            id: WorkspaceId::Numbered(3),
+            kind: WorkspaceKind::Numbered,
+            prefs: crate::core::workspace::WorkspacePrefs {
+                monitor: None,
+                default_layout: WorkspaceLayout::Bsp,
+                gap_inner: Some(20.0),
+                gap_outer: None,
+            },
+        };
+        let lua_def = WorkspaceDefinition {
+            id: WorkspaceId::Numbered(3),
+            kind: WorkspaceKind::Numbered,
+            prefs: crate::core::workspace::WorkspacePrefs {
+                monitor: None,
+                default_layout: WorkspaceLayout::Bsp,
+                gap_inner: Some(8.0),
+                gap_outer: None,
+            },
+        };
+        let doc = ManagedConfigDocument {
+            path: PathBuf::new(),
+            prefix: String::new(),
+            suffix: String::new(),
+            managed: ManagedConfig {
+                settings: Settings::default(),
+                keybinds: Vec::new(),
+                rules: Vec::new(),
+                special_configs: Vec::new(),
+                workspace_defs: vec![managed_def.clone()],
+            },
+            effective: LuaConfig {
+                settings: Settings::default(),
+                keybinds: Vec::new(),
+                rules: Vec::new(),
+                special_configs: Vec::new(),
+                workspace_defs: {
+                    let mut defs = super::super::lua::default_workspace_definitions();
+                    defs.retain(|def| def.id != WorkspaceId::Numbered(3));
+                    defs.push(lua_def);
+                    defs
+                },
+                lua: None,
+                callbacks: Vec::new(),
+            },
+        };
+
+        let rows = doc.workspace_rows();
+        let row = rows
+            .iter()
+            .find(|row| row.id == "3")
+            .expect("workspace 3 row missing");
+        assert_eq!(row.source, ConfigSource::Managed);
+        assert_eq!(row.definition, managed_def);
+        assert_eq!(rows.iter().filter(|row| row.id == "3").count(), 1);
+    }
+
+    #[test]
+    fn workspace_rows_merge_special_workspace_prefs_and_overlay() {
+        let special_def = WorkspaceDefinition {
+            id: WorkspaceId::Special("term".to_string()),
+            kind: WorkspaceKind::Special,
+            prefs: crate::core::workspace::WorkspacePrefs {
+                monitor: Some(crate::core::workspace::MonitorAssignment { display_id: 42 }),
+                default_layout: WorkspaceLayout::Bsp,
+                gap_inner: Some(12.0),
+                gap_outer: Some(18.0),
+            },
+        };
+        let special_overlay = SpecialWorkspaceConfig {
+            name: "term".to_string(),
+            position: "top".to_string(),
+            width: 0.8,
+            height: 0.5,
+        };
+        let doc = ManagedConfigDocument {
+            path: PathBuf::new(),
+            prefix: String::new(),
+            suffix: String::new(),
+            managed: ManagedConfig {
+                settings: Settings::default(),
+                keybinds: Vec::new(),
+                rules: Vec::new(),
+                special_configs: vec![special_overlay.clone()],
+                workspace_defs: vec![special_def.clone()],
+            },
+            effective: LuaConfig {
+                settings: Settings::default(),
+                keybinds: Vec::new(),
+                rules: Vec::new(),
+                special_configs: vec![special_overlay.clone()],
+                workspace_defs: {
+                    let mut defs = super::super::lua::default_workspace_definitions();
+                    defs.push(special_def.clone());
+                    defs
+                },
+                lua: None,
+                callbacks: Vec::new(),
+            },
+        };
+
+        let rows = doc.workspace_rows();
+        let row = rows
+            .iter()
+            .find(|row| row.id == "special:term")
+            .expect("special workspace row missing");
+        assert_eq!(row.source, ConfigSource::Managed);
+        assert_eq!(row.definition, special_def);
+        assert_eq!(row.special.as_ref(), Some(&special_overlay));
+    }
+
+    #[test]
+    fn resolved_workspace_defs_and_specials_prefer_managed_special_overrides() {
+        let managed_special = SpecialWorkspaceConfig {
+            name: "web".to_string(),
+            position: "bottom".to_string(),
+            width: 0.9,
+            height: 0.4,
+        };
+        let lua_special = SpecialWorkspaceConfig {
+            name: "web".to_string(),
+            position: "center".to_string(),
+            width: 0.7,
+            height: 0.7,
+        };
+        let doc = ManagedConfigDocument {
+            path: PathBuf::new(),
+            prefix: String::new(),
+            suffix: String::new(),
+            managed: ManagedConfig {
+                settings: Settings::default(),
+                keybinds: Vec::new(),
+                rules: Vec::new(),
+                special_configs: vec![managed_special.clone()],
+                workspace_defs: Vec::new(),
+            },
+            effective: LuaConfig {
+                settings: Settings::default(),
+                keybinds: Vec::new(),
+                rules: Vec::new(),
+                special_configs: vec![lua_special],
+                workspace_defs: super::super::lua::default_workspace_definitions(),
+                lua: None,
+                callbacks: Vec::new(),
+            },
+        };
+
+        let (_, specials) = doc.resolved_workspace_defs_and_specials();
+        assert_eq!(specials, vec![managed_special]);
     }
 }
