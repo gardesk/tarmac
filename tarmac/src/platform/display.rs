@@ -1,4 +1,5 @@
 use crate::core::tree::Rect;
+use objc2::msg_send;
 
 /// Get the usable frame of the main display (minus dock and menu bar).
 /// Coordinates are in screen space with origin at top-left.
@@ -195,7 +196,10 @@ fn find_nsscreen_for_display(
         let screen = screens.objectAtIndex(i);
         let frame = screen.frame();
         let visible = screen.visibleFrame();
-        let screen_display_id = screen.CGDirectDisplayID();
+        let screen_display_id = match nsscreen_display_id(&screen) {
+            Some(id) => id,
+            None => continue,
+        };
 
         tracing::debug!(
             ns_idx = i,
@@ -239,6 +243,13 @@ fn find_nsscreen_for_display(
         "no NSScreen match found — falling back to CG bounds"
     );
     None
+}
+
+fn nsscreen_display_id(screen: &objc2_app_kit::NSScreen) -> Option<u32> {
+    let description = screen.deviceDescription();
+    let value = description.objectForKey(objc2_foundation::ns_string!("NSScreenNumber"))?;
+    let display_id: u32 = unsafe { msg_send![&*value, unsignedIntValue] };
+    Some(display_id)
 }
 
 /// Register a callback for display configuration changes (hotplug).
