@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::lua::{
@@ -5,7 +6,7 @@ use super::lua::{
     load_config, load_config_from_source, lua_number, lua_string,
 };
 use super::settings::Settings;
-use crate::core::input::Modifiers;
+use crate::core::input::{Key, Modifiers};
 use crate::core::workspace::{WorkspaceDefinition, WorkspaceId, WorkspaceKind};
 
 pub const MANAGED_BEGIN: &str = "-- BEGIN TARMAC SETTINGS";
@@ -197,6 +198,20 @@ impl ManagedConfigDocument {
         rows
     }
 
+    pub fn resolved_keybind_rows(&self, mod_key: Modifiers) -> Vec<KeybindRow> {
+        resolve_keybind_rows(
+            self.managed_keybind_rows(mod_key),
+            self.external_keybind_rows(mod_key),
+        )
+    }
+
+    pub fn resolved_keybinds(&self, mod_key: Modifiers) -> Vec<LuaKeybind> {
+        self.resolved_keybind_rows(mod_key)
+            .into_iter()
+            .map(|row| row.keybind)
+            .collect()
+    }
+
     pub fn external_rule_rows(&self) -> Vec<RuleRow> {
         let rules = self
             .effective
@@ -247,6 +262,55 @@ fn build_keybind_rows(
             keybind: keybind.clone(),
         })
         .collect()
+}
+
+fn keybind_signature(keybind: &LuaKeybind) -> (Modifiers, Key) {
+    (keybind.modifiers, keybind.key)
+}
+
+fn dedupe_keybind_rows_keep_last(rows: Vec<KeybindRow>) -> Vec<KeybindRow> {
+    let mut seen = HashSet::new();
+    let mut deduped = Vec::new();
+
+    for row in rows.into_iter().rev() {
+        if seen.insert(keybind_signature(&row.keybind)) {
+            deduped.push(row);
+        }
+    }
+
+    deduped.reverse();
+    deduped
+}
+
+fn resolve_keybind_rows(
+    managed_rows: Vec<KeybindRow>,
+    external_rows: Vec<KeybindRow>,
+) -> Vec<KeybindRow> {
+    let managed_rows = dedupe_keybind_rows_keep_last(managed_rows);
+    let mut lua_rows = Vec::new();
+    let mut default_rows = Vec::new();
+
+    for row in external_rows {
+        match row.source {
+            ConfigSource::Lua => lua_rows.push(row),
+            ConfigSource::Default => default_rows.push(row),
+            ConfigSource::Managed => {}
+        }
+    }
+
+    let lua_rows = dedupe_keybind_rows_keep_last(lua_rows);
+    let default_rows = dedupe_keybind_rows_keep_last(default_rows);
+
+    let mut seen = HashSet::new();
+    let mut resolved = Vec::new();
+
+    for row in managed_rows.into_iter().chain(lua_rows).chain(default_rows) {
+        if seen.insert(keybind_signature(&row.keybind)) {
+            resolved.push(row);
+        }
+    }
+
+    resolved
 }
 
 fn split_managed_block(content: &str) -> (String, Option<String>, String) {
@@ -624,6 +688,67 @@ mod tests {
         assert_eq!(rows[1].source, ConfigSource::Default);
         assert_eq!(rows[2].source, ConfigSource::Lua);
         assert!(!rows[2].editable);
+    }
+
+    #[test]
+    fn resolved_keybind_rows_prefer_managed_then_lua_then_default() {
+        let settings = Settings::default();
+        let duplicate = LuaKeybind {
+            modifiers: Modifiers::COMMAND,
+            key: Key::Return,
+            action: Action::SpawnTerminal,
+        };
+        let managed_override = LuaKeybind {
+            modifiers: Modifiers::COMMAND,
+            key: Key::Return,
+            action: Action::Reload,
+        };
+        let default_only = super::super::lua::default_keybinds(&settings)[1].clone();
+        let lua_only = LuaKeybind {
+            modifiers: Modifiers::OPTION,
+            key: Key::W,
+            action: Action::Exit,
+        };
+
+        let doc = ManagedConfigDocument {
+            path: PathBuf::new(),
+            prefix: String::new(),
+            suffix: String::new(),
+            managed: ManagedConfig {
+                settings: settings.clone(),
+                keybinds: vec![managed_override.clone()],
+                rules: Vec::new(),
+                special_configs: Vec::new(),
+                workspace_defs: Vec::new(),
+            },
+            effective: LuaConfig {
+                settings,
+                keybinds: vec![
+                    managed_override,
+                    duplicate,
+                    default_only.clone(),
+                    lua_only.clone(),
+                ],
+                rules: Vec::new(),
+                special_configs: Vec::new(),
+                workspace_defs: Vec::new(),
+                lua: None,
+                callbacks: Vec::new(),
+            },
+        };
+
+        let rows = doc.resolved_keybind_rows(Modifiers::COMMAND);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0].source, ConfigSource::Managed);
+        assert_eq!(rows[0].action, "reload");
+        assert!(rows.iter().any(|row| row.keybind == default_only));
+        assert!(rows.iter().any(|row| row.keybind == lua_only));
+        assert!(!rows.iter().any(|row| {
+            row.source != ConfigSource::Managed
+                && row.keybind.modifiers == Modifiers::COMMAND
+                && row.keybind.key == Key::Return
+        }));
     }
 
     #[test]
