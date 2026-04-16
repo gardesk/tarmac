@@ -871,6 +871,25 @@ impl WmState {
         }
     }
 
+    fn sync_mouse_after_focus(&mut self, ws_idx: usize, id: WindowId) {
+        self.ffm_last_window = Some(id);
+        if !self.mouse_follows_focus {
+            return;
+        }
+
+        let rect = self
+            .monitor_showing_workspace(ws_idx)
+            .map_or_else(|| self.focused_rect(), |mi| self.monitor_rect(mi));
+        let geoms = self.workspace_focus_geometries(ws_idx, rect);
+        if let Some((_, target_rect)) = geoms.iter().find(|(wid, _)| *wid == id) {
+            warp_mouse_to_center(target_rect);
+        } else {
+            warp_mouse_to_center(&rect);
+        }
+        self.ffm_cooldown_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+    }
+
     fn is_external_focus_candidate(&self, id: WindowId) -> bool {
         self.registry
             .get(id)
@@ -930,7 +949,7 @@ impl WmState {
                 self.dismiss_special_on_monitor(mi);
             }
             self.focused_monitor = mi;
-            self.ffm_last_window = None;
+            self.sync_mouse_after_focus(ws_idx, id);
             return;
         }
 
@@ -956,6 +975,7 @@ impl WmState {
                         self.dismiss_special_on_monitor(self.focused_monitor);
                     }
                     self.switch_workspace(&target);
+                    self.sync_mouse_after_focus(ws_idx, id);
                 }
             }
         }
@@ -3430,6 +3450,45 @@ mod tests {
         assert_eq!(
             state.active_workspace().tree.stack_info(31),
             Some((vec![30, 31], 1))
+        );
+    }
+
+    #[test]
+    fn external_focus_arms_mouse_follow_for_promoted_stack_window() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(50, 11, "Firefox"));
+        state.registry.add(tracked_window(51, 11, "Messages"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+
+        {
+            let ws = state.workspaces.get_mut(1);
+            ws.tree.insert_with_rect(50, None, screen);
+            ws.tree.insert_with_rect(51, Some(50), screen);
+            assert!(ws.tree.make_stack_for_window(51));
+            ws.tree.set_stack_active(50);
+            ws.record_focus(50);
+        }
+
+        state.adopt_external_app_focus(11, Some(51));
+
+        assert_eq!(state.active_workspace().focused, Some(51));
+        assert_eq!(state.ffm_last_window, Some(51));
+        assert!(state.ffm_cooldown_until.is_some());
+        assert_eq!(
+            state.active_workspace().tree.stack_info(51),
+            Some((vec![50, 51], 1))
         );
     }
 
