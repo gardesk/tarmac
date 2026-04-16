@@ -61,8 +61,8 @@ impl Rect {
     }
 }
 
-const STACK_REVEAL_OFFSET_X: f64 = 12.0;
-const STACK_REVEAL_OFFSET_Y: f64 = 12.0;
+const STACK_REVEAL_OFFSET_X: f64 = 4.0;
+const STACK_REVEAL_OFFSET_Y: f64 = 4.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
