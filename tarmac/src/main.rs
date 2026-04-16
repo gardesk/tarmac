@@ -150,6 +150,13 @@ fn main() {
                 }
             });
         }),
+        Box::new(move |pid| {
+            WM_STATE.with(|s| {
+                if let Some(state) = s.borrow_mut().as_mut() {
+                    state.adopt_external_app_focus(pid, None);
+                }
+            });
+        }),
         Box::new(move |wid| {
             WM_STATE.with(|s| {
                 s.borrow()

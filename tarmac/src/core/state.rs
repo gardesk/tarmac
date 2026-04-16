@@ -871,6 +871,53 @@ impl WmState {
         }
     }
 
+    fn is_external_focus_candidate(&self, id: WindowId) -> bool {
+        self.registry
+            .get(id)
+            .is_some_and(|window| !window.minimized && self.workspaces.find_window(id).is_some())
+    }
+
+    fn resolve_external_focus_target(
+        &self,
+        pid: i32,
+        requested: Option<WindowId>,
+    ) -> Option<WindowId> {
+        if let Some(id) = requested.filter(|id| self.is_external_focus_candidate(*id)) {
+            return Some(id);
+        }
+
+        for ws in self.workspaces.iter() {
+            for &wid in ws.focus_history.iter().rev() {
+                if self
+                    .registry
+                    .get(wid)
+                    .is_some_and(|window| window.app_pid == pid)
+                    && self.is_external_focus_candidate(wid)
+                {
+                    return Some(wid);
+                }
+            }
+        }
+
+        for ws in self.workspaces.iter() {
+            if let Some(wid) = ws.focused
+                && self
+                    .registry
+                    .get(wid)
+                    .is_some_and(|window| window.app_pid == pid)
+                && self.is_external_focus_candidate(wid)
+            {
+                return Some(wid);
+            }
+        }
+
+        self.registry
+            .all()
+            .filter(|window| window.app_pid == pid)
+            .map(|window| window.id)
+            .find(|id| self.is_external_focus_candidate(*id))
+    }
+
     fn adopt_external_focus(&mut self, id: WindowId) {
         let Some(ws_idx) = self.workspaces.find_window(id) else {
             return;
@@ -903,10 +950,22 @@ impl WmState {
             }
             _ => {
                 if let Some(target) = ws_id.as_regular_target() {
+                    if self.focused_monitor < self.active_specials.len()
+                        && self.active_specials[self.focused_monitor].is_some()
+                    {
+                        self.dismiss_special_on_monitor(self.focused_monitor);
+                    }
                     self.switch_workspace(&target);
                 }
             }
         }
+    }
+
+    pub fn adopt_external_app_focus(&mut self, pid: i32, requested: Option<WindowId>) {
+        let Some(target) = self.resolve_external_focus_target(pid, requested) else {
+            return;
+        };
+        self.adopt_external_focus(target);
     }
 
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
@@ -2788,7 +2847,12 @@ impl WmState {
                 if let Ok(id) = ax_get_window_id(element)
                     && self.registry.contains(id)
                 {
-                    self.adopt_external_focus(id);
+                    let pid = self
+                        .registry
+                        .get(id)
+                        .map(|window| window.app_pid)
+                        .unwrap_or(0);
+                    self.adopt_external_app_focus(pid, Some(id));
                 }
             }
             WindowEvent::Moved { element, .. } => {
@@ -2975,6 +3039,25 @@ mod tests {
     use super::*;
     use crate::core::monitor::Monitor;
     use crate::core::tree::Direction;
+    use crate::core::window::WindowState;
+
+    fn tracked_window(id: u32, pid: i32, name: &str) -> WindowState {
+        WindowState {
+            id,
+            app_pid: pid,
+            app_name: name.to_string(),
+            app_bundle_id: format!("com.test.{name}"),
+            title: format!("{name} {id}"),
+            role: "AXWindow".to_string(),
+            subrole: "AXStandardWindow".to_string(),
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+            floating: false,
+            minimized: false,
+        }
+    }
 
     #[test]
     fn hide_anchor_frame_defaults_without_monitors() {
@@ -3309,6 +3392,79 @@ mod tests {
             state.workspaces.get(1).tree.stack_info(22),
             Some((vec![21, 22], 1))
         );
+    }
+
+    #[test]
+    fn external_app_focus_falls_back_to_last_focused_window() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(30, 7, "Messages"));
+        state.registry.add(tracked_window(31, 7, "Messages"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+
+        {
+            let ws = state.workspaces.get_mut(1);
+            ws.tree.insert_with_rect(30, None, screen);
+            ws.tree.insert_with_rect(31, Some(30), screen);
+            assert!(ws.tree.make_stack_for_window(31));
+            ws.tree.set_stack_active(30);
+            ws.record_focus(30);
+            ws.record_focus(31);
+        }
+
+        state.adopt_external_app_focus(7, None);
+
+        assert_eq!(state.monitors[0].active_workspace, 1);
+        assert_eq!(state.active_workspace().focused, Some(31));
+        assert_eq!(
+            state.active_workspace().tree.stack_info(31),
+            Some((vec![30, 31], 1))
+        );
+    }
+
+    #[test]
+    fn external_app_focus_dismisses_overlay_before_switching() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        let special_idx = state.workspaces.special_index("messages");
+        state.active_specials = vec![Some(special_idx)];
+        state.sync_workspace_visibility();
+
+        state.registry.add(tracked_window(40, 9, "Messages"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+        {
+            let ws = state.workspaces.get_mut(1);
+            ws.tree.insert_with_rect(40, None, screen);
+            ws.record_focus(40);
+        }
+
+        state.adopt_external_app_focus(9, None);
+
+        assert_eq!(state.active_specials, vec![None]);
+        assert_eq!(state.monitors[0].active_workspace, 1);
+        assert_eq!(state.active_workspace().focused, Some(40));
     }
 
     #[test]
