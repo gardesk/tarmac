@@ -61,8 +61,8 @@ impl Rect {
     }
 }
 
-const STACK_REVEAL_OFFSET_X: f64 = 24.0;
-const STACK_REVEAL_OFFSET_Y: f64 = 24.0;
+const STACK_REVEAL_OFFSET_X: f64 = 12.0;
+const STACK_REVEAL_OFFSET_Y: f64 = 12.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -715,14 +715,18 @@ impl Node {
                 if windows.is_empty() {
                     return None;
                 }
-                let len = windows.len();
-                *active = if forward {
-                    (*active + 1) % len
-                } else if *active == 0 {
-                    len - 1
+                let next = if forward {
+                    if *active + 1 < windows.len() {
+                        Some(*active + 1)
+                    } else {
+                        None
+                    }
+                } else if *active > 0 {
+                    Some(*active - 1)
                 } else {
-                    *active - 1
-                };
+                    None
+                }?;
+                *active = next;
                 windows.get(*active).copied()
             }
             Node::Internal { left, right, .. } => left
@@ -742,15 +746,15 @@ impl Node {
                 let idx = windows.iter().position(|wid| *wid == window)?;
                 let swap_idx = if forward {
                     if idx + 1 < windows.len() {
-                        idx + 1
+                        Some(idx + 1)
                     } else {
-                        0
+                        None
                     }
-                } else if idx == 0 {
-                    windows.len() - 1
+                } else if idx > 0 {
+                    Some(idx - 1)
                 } else {
-                    idx - 1
-                };
+                    None
+                }?;
                 windows.swap(idx, swap_idx);
                 *active = swap_idx;
                 previous.swap(window, windows[idx]);
@@ -1425,6 +1429,20 @@ mod tests {
         assert!(g2.y > g3.y);
         assert_eq!(g2.width, g3.width);
         assert_eq!(g2.height, g3.height);
+    }
+
+    #[test]
+    fn cycle_stack_stops_at_directional_boundary() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        assert!(tree.make_stack_for_window(3));
+
+        assert_eq!(tree.cycle_stack(3, false), Some(2));
+        assert_eq!(tree.cycle_stack(2, false), None);
+        assert_eq!(tree.cycle_stack(2, true), Some(3));
+        assert_eq!(tree.cycle_stack(3, true), None);
     }
 
     #[test]

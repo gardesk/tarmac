@@ -3156,6 +3156,12 @@ mod tests {
         state.focus_direction(Direction::Left);
         assert_eq!(state.active_workspace().focused, Some(2));
 
+        state.focus_direction(Direction::Left);
+        assert_eq!(state.active_workspace().focused, Some(1));
+
+        state.focus_direction(Direction::Right);
+        assert_eq!(state.active_workspace().focused, Some(2));
+
         state.focus_direction(Direction::Right);
         assert_eq!(state.active_workspace().focused, Some(3));
     }
