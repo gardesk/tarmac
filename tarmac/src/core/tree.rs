@@ -61,7 +61,8 @@ impl Rect {
     }
 }
 
-const STACK_REVEAL_OFFSET: f64 = 24.0;
+const STACK_REVEAL_OFFSET_X: f64 = 24.0;
+const STACK_REVEAL_OFFSET_Y: f64 = 24.0;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
@@ -321,8 +322,8 @@ impl Node {
                     geoms.push((
                         *wid,
                         Rect::new(
-                            padded.x + STACK_REVEAL_OFFSET * depth as f64,
-                            padded.y,
+                            padded.x + STACK_REVEAL_OFFSET_X * depth as f64,
+                            padded.y + STACK_REVEAL_OFFSET_Y * depth as f64,
                             padded.width,
                             padded.height,
                         ),
@@ -1421,6 +1422,7 @@ mod tests {
         let g3 = geoms.iter().find(|(wid, _)| *wid == 3).unwrap().1;
 
         assert!(g2.x > g3.x);
+        assert!(g2.y > g3.y);
         assert_eq!(g2.width, g3.width);
         assert_eq!(g2.height, g3.height);
     }
