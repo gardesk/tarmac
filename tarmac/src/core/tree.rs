@@ -148,7 +148,10 @@ impl Node {
             Node::Leaf { window } => *window,
             Node::Stack {
                 windows, active, ..
-            } => windows.get(*active).copied().or_else(|| windows.first().copied()),
+            } => windows
+                .get(*active)
+                .copied()
+                .or_else(|| windows.first().copied()),
             Node::Internal { left, right, .. } => {
                 left.first_window().or_else(|| right.first_window())
             }
@@ -431,12 +434,13 @@ impl Node {
                     }
                 }
 
-                let mut geoms = left.calculate_focus_geometries_with_gaps(
-                    left_rect, gap_inner, gap_outer, false,
+                let mut geoms = left
+                    .calculate_focus_geometries_with_gaps(left_rect, gap_inner, gap_outer, false);
+                geoms.extend(
+                    right.calculate_focus_geometries_with_gaps(
+                        right_rect, gap_inner, gap_outer, false,
+                    ),
                 );
-                geoms.extend(right.calculate_focus_geometries_with_gaps(
-                    right_rect, gap_inner, gap_outer, false,
-                ));
                 geoms
             }
         }
@@ -707,9 +711,9 @@ impl Node {
             Node::Stack {
                 windows, active, ..
             } if windows.contains(&window) => Some((windows.clone(), *active)),
-            Node::Internal { left, right, .. } => left
-                .stack_info(window)
-                .or_else(|| right.stack_info(window)),
+            Node::Internal { left, right, .. } => {
+                left.stack_info(window).or_else(|| right.stack_info(window))
+            }
             _ => None,
         }
     }

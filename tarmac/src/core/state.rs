@@ -612,7 +612,12 @@ impl WmState {
                     None => break,
                 };
 
-                if self.workspaces.get_mut(ws_idx).tree.make_stack_for_window(oversized_wid) {
+                if self
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .tree
+                    .make_stack_for_window(oversized_wid)
+                {
                     tracing::info!(
                         id = oversized_wid,
                         min_w,
@@ -620,7 +625,10 @@ impl WmState {
                         ws = ws_idx + 1,
                         "stacking oversized subtree locally"
                     );
-                    self.workspaces.get_mut(ws_idx).tree.set_stack_active(oversized_wid);
+                    self.workspaces
+                        .get_mut(ws_idx)
+                        .tree
+                        .set_stack_active(oversized_wid);
                     self.apply_layout();
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 } else {
@@ -882,19 +890,20 @@ impl WmState {
         // Record focus on the workspace that CONTAINS this window,
         // not the active workspace — during cross-monitor FFM the active
         // workspace might be different from the window's workspace.
-        let (old_focused, stack_focus_changed) = if let Some(ws_idx) = self.workspaces.find_window(id) {
-            let old = self.workspaces.get(ws_idx).focused;
-            self.workspaces.get_mut(ws_idx).raise_floating(id);
-            let stack_changed = self.workspaces.get_mut(ws_idx).tree.set_stack_active(id);
-            self.workspaces.get_mut(ws_idx).record_focus(id);
-            (old, stack_changed)
-        } else {
-            let old = self.active_workspace().focused;
-            self.active_workspace_mut().raise_floating(id);
-            let stack_changed = self.active_workspace_mut().tree.set_stack_active(id);
-            self.active_workspace_mut().record_focus(id);
-            (old, stack_changed)
-        };
+        let (old_focused, stack_focus_changed) =
+            if let Some(ws_idx) = self.workspaces.find_window(id) {
+                let old = self.workspaces.get(ws_idx).focused;
+                self.workspaces.get_mut(ws_idx).raise_floating(id);
+                let stack_changed = self.workspaces.get_mut(ws_idx).tree.set_stack_active(id);
+                self.workspaces.get_mut(ws_idx).record_focus(id);
+                (old, stack_changed)
+            } else {
+                let old = self.active_workspace().focused;
+                self.active_workspace_mut().raise_floating(id);
+                let stack_changed = self.active_workspace_mut().tree.set_stack_active(id);
+                self.active_workspace_mut().record_focus(id);
+                (old, stack_changed)
+            };
         if stack_focus_changed {
             self.apply_layout();
         }
@@ -1182,9 +1191,12 @@ impl WmState {
                 floating_hit
             } else {
                 // Check tiled windows within the overlay rect
-                let geoms = ws
-                    .tree
-                    .calculate_geometries_with_gaps(overlay_rect, gap_inner, gap_outer, true);
+                let geoms = ws.tree.calculate_geometries_with_gaps(
+                    overlay_rect,
+                    gap_inner,
+                    gap_outer,
+                    true,
+                );
                 geoms
                     .iter()
                     .rev()
@@ -2324,7 +2336,12 @@ impl WmState {
                 self.apply_layout();
                 settled.push(ow);
             } else {
-                if self.workspaces.get_mut(ws_idx).tree.make_stack_for_window(ow) {
+                if self
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .tree
+                    .make_stack_for_window(ow)
+                {
                     tracing::info!(
                         id = ow,
                         min_w = ow_min_w,

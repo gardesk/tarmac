@@ -576,17 +576,15 @@ fn process_ipc_command(
                         .map(|w| w.app_name.clone())
                         .unwrap_or_default();
                     let floating = state.active_workspace().is_floating(focused_id);
-                    let stack = state
-                        .active_workspace()
-                        .tree
-                        .stack_info(focused_id)
-                        .map(|(members, active)| {
+                    let stack = state.active_workspace().tree.stack_info(focused_id).map(
+                        |(members, active)| {
                             serde_json::json!({
                                 "members": members,
                                 "active_index": active,
                                 "active": members.get(active),
                             })
-                        });
+                        },
+                    );
 
                     // Query live AX data for current title and geometry
                     let (title, x, y, width, height) =
