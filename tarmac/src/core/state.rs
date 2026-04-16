@@ -856,6 +856,59 @@ impl WmState {
         self.focus_window_impl(id, true);
     }
 
+    fn dismiss_special_on_monitor(&mut self, monitor_idx: usize) {
+        if monitor_idx >= self.active_specials.len() {
+            return;
+        }
+        let Some(special_idx) = self.active_specials[monitor_idx] else {
+            return;
+        };
+        let wids = self.workspaces.get(special_idx).all_window_ids();
+        self.active_specials[monitor_idx] = None;
+        self.sync_workspace_visibility();
+        for wid in wids {
+            self.hide_window(wid);
+        }
+    }
+
+    fn adopt_external_focus(&mut self, id: WindowId) {
+        let Some(ws_idx) = self.workspaces.find_window(id) else {
+            return;
+        };
+
+        self.focus_window_impl(id, false);
+
+        if let Some(mi) = self.monitor_showing_workspace(ws_idx) {
+            if mi < self.active_specials.len() && self.active_specials[mi] != Some(ws_idx) {
+                self.dismiss_special_on_monitor(mi);
+            }
+            self.focused_monitor = mi;
+            self.ffm_last_window = None;
+            return;
+        }
+
+        let ws_id = self.workspaces.get(ws_idx).id.clone();
+        match ws_id {
+            super::workspace::WorkspaceId::Special(name) => {
+                let current_overlay = self
+                    .active_specials
+                    .iter()
+                    .position(|special| *special == Some(ws_idx));
+                if let Some(mi) = current_overlay {
+                    self.focused_monitor = mi;
+                } else {
+                    self.toggle_special(&name);
+                }
+                self.focus_window_impl(id, false);
+            }
+            _ => {
+                if let Some(target) = ws_id.as_regular_target() {
+                    self.switch_workspace(&target);
+                }
+            }
+        }
+    }
+
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
@@ -2735,15 +2788,7 @@ impl WmState {
                 if let Ok(id) = ax_get_window_id(element)
                     && self.registry.contains(id)
                 {
-                    if self.is_window_hidden(id) {
-                        return;
-                    }
-                    // Record on the workspace that contains this window,
-                    // not the active workspace (same fix as focus_window_impl)
-                    if let Some(ws_idx) = self.workspaces.find_window(id) {
-                        self.workspaces.get_mut(ws_idx).tree.set_stack_active(id);
-                        self.workspaces.get_mut(ws_idx).record_focus(id);
-                    }
+                    self.adopt_external_focus(id);
                 }
             }
             WindowEvent::Moved { element, .. } => {
@@ -3181,6 +3226,89 @@ mod tests {
 
         state.focus_direction(Direction::Right);
         assert_eq!(state.active_workspace().focused, Some(3));
+    }
+
+    #[test]
+    fn external_focus_reveals_hidden_workspace_and_tracks_target_window() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+
+        {
+            let ws = state.workspaces.get_mut(1);
+            ws.tree.insert_with_rect(10, None, screen);
+            ws.tree.insert_with_rect(11, Some(10), screen);
+            assert!(ws.tree.make_stack_for_window(11));
+            ws.tree.set_stack_active(10);
+            ws.record_focus(10);
+        }
+
+        state.adopt_external_focus(11);
+
+        assert_eq!(state.monitors[0].active_workspace, 1);
+        assert_eq!(state.focused_monitor, 0);
+        assert_eq!(state.active_workspace().focused, Some(11));
+        assert_eq!(
+            state.active_workspace().tree.stack_info(11),
+            Some((vec![10, 11], 1))
+        );
+    }
+
+    #[test]
+    fn external_focus_jumps_to_monitor_showing_window_workspace() {
+        let mut state = WmState::new();
+        state.monitors = vec![
+            Monitor {
+                id: 42,
+                frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+                is_primary: true,
+                active_workspace: 0,
+            },
+            Monitor {
+                id: 43,
+                frame: Rect::new(1920.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(1920.0, 0.0, 1920.0, 1080.0),
+                is_primary: false,
+                active_workspace: 1,
+            },
+        ];
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+        state.sync_workspace_visibility();
+        let screen = state.monitors[1].usable_frame;
+
+        {
+            let ws = state.workspaces.get_mut(1);
+            ws.tree.insert_with_rect(21, None, screen);
+            ws.tree.insert_with_rect(22, Some(21), screen);
+            assert!(ws.tree.make_stack_for_window(22));
+            ws.tree.set_stack_active(21);
+            ws.record_focus(21);
+        }
+
+        state.focused_monitor = 0;
+        state.adopt_external_focus(22);
+
+        assert_eq!(state.focused_monitor, 1);
+        assert_eq!(state.monitors[1].active_workspace, 1);
+        assert_eq!(state.workspaces.get(1).focused, Some(22));
+        assert_eq!(
+            state.workspaces.get(1).tree.stack_info(22),
+            Some((vec![21, 22], 1))
+        );
     }
 
     #[test]
