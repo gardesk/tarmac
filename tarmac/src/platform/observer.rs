@@ -93,6 +93,7 @@ impl AppObserver {
         // Subscribe to all notification types on the app element
         let notifications = [
             AX_WINDOW_CREATED,
+            AX_UI_ELEMENT_DESTROYED,
             AX_FOCUSED_WINDOW_CHANGED,
             AX_WINDOW_MOVED,
             AX_WINDOW_RESIZED,

@@ -237,6 +237,16 @@ impl Workspace {
         self.focused = Some(window_id);
     }
 
+    pub fn raise_floating(&mut self, id: WindowId) -> bool {
+        if let Some(idx) = self.floating.iter().position(|f| f.id == id) {
+            let floating = self.floating.remove(idx);
+            self.floating.push(floating);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Pop the most recent focus and return the new focused window.
     pub fn pop_focus(&mut self) -> Option<WindowId> {
         self.focus_history.pop();
