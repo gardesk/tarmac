@@ -270,10 +270,19 @@ impl ManagedConfigDocument {
     }
 
     pub fn resolved_keybind_rows(&self, mod_key: Modifiers) -> Vec<KeybindRow> {
-        resolve_keybind_rows(
-            self.managed_keybind_rows(mod_key),
-            self.external_keybind_rows(mod_key),
-        )
+        let mut external = self.external_keybind_rows(mod_key);
+        // Always include defaults so they serve as a fallback layer.
+        // When the managed block defines binds, load_config_from_source skips
+        // appending defaults to the effective config, which means external_rows
+        // can be empty. Without this, editing even one keybind via the settings
+        // UI causes all other (default) keybinds to vanish after reload.
+        let defaults = super::lua::default_keybinds(&self.effective.settings);
+        external.extend(build_keybind_rows(
+            &defaults,
+            ConfigSource::Default,
+            mod_key,
+        ));
+        resolve_keybind_rows(self.managed_keybind_rows(mod_key), external)
     }
 
     pub fn resolved_keybinds(&self, mod_key: Modifiers) -> Vec<LuaKeybind> {
@@ -1006,16 +1015,31 @@ mod tests {
 
         let rows = doc.resolved_keybind_rows(Modifiers::COMMAND);
 
-        assert_eq!(rows.len(), 3);
+        // Managed override takes priority
         assert_eq!(rows[0].source, ConfigSource::Managed);
         assert_eq!(rows[0].action, "reload");
-        assert!(rows.iter().any(|row| row.keybind == default_only));
+        // Lua-only bind is preserved
         assert!(rows.iter().any(|row| row.keybind == lua_only));
+        // Default-only bind is preserved
+        assert!(rows.iter().any(|row| row.keybind == default_only));
+        // Managed signature (Cmd+Return) is NOT duplicated by default/lua layer
         assert!(!rows.iter().any(|row| {
             row.source != ConfigSource::Managed
                 && row.keybind.modifiers == Modifiers::COMMAND
                 && row.keybind.key == Key::Return
         }));
+        // All default keybinds are present as fallbacks
+        let all_defaults = super::super::lua::default_keybinds(&doc.effective.settings);
+        for default_kb in &all_defaults {
+            let sig = keybind_signature(default_kb);
+            assert!(
+                rows.iter()
+                    .any(|row| keybind_signature(&row.keybind) == sig),
+                "missing default keybind: {:?}+{:?}",
+                default_kb.modifiers,
+                default_kb.key,
+            );
+        }
     }
 
     #[test]
