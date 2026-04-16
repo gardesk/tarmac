@@ -89,6 +89,12 @@ impl Default for Node {
 }
 
 impl Node {
+    fn stack_reveal_direction(windows_len: usize, active: usize) -> f64 {
+        let left_count = active;
+        let right_count = windows_len.saturating_sub(active + 1);
+        if left_count > right_count { -1.0 } else { 1.0 }
+    }
+
     pub fn empty() -> Self {
         Node::Leaf { window: None }
     }
@@ -312,6 +318,7 @@ impl Node {
                 windows, active, ..
             } => {
                 let active_window = windows.get(*active).copied();
+                let x_direction = Self::stack_reveal_direction(windows.len(), *active);
                 let mut geoms = Vec::with_capacity(windows.len());
                 let mut depth = 0usize;
                 for (idx, wid) in windows.iter().enumerate() {
@@ -322,7 +329,7 @@ impl Node {
                     geoms.push((
                         *wid,
                         Rect::new(
-                            padded.x + STACK_REVEAL_OFFSET_X * depth as f64,
+                            padded.x + x_direction * STACK_REVEAL_OFFSET_X * depth as f64,
                             padded.y + STACK_REVEAL_OFFSET_Y * depth as f64,
                             padded.width,
                             padded.height,
@@ -1414,18 +1421,34 @@ mod tests {
     }
 
     #[test]
-    fn stacked_render_geometries_reveal_background_windows() {
-        let mut tree = Node::empty();
-        tree.insert_with_rect(1, None, SCREEN);
-        tree.insert_with_rect(2, Some(1), SCREEN);
-        tree.insert_with_rect(3, Some(2), SCREEN);
-        assert!(tree.make_stack_for_window(3));
+    fn stacked_render_geometries_reveal_background_windows_to_the_right_when_right_biased() {
+        let tree = Node::Stack {
+            windows: vec![1, 2, 3],
+            active: 0,
+            previous: Box::new(Node::Leaf { window: Some(1) }),
+        };
+        let geoms = tree.calculate_geometries(SCREEN);
+        let g1 = geoms.iter().find(|(wid, _)| *wid == 1).unwrap().1;
+        let g2 = geoms.iter().find(|(wid, _)| *wid == 2).unwrap().1;
 
+        assert!(g2.x > g1.x);
+        assert!(g2.y > g1.y);
+        assert_eq!(g2.width, g1.width);
+        assert_eq!(g2.height, g1.height);
+    }
+
+    #[test]
+    fn stacked_render_geometries_reveal_background_windows_to_the_left_when_left_biased() {
+        let tree = Node::Stack {
+            windows: vec![1, 2, 3],
+            active: 2,
+            previous: Box::new(Node::Leaf { window: Some(3) }),
+        };
         let geoms = tree.calculate_geometries(SCREEN);
         let g2 = geoms.iter().find(|(wid, _)| *wid == 2).unwrap().1;
         let g3 = geoms.iter().find(|(wid, _)| *wid == 3).unwrap().1;
 
-        assert!(g2.x > g3.x);
+        assert!(g2.x < g3.x);
         assert!(g2.y > g3.y);
         assert_eq!(g2.width, g3.width);
         assert_eq!(g2.height, g3.height);
