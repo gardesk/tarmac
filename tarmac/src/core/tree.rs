@@ -61,13 +61,20 @@ impl Rect {
     }
 }
 
-#[derive(Debug, Clone)]
+const STACK_REVEAL_OFFSET: f64 = 24.0;
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     Internal {
         split: SplitDirection,
         ratio: f32,
         left: Box<Node>,
         right: Box<Node>,
+    },
+    Stack {
+        windows: Vec<WindowId>,
+        active: usize,
+        previous: Box<Node>,
     },
     Leaf {
         window: Option<WindowId>,
@@ -89,10 +96,20 @@ impl Node {
         matches!(self, Node::Leaf { window: None })
     }
 
+    pub fn slot_count(&self) -> usize {
+        match self {
+            Node::Leaf { window: Some(_) } => 1,
+            Node::Leaf { window: None } => 0,
+            Node::Stack { windows, .. } => usize::from(!windows.is_empty()),
+            Node::Internal { left, right, .. } => left.slot_count() + right.slot_count(),
+        }
+    }
+
     pub fn window_count(&self) -> usize {
         match self {
             Node::Leaf { window: Some(_) } => 1,
             Node::Leaf { window: None } => 0,
+            Node::Stack { windows, .. } => windows.len(),
             Node::Internal { left, right, .. } => left.window_count() + right.window_count(),
         }
     }
@@ -101,6 +118,7 @@ impl Node {
         match self {
             Node::Leaf { window: Some(w) } => vec![*w],
             Node::Leaf { window: None } => vec![],
+            Node::Stack { windows, .. } => windows.clone(),
             Node::Internal { left, right, .. } => {
                 let mut ws = left.windows();
                 ws.extend(right.windows());
@@ -113,6 +131,7 @@ impl Node {
         match self {
             Node::Leaf { window: Some(w) } => *w == window,
             Node::Leaf { window: None } => false,
+            Node::Stack { windows, .. } => windows.contains(&window),
             Node::Internal { left, right, .. } => left.contains(window) || right.contains(window),
         }
     }
@@ -120,6 +139,9 @@ impl Node {
     pub fn first_window(&self) -> Option<WindowId> {
         match self {
             Node::Leaf { window } => *window,
+            Node::Stack {
+                windows, active, ..
+            } => windows.get(*active).copied().or_else(|| windows.first().copied()),
             Node::Internal { left, right, .. } => {
                 left.first_window().or_else(|| right.first_window())
             }
@@ -185,6 +207,19 @@ impl Node {
                     right.insert_with_rect(new_window, None, right_rect);
                 }
             }
+            Node::Stack {
+                windows,
+                active,
+                previous,
+            } => {
+                let insert_at = target
+                    .and_then(|target_window| windows.iter().position(|wid| *wid == target_window))
+                    .map(|idx| idx + 1)
+                    .unwrap_or_else(|| (*active + 1).min(windows.len()));
+                windows.insert(insert_at, new_window);
+                *active = insert_at;
+                previous.insert_with_rect(new_window, target, rect);
+            }
         }
     }
 
@@ -196,6 +231,30 @@ impl Node {
                 true
             }
             Node::Leaf { .. } => false,
+            Node::Stack {
+                windows,
+                active,
+                previous,
+            } => {
+                let Some(idx) = windows.iter().position(|wid| *wid == window) else {
+                    return false;
+                };
+                windows.remove(idx);
+                previous.remove(window);
+
+                if windows.is_empty() {
+                    *self = Node::empty();
+                } else if windows.len() == 1 {
+                    *self = Node::Leaf {
+                        window: windows.first().copied(),
+                    };
+                } else if *active >= windows.len() {
+                    *active = windows.len() - 1;
+                } else if idx < *active {
+                    *active -= 1;
+                }
+                true
+            }
             Node::Internal { left, right, .. } => {
                 if left.remove(window) {
                     if left.is_empty() {
@@ -217,6 +276,10 @@ impl Node {
     /// Calculate geometries for all windows given a root rect.
     pub fn calculate_geometries(&self, rect: Rect) -> Vec<(WindowId, Rect)> {
         self.calculate_geometries_with_gaps(rect, 0.0, 0.0, true)
+    }
+
+    pub fn calculate_focus_geometries(&self, rect: Rect) -> Vec<(WindowId, Rect)> {
+        self.calculate_focus_geometries_with_gaps(rect, 0.0, 0.0, true)
     }
 
     /// Calculate geometries with inner and outer gaps.
@@ -244,6 +307,35 @@ impl Node {
         match self {
             Node::Leaf { window: Some(w) } => vec![(*w, padded)],
             Node::Leaf { window: None } => vec![],
+            Node::Stack {
+                windows, active, ..
+            } => {
+                let active_window = windows.get(*active).copied();
+                let mut geoms = Vec::with_capacity(windows.len());
+                let mut depth = 0usize;
+                for (idx, wid) in windows.iter().enumerate() {
+                    if Some(*wid) == active_window {
+                        continue;
+                    }
+                    depth += 1;
+                    geoms.push((
+                        *wid,
+                        Rect::new(
+                            padded.x + STACK_REVEAL_OFFSET * depth as f64,
+                            padded.y,
+                            padded.width,
+                            padded.height,
+                        ),
+                    ));
+                    if idx == *active {
+                        depth = depth.saturating_sub(1);
+                    }
+                }
+                if let Some(wid) = active_window {
+                    geoms.push((wid, padded));
+                }
+                geoms
+            }
             Node::Internal {
                 split,
                 ratio,
@@ -274,6 +366,69 @@ impl Node {
                 geoms.extend(
                     right.calculate_geometries_with_gaps(right_rect, gap_inner, gap_outer, false),
                 );
+                geoms
+            }
+        }
+    }
+
+    pub fn calculate_focus_geometries_with_gaps(
+        &self,
+        rect: Rect,
+        gap_inner: f64,
+        gap_outer: f64,
+        is_root: bool,
+    ) -> Vec<(WindowId, Rect)> {
+        let padded = if is_root && gap_outer > 0.0 {
+            Rect::new(
+                rect.x + gap_outer,
+                rect.y + gap_outer,
+                (rect.width - 2.0 * gap_outer).max(0.0),
+                (rect.height - 2.0 * gap_outer).max(0.0),
+            )
+        } else {
+            rect
+        };
+
+        match self {
+            Node::Leaf { window: Some(w) } => vec![(*w, padded)],
+            Node::Leaf { window: None } => vec![],
+            Node::Stack {
+                windows, active, ..
+            } => windows
+                .get(*active)
+                .copied()
+                .map(|wid| vec![(wid, padded)])
+                .unwrap_or_default(),
+            Node::Internal {
+                split,
+                ratio,
+                left,
+                right,
+            } => {
+                let half_gap = gap_inner / 2.0;
+                let (mut left_rect, mut right_rect) = padded.split(*split, *ratio);
+
+                if gap_inner > 0.0 {
+                    match split {
+                        SplitDirection::Vertical => {
+                            left_rect.width = (left_rect.width - half_gap).max(0.0);
+                            right_rect.x += half_gap;
+                            right_rect.width = (right_rect.width - half_gap).max(0.0);
+                        }
+                        SplitDirection::Horizontal => {
+                            left_rect.height = (left_rect.height - half_gap).max(0.0);
+                            right_rect.y += half_gap;
+                            right_rect.height = (right_rect.height - half_gap).max(0.0);
+                        }
+                    }
+                }
+
+                let mut geoms = left.calculate_focus_geometries_with_gaps(
+                    left_rect, gap_inner, gap_outer, false,
+                );
+                geoms.extend(right.calculate_focus_geometries_with_gaps(
+                    right_rect, gap_inner, gap_outer, false,
+                ));
                 geoms
             }
         }
@@ -311,6 +466,27 @@ impl Node {
                 }
             }
             Node::Leaf { window: None } => {}
+            Node::Stack {
+                windows,
+                active,
+                previous,
+            } => {
+                if let Some(w) = windows.iter_mut().find(|w| **w == a) {
+                    *w = b;
+                    *found_a = true;
+                } else if let Some(w) = windows.iter_mut().find(|w| **w == b) {
+                    *w = a;
+                    *found_b = true;
+                }
+                if let Some(current) = windows.get(*active).copied() {
+                    if current == a {
+                        *active = windows.iter().position(|wid| *wid == b).unwrap_or(*active);
+                    } else if current == b {
+                        *active = windows.iter().position(|wid| *wid == a).unwrap_or(*active);
+                    }
+                }
+                previous.swap_impl(a, b, found_a, found_b);
+            }
             Node::Internal { left, right, .. } => {
                 left.swap_impl(a, b, found_a, found_b);
                 right.swap_impl(a, b, found_a, found_b);
@@ -451,7 +627,7 @@ impl Node {
     /// Resize the split affecting a window in the given direction.
     pub fn resize(&mut self, window: WindowId, direction: Direction, delta: f32) -> bool {
         match self {
-            Node::Leaf { .. } => false,
+            Node::Leaf { .. } | Node::Stack { .. } => false,
             Node::Internal {
                 split,
                 ratio,
@@ -494,6 +670,147 @@ impl Node {
                     false
                 }
             }
+        }
+    }
+
+    pub fn set_stack_active(&mut self, window: WindowId) -> bool {
+        match self {
+            Node::Stack {
+                windows,
+                active,
+                previous: _,
+            } => {
+                if let Some(idx) = windows.iter().position(|wid| *wid == window) {
+                    *active = idx;
+                    true
+                } else {
+                    false
+                }
+            }
+            Node::Internal { left, right, .. } => {
+                left.set_stack_active(window) || right.set_stack_active(window)
+            }
+            Node::Leaf { .. } => false,
+        }
+    }
+
+    pub fn stack_info(&self, window: WindowId) -> Option<(Vec<WindowId>, usize)> {
+        match self {
+            Node::Stack {
+                windows, active, ..
+            } if windows.contains(&window) => Some((windows.clone(), *active)),
+            Node::Internal { left, right, .. } => left
+                .stack_info(window)
+                .or_else(|| right.stack_info(window)),
+            _ => None,
+        }
+    }
+
+    pub fn cycle_stack(&mut self, window: WindowId, forward: bool) -> Option<WindowId> {
+        match self {
+            Node::Stack {
+                windows, active, ..
+            } if windows.contains(&window) => {
+                if windows.is_empty() {
+                    return None;
+                }
+                let len = windows.len();
+                *active = if forward {
+                    (*active + 1) % len
+                } else if *active == 0 {
+                    len - 1
+                } else {
+                    *active - 1
+                };
+                windows.get(*active).copied()
+            }
+            Node::Internal { left, right, .. } => left
+                .cycle_stack(window, forward)
+                .or_else(|| right.cycle_stack(window, forward)),
+            _ => None,
+        }
+    }
+
+    pub fn reorder_stack(&mut self, window: WindowId, forward: bool) -> Option<WindowId> {
+        match self {
+            Node::Stack {
+                windows,
+                active,
+                previous,
+            } if windows.contains(&window) => {
+                let idx = windows.iter().position(|wid| *wid == window)?;
+                let swap_idx = if forward {
+                    if idx + 1 < windows.len() {
+                        idx + 1
+                    } else {
+                        0
+                    }
+                } else if idx == 0 {
+                    windows.len() - 1
+                } else {
+                    idx - 1
+                };
+                windows.swap(idx, swap_idx);
+                *active = swap_idx;
+                previous.swap(window, windows[idx]);
+                windows.get(*active).copied()
+            }
+            Node::Internal { left, right, .. } => left
+                .reorder_stack(window, forward)
+                .or_else(|| right.reorder_stack(window, forward)),
+            _ => None,
+        }
+    }
+
+    pub fn unstack(&mut self, window: WindowId) -> bool {
+        match self {
+            Node::Stack {
+                windows, previous, ..
+            } if windows.contains(&window) => {
+                *self = (**previous).clone();
+                true
+            }
+            Node::Internal { left, right, .. } => left.unstack(window) || right.unstack(window),
+            _ => false,
+        }
+    }
+
+    pub fn make_stack_for_window(&mut self, window: WindowId) -> bool {
+        self.make_stack_for_window_impl(window)
+    }
+
+    fn make_stack_for_window_impl(&mut self, window: WindowId) -> bool {
+        match self {
+            Node::Internal { left, right, .. } => {
+                let left_contains = left.contains(window);
+                let right_contains = right.contains(window);
+                if !left_contains && !right_contains {
+                    return false;
+                }
+
+                let child_contains = if left_contains { left } else { right };
+                if !matches!(child_contains.as_ref(), Node::Stack { .. })
+                    && child_contains.slot_count() > 1
+                    && child_contains.make_stack_for_window_impl(window)
+                {
+                    return true;
+                }
+
+                if self.slot_count() > 1 {
+                    let previous = self.clone();
+                    let windows = self.windows();
+                    let active = windows.iter().position(|wid| *wid == window).unwrap_or(0);
+                    *self = Node::Stack {
+                        windows,
+                        active,
+                        previous: Box::new(previous),
+                    };
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
         }
     }
 }
@@ -1075,5 +1392,61 @@ mod tests {
                 geoms_default[i].1.height,
             );
         }
+    }
+
+    #[test]
+    fn make_stack_for_window_replaces_smallest_conflicting_subtree() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+
+        assert!(tree.make_stack_for_window(3));
+        let stack = tree.stack_info(3).expect("window should be stacked");
+        assert_eq!(stack.0, vec![2, 3]);
+        assert_eq!(stack.1, 1);
+        assert!(tree.contains(1));
+    }
+
+    #[test]
+    fn stacked_render_geometries_reveal_background_windows() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        assert!(tree.make_stack_for_window(3));
+
+        let geoms = tree.calculate_geometries(SCREEN);
+        let g2 = geoms.iter().find(|(wid, _)| *wid == 2).unwrap().1;
+        let g3 = geoms.iter().find(|(wid, _)| *wid == 3).unwrap().1;
+
+        assert!(g2.x > g3.x);
+        assert_eq!(g2.width, g3.width);
+        assert_eq!(g2.height, g3.height);
+    }
+
+    #[test]
+    fn unstack_restores_previous_subtree() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        let original = tree.clone();
+
+        assert!(tree.make_stack_for_window(3));
+        assert!(tree.unstack(3));
+        assert_eq!(tree, original);
+    }
+
+    #[test]
+    fn removing_from_stack_collapses_to_leaf() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+
+        assert!(tree.make_stack_for_window(2));
+        assert!(tree.remove(2));
+
+        assert!(matches!(tree, Node::Leaf { window: Some(1) }));
     }
 }

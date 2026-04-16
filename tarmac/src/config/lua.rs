@@ -840,6 +840,7 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
         "close" => Ok(Action::CloseWindow),
         "equalize" => Ok(Action::Equalize),
         "toggle_float" => Ok(Action::ToggleFloat),
+        "unstack" => Ok(Action::Unstack),
         "workspace_next" => Ok(Action::WorkspaceNext),
         "workspace_prev" => Ok(Action::WorkspacePrev),
         "focus_monitor_next" => Ok(Action::FocusMonitorNext),
@@ -896,6 +897,11 @@ pub fn default_keybinds(settings: &Settings) -> Vec<LuaKeybind> {
             modifiers: ms,
             key: Key::Space,
             action: Action::ToggleFloat,
+        },
+        LuaKeybind {
+            modifiers: ms,
+            key: Key::U,
+            action: Action::Unstack,
         },
         // Focus
         LuaKeybind {
@@ -1162,6 +1168,7 @@ pub fn format_action(action: &Action) -> String {
         Action::WorkspaceNext => "workspace_next".to_string(),
         Action::WorkspacePrev => "workspace_prev".to_string(),
         Action::ToggleFloat => "toggle_float".to_string(),
+        Action::Unstack => "unstack".to_string(),
         Action::ToggleSpecial(name) => format!("toggle_special {name}"),
         Action::MoveToSpecial(name) => format!("move_to_special {name}"),
         Action::FocusMonitorNext => "focus_monitor_next".to_string(),

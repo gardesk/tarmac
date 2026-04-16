@@ -38,6 +38,7 @@ fn main() {
         eprintln!("  resize <left|right|up|down>   Resize split in direction");
         eprintln!("  close                         Close focused window");
         eprintln!("  equalize                      Equalize all splits");
+        eprintln!("  unstack                       Restore the focused stacked subtree");
         eprintln!("  workspace <1-10>              Switch workspace");
         eprintln!("  move-to-workspace <1-10>      Move window to workspace");
         eprintln!("  toggle-floating               Toggle floating state");

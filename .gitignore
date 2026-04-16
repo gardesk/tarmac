@@ -15,5 +15,6 @@ docs/
 .claude/
 CLAUDE.md
 .ref/
+.refs/
 AGENTS.md
 nohup.out

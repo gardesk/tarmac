@@ -345,6 +345,22 @@ impl WmState {
         self.ax_refs.get(&id)
     }
 
+    fn workspace_render_geometries(&self, ws_idx: usize, rect: Rect) -> Vec<(WindowId, Rect)> {
+        let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
+        self.workspaces
+            .get(ws_idx)
+            .tree
+            .calculate_geometries_with_gaps(rect, gap_inner, gap_outer, true)
+    }
+
+    fn workspace_focus_geometries(&self, ws_idx: usize, rect: Rect) -> Vec<(WindowId, Rect)> {
+        let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
+        self.workspaces
+            .get(ws_idx)
+            .tree
+            .calculate_focus_geometries_with_gaps(rect, gap_inner, gap_outer, true)
+    }
+
     pub fn process_events(&mut self) {
         let events: Vec<QueuedEvent> = self.event_queue.borrow_mut().drain(..).collect();
         for queued in events {
@@ -363,10 +379,7 @@ impl WmState {
             let ws_idx = monitor.active_workspace;
             let ws = self.workspaces.get(ws_idx);
             let screen_rect = self.monitor_rect(mi);
-            let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
-            let geometries =
-                ws.tree
-                    .calculate_geometries_with_gaps(screen_rect, gap_inner, gap_outer, true);
+            let geometries = self.workspace_render_geometries(ws_idx, screen_rect);
             tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
@@ -408,10 +421,7 @@ impl WmState {
             let ws_idx = monitor.active_workspace;
             let ws = self.workspaces.get(ws_idx);
             let sr = self.monitor_rect(mi);
-            let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
-            let geoms = ws
-                .tree
-                .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
+            let geoms = self.workspace_focus_geometries(ws_idx, sr);
             let focused = ws.focused;
 
             for (wid, rect) in &geoms {
@@ -494,8 +504,6 @@ impl WmState {
                 .monitor_showing_workspace(ws_idx)
                 .map(|mi| self.monitor_rect(mi))
                 .unwrap_or_else(|| self.focused_rect());
-            let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
-
             // Phase 1: Swap oversized windows into larger tiles.
             // Batch all swaps using BSP geometry (no AX calls), then apply layout
             // once and settle. This is both faster (one layout instead of N) and
@@ -510,11 +518,7 @@ impl WmState {
                     // Geometries are computed from the BSP tree (cheap, no AX).
                     // After batched swaps, tree geometry reflects the new layout
                     // even before apply_layout sends AX commands.
-                    let geometries = self
-                        .workspaces
-                        .get(ws_idx)
-                        .tree
-                        .calculate_geometries_with_gaps(screen_rect, gap_inner, gap_outer, true);
+                    let geometries = self.workspace_focus_geometries(ws_idx, screen_rect);
                     if geometries.is_empty() {
                         break;
                     }
@@ -578,15 +582,9 @@ impl WmState {
                 // settling. The settled set prevents ping-pong.
             }
 
-            // Phase 2: Float remaining oversized windows locally.
-            // Oversized windows should not silently migrate across workspaces;
-            // keep workspace membership stable and remediate in place.
+            // Phase 2: Replace the smallest conflicting subtree with a stack.
             loop {
-                let geometries = self
-                    .workspaces
-                    .get(ws_idx)
-                    .tree
-                    .calculate_geometries_with_gaps(screen_rect, gap_inner, gap_outer, true);
+                let geometries = self.workspace_focus_geometries(ws_idx, screen_rect);
                 if geometries.is_empty() {
                     break;
                 }
@@ -614,24 +612,20 @@ impl WmState {
                     None => break,
                 };
 
-                tracing::info!(
-                    id = oversized_wid,
-                    min_w,
-                    min_h,
-                    ws = ws_idx + 1,
-                    "floating oversized window locally"
-                );
-                self.workspaces
-                    .get_mut(ws_idx)
-                    .toggle_float(oversized_wid, screen_rect);
-                if let Some(ax_ref) = self.ax_refs.get(&oversized_wid) {
-                    let fx = screen_rect.x + (screen_rect.width - min_w) / 2.0;
-                    let fy = screen_rect.y + (screen_rect.height - min_h) / 2.0;
-                    let _ = ax_set_position(ax_ref, fx, fy);
-                    let _ = ax_set_size(ax_ref, min_w, min_h);
+                if self.workspaces.get_mut(ws_idx).tree.make_stack_for_window(oversized_wid) {
+                    tracing::info!(
+                        id = oversized_wid,
+                        min_w,
+                        min_h,
+                        ws = ws_idx + 1,
+                        "stacking oversized subtree locally"
+                    );
+                    self.workspaces.get_mut(ws_idx).tree.set_stack_active(oversized_wid);
+                    self.apply_layout();
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                } else {
+                    break;
                 }
-                self.apply_layout();
-                self.restack_floating_windows(ws_idx);
             }
 
             processed.push(ws_idx);
@@ -668,13 +662,21 @@ impl WmState {
         let ws = self.active_workspace();
         let focused = ws.focused;
         let sr = self.focused_rect();
-        let (gap_inner, gap_outer) = self.workspace_gaps(self.active_ws_idx());
+
+        if let Some(from) = focused
+            && matches!(direction, Direction::Left | Direction::Right)
+            && let Some(next) = self
+                .active_workspace_mut()
+                .tree
+                .cycle_stack(from, matches!(direction, Direction::Right))
+        {
+            self.focus_window(next);
+            return;
+        }
 
         // Try intra-workspace navigation first (only if we have a focused window)
         if let Some(from) = focused {
-            let geoms = ws
-                .tree
-                .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
+            let geoms = self.workspace_focus_geometries(self.active_ws_idx(), sr);
 
             // Check if focused window is at the monitor edge in the requested
             // direction. If so, cross monitors instead of spiraling into the BSP tree.
@@ -720,10 +722,7 @@ impl WmState {
         if let Some(new_mi) = new_mi {
             self.focused_monitor = new_mi;
             let target_sr = self.focused_rect();
-            let target_geoms = self
-                .active_workspace()
-                .tree
-                .calculate_geometries_with_gaps(target_sr, gap_inner, gap_outer, true);
+            let target_geoms = self.workspace_focus_geometries(self.active_ws_idx(), target_sr);
 
             if let Some(wid) =
                 Node::nearest_to_edge(&target_geoms, direction).or(self.active_workspace().focused)
@@ -762,10 +761,19 @@ impl WmState {
             None => return,
         };
         let sr = self.focused_rect();
-        let (gap_inner, gap_outer) = self.workspace_gaps(self.active_ws_idx());
-        let geoms = ws
-            .tree
-            .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
+
+        if matches!(direction, Direction::Left | Direction::Right)
+            && let Some(next) = self
+                .active_workspace_mut()
+                .tree
+                .reorder_stack(focused, matches!(direction, Direction::Right))
+        {
+            self.apply_layout();
+            self.focus_window(next);
+            return;
+        }
+
+        let geoms = self.workspace_focus_geometries(self.active_ws_idx(), sr);
 
         // Check if the focused window touches the monitor edge in the
         // requested direction. If so, skip intra-workspace swap and move
@@ -874,17 +882,22 @@ impl WmState {
         // Record focus on the workspace that CONTAINS this window,
         // not the active workspace — during cross-monitor FFM the active
         // workspace might be different from the window's workspace.
-        let old_focused = if let Some(ws_idx) = self.workspaces.find_window(id) {
+        let (old_focused, stack_focus_changed) = if let Some(ws_idx) = self.workspaces.find_window(id) {
             let old = self.workspaces.get(ws_idx).focused;
             self.workspaces.get_mut(ws_idx).raise_floating(id);
+            let stack_changed = self.workspaces.get_mut(ws_idx).tree.set_stack_active(id);
             self.workspaces.get_mut(ws_idx).record_focus(id);
-            old
+            (old, stack_changed)
         } else {
             let old = self.active_workspace().focused;
             self.active_workspace_mut().raise_floating(id);
+            let stack_changed = self.active_workspace_mut().tree.set_stack_active(id);
             self.active_workspace_mut().record_focus(id);
-            old
+            (old, stack_changed)
         };
+        if stack_focus_changed {
+            self.apply_layout();
+        }
         self.enforce_floating_levels(id);
 
         // Update border colors on focus change
@@ -1169,20 +1182,17 @@ impl WmState {
                 floating_hit
             } else {
                 // Check tiled windows within the overlay rect
-                let geoms = ws.tree.calculate_geometries_with_gaps(
-                    overlay_rect,
-                    gap_inner,
-                    gap_outer,
-                    true,
-                );
+                let geoms = ws
+                    .tree
+                    .calculate_geometries_with_gaps(overlay_rect, gap_inner, gap_outer, true);
                 geoms
                     .iter()
+                    .rev()
                     .find(|(_, rect)| rect.contains_point(x, y))
                     .map(|(id, _)| *id)
             }
         } else {
             let ws = self.active_workspace();
-            let (gap_inner, gap_outer) = self.workspace_gaps(self.active_ws_idx());
 
             // Check floating windows first -- they're visually on top
             let floating_under = ws
@@ -1196,14 +1206,11 @@ impl WmState {
                 floating_under
             } else {
                 // Check tiled windows using gap-aware geometry matching actual layout
-                let geoms = ws.tree.calculate_geometries_with_gaps(
-                    self.focused_rect(),
-                    gap_inner,
-                    gap_outer,
-                    true,
-                );
+                let geoms =
+                    self.workspace_render_geometries(self.active_ws_idx(), self.focused_rect());
                 geoms
                     .iter()
+                    .rev()
                     .find(|(_, rect)| rect.contains_point(x, y))
                     .map(|(id, _)| *id)
             }
@@ -1252,9 +1259,25 @@ impl WmState {
         }
     }
 
+    pub fn unstack_focused(&mut self) {
+        let focused = match self.effective_focused() {
+            Some(f) => f,
+            None => return,
+        };
+
+        let Some(ws_idx) = self.workspaces.find_window(focused) else {
+            return;
+        };
+
+        if self.workspaces.get_mut(ws_idx).tree.unstack(focused) {
+            self.apply_layout();
+            self.focus_window(focused);
+            tracing::info!(id = focused, "restored stacked subtree");
+        }
+    }
+
     pub fn click_to_focus(&mut self, x: f64, y: f64) {
         let ws = self.active_workspace();
-        let (gap_inner, gap_outer) = self.workspace_gaps(self.active_ws_idx());
 
         // Check floating first
         let floating_hit = ws
@@ -1267,14 +1290,10 @@ impl WmState {
         let id = if let Some(fid) = floating_hit {
             Some(fid)
         } else {
-            let geoms = ws.tree.calculate_geometries_with_gaps(
-                self.focused_rect(),
-                gap_inner,
-                gap_outer,
-                true,
-            );
+            let geoms = self.workspace_render_geometries(self.active_ws_idx(), self.focused_rect());
             geoms
                 .iter()
+                .rev()
                 .find(|(_, rect)| rect.contains_point(x, y))
                 .map(|(id, _)| *id)
         };
@@ -1309,12 +1328,7 @@ impl WmState {
                 // Warp to the focused WINDOW center (not monitor center)
                 if self.mouse_follows_focus {
                     let sr = self.focused_rect();
-                    let (gap_inner, gap_outer) = self.workspace_gaps(target_idx);
-                    let geoms = self
-                        .workspaces
-                        .get(target_idx)
-                        .tree
-                        .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
+                    let geoms = self.workspace_focus_geometries(target_idx, sr);
                     if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                         warp_mouse_to_center(rect);
                     } else {
@@ -1377,12 +1391,7 @@ impl WmState {
             self.focus_window(wid);
             if self.mouse_follows_focus {
                 let sr = self.focused_rect();
-                let (gap_inner, gap_outer) = self.workspace_gaps(target_idx);
-                let geoms = self
-                    .workspaces
-                    .get(target_idx)
-                    .tree
-                    .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
+                let geoms = self.workspace_focus_geometries(target_idx, sr);
                 if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                     warp_mouse_to_center(rect);
                 } else {
@@ -1802,11 +1811,7 @@ impl WmState {
             self.focus_window(wid);
             if self.mouse_follows_focus {
                 let sr = self.focused_rect();
-                let (gap_inner, gap_outer) = self.workspace_gaps(self.active_ws_idx());
-                let geoms = self
-                    .active_workspace()
-                    .tree
-                    .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
+                let geoms = self.workspace_focus_geometries(self.active_ws_idx(), sr);
                 if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                     warp_mouse_to_center(rect);
                 } else {
@@ -1836,11 +1841,7 @@ impl WmState {
             self.focus_window(wid);
             if self.mouse_follows_focus {
                 let sr = self.focused_rect();
-                let (gap_inner, gap_outer) = self.workspace_gaps(self.active_ws_idx());
-                let geoms = self
-                    .active_workspace()
-                    .tree
-                    .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
+                let geoms = self.workspace_focus_geometries(self.active_ws_idx(), sr);
                 if let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == wid) {
                     warp_mouse_to_center(rect);
                 } else {
@@ -2244,7 +2245,7 @@ impl WmState {
     }
 
     /// After moving a window to a specific workspace, try swaps to fix overflow.
-    /// If no swap works, float the window centered instead of evicting.
+    /// If no swap works, replace the smallest conflicting subtree with a stack.
     /// Only runs when the target workspace is visible — hidden workspaces have
     /// stale window sizes and will be checked when switched to.
     fn fix_oversized_on_target(&mut self, ws_idx: usize, moved_wid: super::window::WindowId) {
@@ -2257,16 +2258,7 @@ impl WmState {
         std::thread::sleep(std::time::Duration::from_millis(100));
 
         // Check if the moved window actually overflows
-        let geometries = self
-            .workspaces
-            .get(ws_idx)
-            .tree
-            .calculate_geometries_with_gaps(
-                screen_rect,
-                self.workspace_gaps(ws_idx).0,
-                self.workspace_gaps(ws_idx).1,
-                true,
-            );
+        let geometries = self.workspace_focus_geometries(ws_idx, screen_rect);
 
         let (_min_w, _min_h) = match geometries.iter().find(|(wid, _)| *wid == moved_wid) {
             Some((_, rect)) => {
@@ -2286,16 +2278,7 @@ impl WmState {
         // Try swaps with settled-set logic (same as fix_oversized_windows phase 1)
         let mut settled: Vec<super::window::WindowId> = Vec::new();
         loop {
-            let geoms = self
-                .workspaces
-                .get(ws_idx)
-                .tree
-                .calculate_geometries_with_gaps(
-                    screen_rect,
-                    self.workspace_gaps(ws_idx).0,
-                    self.workspace_gaps(ws_idx).1,
-                    true,
-                );
+            let geoms = self.workspace_focus_geometries(ws_idx, screen_rect);
             if geoms.is_empty() {
                 break;
             }
@@ -2341,27 +2324,20 @@ impl WmState {
                 self.apply_layout();
                 settled.push(ow);
             } else {
-                // No swap possible — float this window centered
-                tracing::info!(
-                    id = ow,
-                    min_w = ow_min_w,
-                    min_h = ow_min_h,
-                    ws = ws_idx + 1,
-                    "floating oversized window on target workspace"
-                );
-                self.workspaces
-                    .get_mut(ws_idx)
-                    .toggle_float(ow, screen_rect);
-                if let Some(ax_ref) = self.ax_refs.get(&ow) {
-                    let fx = screen_rect.x + (screen_rect.width - ow_min_w) / 2.0;
-                    let fy = screen_rect.y + (screen_rect.height - ow_min_h) / 2.0;
-                    let _ = ax_set_position(ax_ref, fx, fy);
-                    let _ = ax_set_size(ax_ref, ow_min_w, ow_min_h);
+                if self.workspaces.get_mut(ws_idx).tree.make_stack_for_window(ow) {
+                    tracing::info!(
+                        id = ow,
+                        min_w = ow_min_w,
+                        min_h = ow_min_h,
+                        ws = ws_idx + 1,
+                        "stacking oversized subtree on target workspace"
+                    );
+                    self.workspaces.get_mut(ws_idx).tree.set_stack_active(ow);
+                    self.apply_layout();
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                } else {
+                    break;
                 }
-                use crate::platform::skylight::{K_CG_FLOATING_WINDOW_LEVEL, set_window_level};
-                set_window_level(ow, K_CG_FLOATING_WINDOW_LEVEL);
-                self.apply_layout();
-                // Continue checking — other windows may still overflow
             }
         }
     }
@@ -2748,6 +2724,7 @@ impl WmState {
                     // Record on the workspace that contains this window,
                     // not the active workspace (same fix as focus_window_impl)
                     if let Some(ws_idx) = self.workspaces.find_window(id) {
+                        self.workspaces.get_mut(ws_idx).tree.set_stack_active(id);
                         self.workspaces.get_mut(ws_idx).record_focus(id);
                     }
                 }
@@ -2935,6 +2912,7 @@ fn hide_target_for_frame(
 mod tests {
     use super::*;
     use crate::core::monitor::Monitor;
+    use crate::core::tree::Direction;
 
     #[test]
     fn hide_anchor_frame_defaults_without_monitors() {
@@ -3150,5 +3128,64 @@ mod tests {
         state.monitors[0].active_workspace = 1;
         state.sync_workspace_visibility();
         assert!(!state.is_window_hidden(123));
+    }
+
+    #[test]
+    fn focus_direction_cycles_stacked_windows_left_right() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(1, None, screen);
+            ws.tree.insert_with_rect(2, Some(1), screen);
+            ws.tree.insert_with_rect(3, Some(2), screen);
+            assert!(ws.tree.make_stack_for_window(3));
+            ws.tree.set_stack_active(3);
+            ws.record_focus(3);
+        }
+
+        state.focus_direction(Direction::Left);
+        assert_eq!(state.active_workspace().focused, Some(2));
+
+        state.focus_direction(Direction::Right);
+        assert_eq!(state.active_workspace().focused, Some(3));
+    }
+
+    #[test]
+    fn unstack_focused_restores_original_tree() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        let original = {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(1, None, screen);
+            ws.tree.insert_with_rect(2, Some(1), screen);
+            ws.tree.insert_with_rect(3, Some(2), screen);
+            let original = ws.tree.clone();
+            assert!(ws.tree.make_stack_for_window(3));
+            ws.tree.set_stack_active(3);
+            ws.record_focus(3);
+            original
+        };
+
+        state.unstack_focused();
+        assert_eq!(state.active_workspace().tree, original);
     }
 }

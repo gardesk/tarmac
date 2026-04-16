@@ -191,6 +191,7 @@ pub enum Action {
     FocusMonitorPrev,                 // Focus previous monitor
     MoveToMonitorNext,                // Move window to next monitor
     MoveToMonitorPrev,                // Move window to previous monitor
+    Unstack,                          // Restore a stacked subtree to its saved BSP shape
     Reload,                           // Hot reload config
     Exit,                             // Clean exit
 }
@@ -244,6 +245,7 @@ impl KeybindManager {
         // Spawn / close
         mgr.add(m, Key::Return, Action::SpawnTerminal);
         mgr.add(ms, Key::Q, Action::CloseWindow);
+        mgr.add(ms, Key::U, Action::Unstack);
 
         // Focus: Option+hjkl and Option+Arrows
         mgr.add(m, Key::H, Action::Focus(Left));

@@ -243,6 +243,7 @@ fn handle_action(action: Action) {
                     });
                 }
                 Action::ToggleFloat => state.toggle_float(),
+                Action::Unstack => state.unstack_focused(),
                 Action::ToggleSpecial(ref name) => state.toggle_special(name),
                 Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
@@ -324,6 +325,7 @@ gar.bind("mod+return", "spawn_terminal")
 gar.bind("mod+shift+q", "close")
 gar.bind("mod+e", "equalize")
 gar.bind("mod+shift+space", "toggle_float")
+gar.bind("mod+shift+u", "unstack")
 
 -- Focus
 gar.bind("mod+h", "focus left")
@@ -495,6 +497,10 @@ fn process_ipc_command(
                 state.equalize();
                 Response::ok_empty()
             }
+            "unstack" => {
+                state.unstack_focused();
+                Response::ok_empty()
+            }
             "workspace" => {
                 if let Some(target) = request
                     .args
@@ -570,6 +576,17 @@ fn process_ipc_command(
                         .map(|w| w.app_name.clone())
                         .unwrap_or_default();
                     let floating = state.active_workspace().is_floating(focused_id);
+                    let stack = state
+                        .active_workspace()
+                        .tree
+                        .stack_info(focused_id)
+                        .map(|(members, active)| {
+                            serde_json::json!({
+                                "members": members,
+                                "active_index": active,
+                                "active": members.get(active),
+                            })
+                        });
 
                     // Query live AX data for current title and geometry
                     let (title, x, y, width, height) =
@@ -589,6 +606,7 @@ fn process_ipc_command(
                         "x": x, "y": y,
                         "width": width, "height": height,
                         "floating": floating,
+                        "stack": stack,
                         "workspace": state.active_workspace().id.to_string(),
                     }))
                 } else {
@@ -658,12 +676,10 @@ fn process_ipc_command(
                     .monitor_showing_workspace(ws_idx)
                     .map(|mi| state.monitor_rect(mi))
                     .unwrap_or_else(|| state.focused_rect());
-                let geoms = ws.tree.calculate_geometries_with_gaps(
-                    sr,
-                    state.gap_inner,
-                    state.gap_outer,
-                    true,
-                );
+                let (gap_inner, gap_outer) = state.workspace_gaps(ws_idx);
+                let geoms = ws
+                    .tree
+                    .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);
                 let windows: Vec<serde_json::Value> = geoms
                     .iter()
                     .map(|(wid, rect)| {
@@ -672,11 +688,22 @@ fn process_ipc_command(
                             .get(*wid)
                             .map(|w| w.app_name.clone())
                             .unwrap_or_default();
+                        let stack = ws.tree.stack_info(*wid);
+                        let stack_index = stack
+                            .as_ref()
+                            .and_then(|(members, _)| members.iter().position(|id| *id == *wid));
+                        let stack_active = stack
+                            .as_ref()
+                            .map(|(members, active)| members.get(*active) == Some(wid))
+                            .unwrap_or(false);
                         serde_json::json!({
                             "id": wid,
                             "app_name": app_name,
                             "x": rect.x, "y": rect.y,
                             "width": rect.width, "height": rect.height,
+                            "stacked": stack.is_some(),
+                            "stack_index": stack_index,
+                            "stack_active": stack_active,
                         })
                     })
                     .collect();
