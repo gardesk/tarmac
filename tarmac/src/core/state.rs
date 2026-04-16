@@ -52,6 +52,7 @@ pub struct WmState {
     event_queue: Rc<RefCell<Vec<QueuedEvent>>>,
     ffm_cooldown_until: Option<std::time::Instant>,
     ffm_last_window: Option<WindowId>,
+    pending_internal_focus: Option<(WindowId, i32, std::time::Instant)>,
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
@@ -87,6 +88,7 @@ impl WmState {
             event_queue: Rc::new(RefCell::new(Vec::new())),
             ffm_cooldown_until: None,
             ffm_last_window: None,
+            pending_internal_focus: None,
             drag: None,
             focus_follows_mouse: true,
             mouse_follows_focus: true,
@@ -890,6 +892,33 @@ impl WmState {
             Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
     }
 
+    fn mark_internal_focus(&mut self, id: WindowId) {
+        let Some(window) = self.registry.get(id) else {
+            return;
+        };
+        self.pending_internal_focus = Some((
+            id,
+            window.app_pid,
+            std::time::Instant::now() + std::time::Duration::from_millis(400),
+        ));
+    }
+
+    fn should_ignore_external_focus(&mut self, pid: i32, requested: Option<WindowId>) -> bool {
+        let Some((pending_id, pending_pid, until)) = self.pending_internal_focus else {
+            return false;
+        };
+        if std::time::Instant::now() >= until {
+            self.pending_internal_focus = None;
+            return false;
+        }
+
+        match requested {
+            Some(id) if id == pending_id => true,
+            None if pid == pending_pid => true,
+            _ => false,
+        }
+    }
+
     fn is_external_focus_candidate(&self, id: WindowId) -> bool {
         self.registry
             .get(id)
@@ -982,6 +1011,9 @@ impl WmState {
     }
 
     pub fn adopt_external_app_focus(&mut self, pid: i32, requested: Option<WindowId>) {
+        if self.should_ignore_external_focus(pid, requested) {
+            return;
+        }
         let Some(target) = self.resolve_external_focus_target(pid, requested) else {
             return;
         };
@@ -989,6 +1021,9 @@ impl WmState {
     }
 
     fn focus_window_impl(&mut self, id: WindowId, activate_app: bool) {
+        if activate_app {
+            self.mark_internal_focus(id);
+        }
         if let Some(ax_ref) = self.ax_refs.get(&id) {
             if activate_app {
                 // Full activation sequence for reliable cross-monitor focus:
@@ -3490,6 +3525,38 @@ mod tests {
             state.active_workspace().tree.stack_info(51),
             Some((vec![50, 51], 1))
         );
+    }
+
+    #[test]
+    fn internal_focus_echo_does_not_trigger_external_mouse_warp() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(60, 12, "Firefox"));
+        state.registry.add(tracked_window(61, 12, "Firefox"));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(60, None, screen);
+            ws.tree.insert_with_rect(61, Some(60), screen);
+            ws.record_focus(60);
+        }
+
+        state.focus_window(61);
+        assert_eq!(state.active_workspace().focused, Some(61));
+        assert!(state.ffm_cooldown_until.is_none());
+
+        state.adopt_external_app_focus(12, Some(61));
+
+        assert_eq!(state.active_workspace().focused, Some(61));
+        assert!(state.ffm_cooldown_until.is_none());
     }
 
     #[test]
