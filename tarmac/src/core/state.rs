@@ -1357,8 +1357,9 @@ impl WmState {
             if floating_hit.is_some() {
                 floating_hit
             } else {
-                // Check tiled windows within the overlay rect
-                let geoms = ws.tree.calculate_geometries_with_gaps(
+                // Use focus geometry here so inactive stack slivers don't
+                // steal focus on hover.
+                let geoms = ws.tree.calculate_focus_geometries_with_gaps(
                     overlay_rect,
                     gap_inner,
                     gap_outer,
@@ -1384,9 +1385,10 @@ impl WmState {
             if floating_under.is_some() {
                 floating_under
             } else {
-                // Check tiled windows using gap-aware geometry matching actual layout
+                // Use focus geometry here so inactive stack slivers don't
+                // steal focus on hover.
                 let geoms =
-                    self.workspace_render_geometries(self.active_ws_idx(), self.focused_rect());
+                    self.workspace_focus_geometries(self.active_ws_idx(), self.focused_rect());
                 geoms
                     .iter()
                     .rev()
@@ -3364,6 +3366,42 @@ mod tests {
 
         state.focus_direction(Direction::Right);
         assert_eq!(state.active_workspace().focused, Some(3));
+    }
+
+    #[test]
+    fn mouse_hover_on_inactive_stack_sliver_does_not_change_focus() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.tree.insert_with_rect(71, Some(70), screen);
+            assert!(ws.tree.make_stack_for_window(71));
+            ws.tree.set_stack_active(70);
+            ws.record_focus(70);
+        }
+
+        let geoms = state.workspace_render_geometries(0, screen);
+        let inactive = geoms.iter().find(|(wid, _)| *wid == 71).unwrap().1;
+        let hover_x = inactive.x + inactive.width - 1.0;
+        let hover_y = inactive.y + 1.0;
+
+        state.mouse_moved(hover_x, hover_y);
+
+        assert_eq!(state.active_workspace().focused, Some(70));
+        assert_eq!(
+            state.active_workspace().tree.stack_info(70),
+            Some((vec![70, 71], 0))
+        );
     }
 
     #[test]
