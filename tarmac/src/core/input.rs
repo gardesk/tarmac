@@ -192,6 +192,7 @@ pub enum Action {
     MoveToMonitorNext,                // Move window to next monitor
     MoveToMonitorPrev,                // Move window to previous monitor
     Unstack,                          // Restore a stacked subtree to its saved BSP shape
+    PromoteStack,                     // Move the active stack member to the top/front of the stack
     Reload,                           // Hot reload config
     Exit,                             // Clean exit
 }

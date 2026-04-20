@@ -1493,6 +1493,28 @@ impl WmState {
         }
     }
 
+    pub fn promote_stack_focused(&mut self) {
+        let focused = match self.effective_focused() {
+            Some(f) => f,
+            None => return,
+        };
+
+        let Some(ws_idx) = self.workspaces.find_window(focused) else {
+            return;
+        };
+
+        if self
+            .workspaces
+            .get_mut(ws_idx)
+            .tree
+            .promote_stack_window(focused)
+        {
+            self.apply_layout();
+            self.focus_window(focused);
+            tracing::info!(id = focused, "promoted focused stack window to top");
+        }
+    }
+
     pub fn click_to_focus(&mut self, x: f64, y: f64) {
         let ws = self.active_workspace();
 
@@ -3705,6 +3727,41 @@ mod tests {
         assert_eq!(state.active_specials, vec![None]);
         assert_eq!(state.monitors[0].active_workspace, 1);
         assert_eq!(state.active_workspace().focused, Some(40));
+    }
+
+    #[test]
+    fn promote_stack_focused_moves_active_window_to_top() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(1, None, screen);
+            ws.tree.insert_with_rect(2, Some(1), screen);
+            ws.tree.insert_with_rect(3, Some(2), screen);
+            assert!(ws.tree.make_stack_for_window(3));
+            ws.tree.set_stack_active(3);
+            ws.record_focus(3);
+        }
+
+        state.focus_direction(Direction::Left);
+        assert_eq!(state.active_workspace().focused, Some(2));
+
+        state.promote_stack_focused();
+
+        assert_eq!(state.active_workspace().focused, Some(2));
+        assert_eq!(
+            state.active_workspace().tree.stack_info(2),
+            Some((vec![2, 3], 0))
+        );
     }
 
     #[test]

@@ -841,6 +841,7 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
         "equalize" => Ok(Action::Equalize),
         "toggle_float" => Ok(Action::ToggleFloat),
         "unstack" => Ok(Action::Unstack),
+        "promote_stack" => Ok(Action::PromoteStack),
         "workspace_next" => Ok(Action::WorkspaceNext),
         "workspace_prev" => Ok(Action::WorkspacePrev),
         "focus_monitor_next" => Ok(Action::FocusMonitorNext),
@@ -902,6 +903,11 @@ pub fn default_keybinds(settings: &Settings) -> Vec<LuaKeybind> {
             modifiers: ms,
             key: Key::U,
             action: Action::Unstack,
+        },
+        LuaKeybind {
+            modifiers: Modifiers::OPTION | Modifiers::SHIFT,
+            key: Key::Period,
+            action: Action::PromoteStack,
         },
         // Focus
         LuaKeybind {
@@ -1169,6 +1175,7 @@ pub fn format_action(action: &Action) -> String {
         Action::WorkspacePrev => "workspace_prev".to_string(),
         Action::ToggleFloat => "toggle_float".to_string(),
         Action::Unstack => "unstack".to_string(),
+        Action::PromoteStack => "promote_stack".to_string(),
         Action::ToggleSpecial(name) => format!("toggle_special {name}"),
         Action::MoveToSpecial(name) => format!("move_to_special {name}"),
         Action::FocusMonitorNext => "focus_monitor_next".to_string(),
@@ -1287,6 +1294,7 @@ mod tests {
         assert_eq!(parse_action("equalize").unwrap(), Action::Equalize);
         assert_eq!(parse_action("close").unwrap(), Action::CloseWindow);
         assert_eq!(parse_action("toggle_float").unwrap(), Action::ToggleFloat);
+        assert_eq!(parse_action("promote_stack").unwrap(), Action::PromoteStack);
     }
 
     #[test]

@@ -251,6 +251,7 @@ fn handle_action(action: Action) {
                 }
                 Action::ToggleFloat => state.toggle_float(),
                 Action::Unstack => state.unstack_focused(),
+                Action::PromoteStack => state.promote_stack_focused(),
                 Action::ToggleSpecial(ref name) => state.toggle_special(name),
                 Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
@@ -333,6 +334,7 @@ gar.bind("mod+shift+q", "close")
 gar.bind("mod+e", "equalize")
 gar.bind("mod+shift+space", "toggle_float")
 gar.bind("mod+shift+u", "unstack")
+gar.bind("alt+shift+.", "promote_stack")
 
 -- Focus
 gar.bind("mod+h", "focus left")
@@ -506,6 +508,10 @@ fn process_ipc_command(
             }
             "unstack" => {
                 state.unstack_focused();
+                Response::ok_empty()
+            }
+            "promote_stack" => {
+                state.promote_stack_focused();
                 Response::ok_empty()
             }
             "workspace" => {

@@ -808,6 +808,34 @@ impl Node {
         }
     }
 
+    pub fn promote_stack_window(&mut self, window: WindowId) -> bool {
+        match self {
+            Node::Stack {
+                windows,
+                active,
+                previous,
+            } if windows.contains(&window) => {
+                let Some(idx) = windows.iter().position(|wid| *wid == window) else {
+                    return false;
+                };
+                if idx == 0 {
+                    *active = 0;
+                    return true;
+                }
+                let displaced = windows[0];
+                windows.remove(idx);
+                windows.insert(0, window);
+                *active = 0;
+                previous.swap(window, displaced);
+                true
+            }
+            Node::Internal { left, right, .. } => {
+                left.promote_stack_window(window) || right.promote_stack_window(window)
+            }
+            _ => false,
+        }
+    }
+
     pub fn make_stack_for_window(&mut self, window: WindowId) -> bool {
         self.make_stack_for_window_impl(window)
     }
@@ -1491,6 +1519,18 @@ mod tests {
         assert!(g2.y > g3.y);
         assert_eq!(g2.width, g3.width);
         assert_eq!(g2.height, g3.height);
+    }
+
+    #[test]
+    fn promote_stack_window_moves_target_to_top() {
+        let mut tree = Node::Stack {
+            windows: vec![1, 2, 3],
+            active: 2,
+            previous: Box::new(Node::Leaf { window: Some(3) }),
+        };
+
+        assert!(tree.promote_stack_window(3));
+        assert_eq!(tree.stack_info(3), Some((vec![3, 1, 2], 0)));
     }
 
     #[test]
