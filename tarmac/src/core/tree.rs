@@ -512,10 +512,24 @@ impl Node {
         from: WindowId,
         direction: Direction,
     ) -> Option<WindowId> {
-        let from_rect = geometries.iter().find(|(w, _)| *w == from)?.1;
+        Self::adjacent_candidates(geometries, from, direction)
+            .into_iter()
+            .next()
+    }
+
+    /// Find all windows in a direction from a source window, ordered from
+    /// best focus candidate to worst using the same scoring as find_adjacent.
+    pub fn adjacent_candidates(
+        geometries: &[(WindowId, Rect)],
+        from: WindowId,
+        direction: Direction,
+    ) -> Vec<WindowId> {
+        let Some((_, from_rect)) = geometries.iter().find(|(w, _)| *w == from) else {
+            return Vec::new();
+        };
         let (from_cx, from_cy) = from_rect.center();
 
-        geometries
+        let mut candidates: Vec<_> = geometries
             .iter()
             .filter(|(w, rect)| {
                 if *w == from {
@@ -529,14 +543,17 @@ impl Node {
                     Direction::Down => cy > from_cy,
                 }
             })
-            .min_by(|(_, a), (_, b)| {
-                let dist_a = Self::adjacent_distance(&from_rect, a, direction);
-                let dist_b = Self::adjacent_distance(&from_rect, b, direction);
-                dist_a
-                    .partial_cmp(&dist_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(w, _)| *w)
+            .collect();
+
+        candidates.sort_by(|(_, a), (_, b)| {
+            let dist_a = Self::adjacent_distance(&from_rect, a, direction);
+            let dist_b = Self::adjacent_distance(&from_rect, b, direction);
+            dist_a
+                .partial_cmp(&dist_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        candidates.into_iter().map(|(w, _)| *w).collect()
     }
 
     /// Distance metric for focus navigation that uses edge distances and
@@ -1306,6 +1323,24 @@ mod tests {
         assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Up), Some(2));
         assert_eq!(Node::find_adjacent(&geoms, 3, Direction::Right), Some(4));
         assert_eq!(Node::find_adjacent(&geoms, 4, Direction::Left), Some(3));
+    }
+
+    #[test]
+    fn adjacent_candidates_preserve_focus_priority_order() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        let geoms = tree.calculate_geometries(SCREEN);
+
+        assert_eq!(
+            Node::adjacent_candidates(&geoms, 1, Direction::Right),
+            vec![2, 3]
+        );
+        assert_eq!(
+            Node::adjacent_candidates(&geoms, 2, Direction::Left),
+            vec![1]
+        );
     }
 
     // --- Nearest to edge tests ---
