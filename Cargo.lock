@@ -624,7 +624,7 @@ dependencies = [
 
 [[package]]
 name = "tarmac"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "bitflags",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "tarmacctl"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "dirs",
  "serde",
