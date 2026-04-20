@@ -52,6 +52,7 @@ pub struct WmState {
     event_queue: Rc<RefCell<Vec<QueuedEvent>>>,
     ffm_cooldown_until: Option<std::time::Instant>,
     ffm_last_window: Option<WindowId>,
+    focus_return_memory: HashMap<(WindowId, super::tree::Direction), WindowId>,
     pending_internal_focus: Option<(WindowId, i32, std::time::Instant)>,
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
@@ -88,6 +89,7 @@ impl WmState {
             event_queue: Rc::new(RefCell::new(Vec::new())),
             ffm_cooldown_until: None,
             ffm_last_window: None,
+            focus_return_memory: HashMap::new(),
             pending_internal_focus: None,
             drag: None,
             focus_follows_mouse: true,
@@ -702,8 +704,16 @@ impl WmState {
                 false
             };
 
-            if !at_edge && let Some(target) = Node::find_adjacent(&geoms, from, direction) {
+            if !at_edge && let Some(default_target) = Node::find_adjacent(&geoms, from, direction) {
+                let candidates = Node::adjacent_candidates(&geoms, from, direction);
+                let target = self
+                    .focus_return_memory
+                    .get(&(from, direction))
+                    .copied()
+                    .filter(|remembered| candidates.contains(remembered))
+                    .unwrap_or(default_target);
                 self.focus_window(target);
+                self.remember_focus_transition(from, direction, target);
                 if self.mouse_follows_focus
                     && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
                 {
@@ -890,6 +900,32 @@ impl WmState {
         }
         self.ffm_cooldown_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+    }
+
+    fn opposite_direction(direction: super::tree::Direction) -> super::tree::Direction {
+        use super::tree::Direction;
+        match direction {
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+            Direction::Up => Direction::Down,
+            Direction::Down => Direction::Up,
+        }
+    }
+
+    fn remember_focus_transition(
+        &mut self,
+        from: WindowId,
+        direction: super::tree::Direction,
+        to: WindowId,
+    ) {
+        self.focus_return_memory.insert((from, direction), to);
+        self.focus_return_memory
+            .insert((to, Self::opposite_direction(direction)), from);
+    }
+
+    fn prune_focus_memory_for_window(&mut self, window: WindowId) {
+        self.focus_return_memory
+            .retain(|(from, _), to| *from != window && *to != window);
     }
 
     fn mark_internal_focus(&mut self, id: WindowId) {
@@ -2586,6 +2622,7 @@ impl WmState {
         self.borders.remove_border(id);
         self.registry.remove(id);
         self.ax_refs.remove(&id);
+        self.prune_focus_memory_for_window(id);
 
         // Find the workspace containing this window and remove from it
         if let Some(ws_idx) = self.workspaces.find_window(id) {
@@ -2641,6 +2678,7 @@ impl WmState {
         self.observers.remove(&pid);
         for w in &removed {
             self.ax_refs.remove(&w.id);
+            self.prune_focus_memory_for_window(w.id);
             // Find the workspace containing this window and remove from it
             if let Some(ws_idx) = self.workspaces.find_window(w.id) {
                 let ws = self.workspaces.get_mut(ws_idx);
@@ -2888,6 +2926,7 @@ impl WmState {
                     tracing::info!(id, app = app_name, "window destroyed -> retiling");
                     self.registry.remove(id);
                     self.ax_refs.remove(&id);
+                    self.prune_focus_memory_for_window(id);
                     // Find the workspace containing this window and remove from it
                     if let Some(ws_idx) = self.workspaces.find_window(id) {
                         let ws = self.workspaces.get_mut(ws_idx);
@@ -3366,6 +3405,43 @@ mod tests {
 
         state.focus_direction(Direction::Right);
         assert_eq!(state.active_workspace().focused, Some(3));
+    }
+
+    #[test]
+    fn focus_direction_returns_to_last_ambiguous_tile() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(1, None, screen);
+            ws.tree.insert_with_rect(2, Some(1), screen);
+            ws.tree.insert_with_rect(3, Some(2), screen);
+            ws.record_focus(3);
+        }
+
+        state.focus_direction(Direction::Left);
+        assert_eq!(state.active_workspace().focused, Some(1));
+
+        state.focus_direction(Direction::Right);
+        assert_eq!(state.active_workspace().focused, Some(3));
+
+        state.focus_direction(Direction::Up);
+        assert_eq!(state.active_workspace().focused, Some(2));
+
+        state.focus_direction(Direction::Left);
+        assert_eq!(state.active_workspace().focused, Some(1));
+
+        state.focus_direction(Direction::Right);
+        assert_eq!(state.active_workspace().focused, Some(2));
     }
 
     #[test]
