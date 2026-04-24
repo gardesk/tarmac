@@ -1,6 +1,7 @@
 use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr;
+use std::sync::OnceLock;
 
 use tarmac::config::document::{KeybindRow, ManagedConfigDocument, RuleRow, WorkspaceRow};
 use tarmac::config::lua::{LuaKeybind, SpecialWorkspaceConfig, WindowRule};
@@ -12,6 +13,10 @@ use tarmac::platform::hotkey::HotkeyManager;
 use tarmac::platform::permissions;
 use tarmac::platform::workspace_observer::WorkspacePollingObserver;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+
+static LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 thread_local! {
     static WORKSPACE_POLLER: RefCell<Option<WorkspacePollingObserver>> = const { RefCell::new(None) };
@@ -777,11 +782,41 @@ unsafe extern "C" {
 fn init_logging() {
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("tarmac=info"));
+    let stdout_layer = tracing_subscriber::fmt::layer().with_target(false);
 
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
+    if let Some(log_dir) = log_directory() {
+        if let Err(err) = std::fs::create_dir_all(&log_dir) {
+            eprintln!("tarmac: failed to create log directory {log_dir:?}: {err}");
+        } else {
+            let file_appender = tracing_appender::rolling::daily(&log_dir, "tarmac.log");
+            let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+            let _ = LOG_GUARD.set(guard);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_target(false)
+                .with_writer(non_blocking);
+
+            tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .init();
+            tracing::info!(path = %log_dir.join("tarmac.log").display(), "file logging enabled");
+            return;
+        }
+    }
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(stdout_layer)
         .init();
+}
+
+fn log_directory() -> Option<std::path::PathBuf> {
+    dirs::state_dir()
+        .map(|dir| dir.join("tarmac").join("logs"))
+        .or_else(|| dirs::data_local_dir().map(|dir| dir.join("tarmac").join("logs")))
+        .or_else(|| dirs::home_dir().map(|dir| dir.join(".config").join("tarmac").join("logs")))
 }
 
 fn init_config_dir() {
