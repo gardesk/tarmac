@@ -703,7 +703,7 @@ fn write_settings(out: &mut String, settings: &Settings) {
 
 fn write_workspace_defs(out: &mut String, defs: &[WorkspaceDefinition]) {
     let mut defs = defs.to_vec();
-    defs.sort_by(|a, b| a.id.to_string().cmp(&b.id.to_string()));
+    defs.sort_by_key(|a| a.id.to_string());
 
     let mut wrote_any = false;
     for def in defs {

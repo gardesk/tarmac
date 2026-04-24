@@ -546,8 +546,8 @@ impl Node {
             .collect();
 
         candidates.sort_by(|(_, a), (_, b)| {
-            let dist_a = Self::adjacent_distance(&from_rect, a, direction);
-            let dist_b = Self::adjacent_distance(&from_rect, b, direction);
+            let dist_a = Self::adjacent_distance(from_rect, a, direction);
+            let dist_b = Self::adjacent_distance(from_rect, b, direction);
             dist_a
                 .partial_cmp(&dist_b)
                 .unwrap_or(std::cmp::Ordering::Equal)
