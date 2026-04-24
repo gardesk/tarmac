@@ -74,6 +74,7 @@ unsafe extern "C" {
     ) -> OSStatus;
 
     fn UnregisterEventHotKey(hot_key: EventHotKeyRef) -> OSStatus;
+    fn RemoveEventHandler(handler_ref: EventHandlerRef) -> OSStatus;
 
     fn GetEventParameter(
         event: EventRef,
@@ -359,6 +360,9 @@ impl Drop for HotkeyManager {
     fn drop(&mut self) {
         for hk in self.hotkeys.values() {
             unsafe { UnregisterEventHotKey(hk.carbon_ref) };
+        }
+        if !self._handler_ref.is_null() {
+            unsafe { RemoveEventHandler(self._handler_ref) };
         }
         unsafe { drop(Box::from_raw(self._callback_ctx)) };
         tracing::info!("hotkey manager dropped");
