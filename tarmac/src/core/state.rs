@@ -970,27 +970,39 @@ impl WmState {
             return Some(id);
         }
 
-        for ws in self.workspaces.iter() {
-            for &wid in ws.focus_history.iter().rev() {
-                if self
-                    .registry
-                    .get(wid)
-                    .is_some_and(|window| window.app_pid == pid)
-                    && self.is_external_focus_candidate(wid)
-                {
-                    return Some(wid);
-                }
+        // Prefer windows on currently visible workspaces over hidden ones, and
+        // the focused monitor's workspace over other visible ones. Without this
+        // bias the resolver iterates by workspace index, so workspace 1 (index
+        // 0) acts as a magnet for any cross-workspace external focus event and
+        // can yank the WM back across workspaces it just left.
+        let active_ws = self
+            .monitors
+            .get(self.focused_monitor)
+            .map(|m| m.active_workspace);
+
+        if let Some(ws_idx) = active_ws
+            && let Some(wid) = self.find_pid_target_in_workspace(ws_idx, pid)
+        {
+            return Some(wid);
+        }
+
+        for (ws_idx, _) in self.workspaces.iter().enumerate() {
+            if Some(ws_idx) == active_ws {
+                continue;
+            }
+            if self.monitor_showing_workspace(ws_idx).is_none() {
+                continue;
+            }
+            if let Some(wid) = self.find_pid_target_in_workspace(ws_idx, pid) {
+                return Some(wid);
             }
         }
 
-        for ws in self.workspaces.iter() {
-            if let Some(wid) = ws.focused
-                && self
-                    .registry
-                    .get(wid)
-                    .is_some_and(|window| window.app_pid == pid)
-                && self.is_external_focus_candidate(wid)
-            {
+        for (ws_idx, _) in self.workspaces.iter().enumerate() {
+            if self.monitor_showing_workspace(ws_idx).is_some() {
+                continue;
+            }
+            if let Some(wid) = self.find_pid_target_in_workspace(ws_idx, pid) {
                 return Some(wid);
             }
         }
@@ -1000,6 +1012,21 @@ impl WmState {
             .filter(|window| window.app_pid == pid)
             .map(|window| window.id)
             .find(|id| self.is_external_focus_candidate(*id))
+    }
+
+    fn find_pid_target_in_workspace(&self, ws_idx: usize, pid: i32) -> Option<WindowId> {
+        let ws = self.workspaces.get(ws_idx);
+        for &wid in ws.focus_history.iter().rev() {
+            if self
+                .registry
+                .get(wid)
+                .is_some_and(|window| window.app_pid == pid)
+                && self.is_external_focus_candidate(wid)
+            {
+                return Some(wid);
+            }
+        }
+        None
     }
 
     fn adopt_external_focus(&mut self, id: WindowId) {
@@ -3693,6 +3720,52 @@ mod tests {
 
         assert_eq!(state.active_workspace().focused, Some(61));
         assert!(state.ffm_cooldown_until.is_none());
+    }
+
+    #[test]
+    fn external_app_focus_prefers_visible_workspace_over_workspace_one() {
+        // Regression: a stale focus_history entry for `pid` on workspace 1
+        // (index 0) used to win over a candidate on the currently visible
+        // workspace, yanking the WM back to ws1 in a feedback loop with the
+        // 50ms frontmost-app poll.
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(70, 13, "WezTerm"));
+        state.registry.add(tracked_window(71, 13, "WezTerm"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+
+        // Stale history on ws1 for pid 13.
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.record_focus(70);
+        }
+        // Currently visible ws2 also has a window for pid 13.
+        {
+            let ws = state.workspaces.get_mut(1);
+            ws.tree.insert_with_rect(71, None, screen);
+            ws.record_focus(71);
+        }
+
+        // Make ws2 the visible workspace.
+        state.monitors[0].active_workspace = 1;
+        state.sync_workspace_visibility();
+
+        state.adopt_external_app_focus(13, None);
+
+        // Resolver must prefer the ws2 window over the stale ws1 entry.
+        assert_eq!(state.monitors[0].active_workspace, 1);
+        assert_eq!(state.active_workspace().focused, Some(71));
     }
 
     #[test]
