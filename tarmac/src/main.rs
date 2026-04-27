@@ -108,10 +108,8 @@ fn main() {
                         y,
                         cmd_held: true,
                     } => state.begin_move_drag(x, y),
-                    MouseEvent::LeftDragged { x, y } => {
-                        if state.is_dragging() {
-                            state.update_drag(x, y);
-                        }
+                    MouseEvent::LeftDragged { x, y } if state.is_dragging() => {
+                        state.update_drag(x, y);
                     }
                     MouseEvent::LeftUp { .. } => state.end_drag(),
                     MouseEvent::RightDown {
@@ -119,10 +117,8 @@ fn main() {
                         y,
                         cmd_held: true,
                     } => state.begin_resize_drag(x, y),
-                    MouseEvent::RightDragged { x, y } => {
-                        if state.is_dragging() {
-                            state.update_drag(x, y);
-                        }
+                    MouseEvent::RightDragged { x, y } if state.is_dragging() => {
+                        state.update_drag(x, y);
                     }
                     MouseEvent::RightUp { .. } => state.end_drag(),
                     _ => {}
