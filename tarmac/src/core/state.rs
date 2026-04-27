@@ -723,7 +723,7 @@ impl WmState {
                     .filter(|remembered| candidates.contains(remembered))
                     .unwrap_or(default_target);
                 self.focus_window(target);
-                self.remember_focus_transition(from, direction, target);
+                self.remember_focus_transition(from, direction, target, &geoms);
                 if self.mouse_follows_focus
                     && let Some((_, rect)) = geoms.iter().find(|(id, _)| *id == target)
                 {
@@ -927,10 +927,41 @@ impl WmState {
         from: WindowId,
         direction: super::tree::Direction,
         to: WindowId,
+        geoms: &[(WindowId, super::tree::Rect)],
     ) {
         self.focus_return_memory.insert((from, direction), to);
-        self.focus_return_memory
-            .insert((to, Self::opposite_direction(direction)), from);
+
+        // Only memoize the reverse traversal when `from` and `to` are
+        // axis-aligned along the navigation direction. A diagonal jump
+        // (e.g. Up from a tall left tile that lands on the upper-right
+        // tile because nothing is directly above) must not poison the
+        // opposite axis's memory, otherwise pressing Down from the
+        // upper-right tile would route back to the left column instead
+        // of dropping to the lower-right tile.
+        let from_rect = geoms.iter().find(|(w, _)| *w == from).map(|(_, r)| r);
+        let to_rect = geoms.iter().find(|(w, _)| *w == to).map(|(_, r)| r);
+        if let (Some(a), Some(b)) = (from_rect, to_rect)
+            && Self::has_perpendicular_overlap(a, b, direction)
+        {
+            self.focus_return_memory
+                .insert((to, Self::opposite_direction(direction)), from);
+        }
+    }
+
+    fn has_perpendicular_overlap(
+        a: &super::tree::Rect,
+        b: &super::tree::Rect,
+        direction: super::tree::Direction,
+    ) -> bool {
+        use super::tree::Direction;
+        match direction {
+            Direction::Left | Direction::Right => {
+                a.y.max(b.y) < (a.y + a.height).min(b.y + b.height)
+            }
+            Direction::Up | Direction::Down => {
+                a.x.max(b.x) < (a.x + a.width).min(b.x + b.width)
+            }
+        }
     }
 
     fn prune_focus_memory_for_window(&mut self, window: WindowId) {
@@ -3563,6 +3594,63 @@ mod tests {
 
         state.focus_direction(Direction::Right);
         assert_eq!(state.active_workspace().focused, Some(2));
+    }
+
+    /// Regression: when a directional traversal jumps diagonally (the
+    /// only candidate in `direction` has no perpendicular-axis overlap
+    /// with the source), the bidirectional focus memory must NOT
+    /// memoize the inverse — otherwise a later press in the opposite
+    /// direction routes to the perpendicular tile instead of the
+    /// natural axis-aligned target. Concretely: with a tall left tile
+    /// (1), upper-right tile (2), and lower-right tile (3), an Up
+    /// transition from 1 → 2 is diagonal (no horizontal overlap). Down
+    /// from 2 must drop to 3, not jump back to 1.
+    #[test]
+    fn diagonal_transition_does_not_poison_opposite_axis_memory() {
+        let mut state = WmState::new();
+        // Geoms emulate: 1 tall on the left, 2 upper-right, 3 lower-right.
+        let geoms = vec![
+            (1u32, Rect::new(0.0, 0.0, 500.0, 1000.0)),
+            (2u32, Rect::new(500.0, 0.0, 500.0, 500.0)),
+            (3u32, Rect::new(500.0, 500.0, 500.0, 500.0)),
+        ];
+
+        // Simulate the diagonal Up transition 1 → 2.
+        state.remember_focus_transition(1, Direction::Up, 2, &geoms);
+
+        // Forward memory is recorded.
+        assert_eq!(
+            state.focus_return_memory.get(&(1, Direction::Up)).copied(),
+            Some(2)
+        );
+        // Inverse memory MUST NOT be recorded — 1 and 2 have no
+        // horizontal overlap, so Down from 2 should follow the natural
+        // axis-aligned default (3), not jump to 1.
+        assert_eq!(state.focus_return_memory.get(&(2, Direction::Down)), None);
+    }
+
+    /// Sanity check the inverse-memory write that the above test
+    /// suppresses: an axis-aligned Left transition from 2 → 1 must
+    /// still record the (1, Right) → 2 return path so that pressing
+    /// Right after Left round-trips back to 2.
+    #[test]
+    fn axis_aligned_transition_records_inverse_memory() {
+        let mut state = WmState::new();
+        let geoms = vec![
+            (1u32, Rect::new(0.0, 0.0, 500.0, 500.0)),
+            (2u32, Rect::new(500.0, 0.0, 500.0, 500.0)),
+        ];
+
+        state.remember_focus_transition(2, Direction::Left, 1, &geoms);
+
+        assert_eq!(
+            state.focus_return_memory.get(&(2, Direction::Left)).copied(),
+            Some(1)
+        );
+        assert_eq!(
+            state.focus_return_memory.get(&(1, Direction::Right)).copied(),
+            Some(2)
+        );
     }
 
     #[test]
