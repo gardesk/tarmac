@@ -949,7 +949,8 @@ impl WmState {
 
     fn prune_recent_internal_focus(&mut self) {
         let now = std::time::Instant::now();
-        self.recent_internal_focus.retain(|(_, _, until)| now < *until);
+        self.recent_internal_focus
+            .retain(|(_, _, until)| now < *until);
     }
 
     fn mark_internal_focus(&mut self, id: WindowId) {
@@ -981,8 +982,7 @@ impl WmState {
     /// How long after a workspace switch to drop external-focus callbacks.
     /// Covers the apply_layout 50ms sleep, AX activation propagation, and
     /// several frontmost-app poll cycles before the OS state settles.
-    const WORKSPACE_SWITCH_SILENCE: std::time::Duration =
-        std::time::Duration::from_millis(400);
+    const WORKSPACE_SWITCH_SILENCE: std::time::Duration = std::time::Duration::from_millis(400);
 
     fn arm_workspace_switch_silence(&mut self) {
         self.workspace_switch_silence_until =
@@ -1077,18 +1077,18 @@ impl WmState {
     }
 
     fn find_pid_target_in_workspace(&self, ws_idx: usize, pid: i32) -> Option<WindowId> {
-        let ws = self.workspaces.get(ws_idx);
-        for &wid in ws.focus_history.iter().rev() {
-            if self
-                .registry
-                .get(wid)
-                .is_some_and(|window| window.app_pid == pid)
-                && self.is_external_focus_candidate(wid)
-            {
-                return Some(wid);
-            }
-        }
-        None
+        self.workspaces
+            .get(ws_idx)
+            .focus_history
+            .iter()
+            .rev()
+            .find(|&&wid| {
+                self.registry
+                    .get(wid)
+                    .is_some_and(|window| window.app_pid == pid)
+                    && self.is_external_focus_candidate(wid)
+            })
+            .copied()
     }
 
     fn adopt_external_focus(&mut self, id: WindowId) {
