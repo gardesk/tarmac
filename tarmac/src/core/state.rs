@@ -53,7 +53,12 @@ pub struct WmState {
     ffm_cooldown_until: Option<std::time::Instant>,
     ffm_last_window: Option<WindowId>,
     focus_return_memory: HashMap<(WindowId, super::tree::Direction), WindowId>,
-    pending_internal_focus: Option<(WindowId, i32, std::time::Instant)>,
+    /// Recent intentional focus activations (window id, app pid, expiry).
+    /// Acts as a small ring so a burst of internal activations (e.g. a
+    /// workspace switch followed by a follow-up FFM focus) can all be
+    /// matched against the lagging `NSWorkspace.frontmostApplication` poll
+    /// without the most recent entry clobbering older ones.
+    recent_internal_focus: Vec<(WindowId, i32, std::time::Instant)>,
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
@@ -90,7 +95,7 @@ impl WmState {
             ffm_cooldown_until: None,
             ffm_last_window: None,
             focus_return_memory: HashMap::new(),
-            pending_internal_focus: None,
+            recent_internal_focus: Vec::new(),
             drag: None,
             focus_follows_mouse: true,
             mouse_follows_focus: true,
@@ -928,30 +933,60 @@ impl WmState {
             .retain(|(from, _), to| *from != window && *to != window);
     }
 
+    /// Cap on `recent_internal_focus` ring size. Bounds memory and bounds the
+    /// linear scan in `should_ignore_external_focus`. A workspace switch
+    /// produces ~1 internal focus per visible window, so 16 is plenty.
+    const RECENT_FOCUS_CAPACITY: usize = 16;
+    /// How long an entry in `recent_internal_focus` shadows incoming external
+    /// focus events. Long enough to cover apply_layout's 50ms sleep plus AX
+    /// activation propagation and at least one frontmost-app poll cycle.
+    const RECENT_FOCUS_TTL: std::time::Duration = std::time::Duration::from_millis(600);
+
+    fn prune_recent_internal_focus(&mut self) {
+        let now = std::time::Instant::now();
+        self.recent_internal_focus.retain(|(_, _, until)| now < *until);
+    }
+
     fn mark_internal_focus(&mut self, id: WindowId) {
         let Some(window) = self.registry.get(id) else {
             return;
         };
-        self.pending_internal_focus = Some((
+        let pid = window.app_pid;
+        self.prune_recent_internal_focus();
+        // Coalesce: if the same window is already pending, just refresh its
+        // expiry rather than appending a duplicate.
+        if let Some(entry) = self
+            .recent_internal_focus
+            .iter_mut()
+            .find(|(eid, epid, _)| *eid == id && *epid == pid)
+        {
+            entry.2 = std::time::Instant::now() + Self::RECENT_FOCUS_TTL;
+            return;
+        }
+        if self.recent_internal_focus.len() >= Self::RECENT_FOCUS_CAPACITY {
+            self.recent_internal_focus.remove(0);
+        }
+        self.recent_internal_focus.push((
             id,
-            window.app_pid,
-            std::time::Instant::now() + std::time::Duration::from_millis(400),
+            pid,
+            std::time::Instant::now() + Self::RECENT_FOCUS_TTL,
         ));
     }
 
     fn should_ignore_external_focus(&mut self, pid: i32, requested: Option<WindowId>) -> bool {
-        let Some((pending_id, pending_pid, until)) = self.pending_internal_focus else {
-            return false;
-        };
-        if std::time::Instant::now() >= until {
-            self.pending_internal_focus = None;
+        self.prune_recent_internal_focus();
+        if self.recent_internal_focus.is_empty() {
             return false;
         }
-
         match requested {
-            Some(id) if id == pending_id => true,
-            None if pid == pending_pid => true,
-            _ => false,
+            Some(id) => self
+                .recent_internal_focus
+                .iter()
+                .any(|(eid, _, _)| *eid == id),
+            None => self
+                .recent_internal_focus
+                .iter()
+                .any(|(_, epid, _)| *epid == pid),
         }
     }
 
@@ -3688,6 +3723,45 @@ mod tests {
             state.active_workspace().tree.stack_info(51),
             Some((vec![50, 51], 1))
         );
+    }
+
+    #[test]
+    fn recent_internal_focus_ignores_lagging_poll_for_prior_activation() {
+        // Regression: the single-slot guard let the *previous* activation's
+        // pid leak through once a newer activation overwrote the slot. With
+        // a ring, a frontmost-app poll arriving for the older pid should
+        // still be recognized as self-initiated.
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(80, 14, "AppA"));
+        state.registry.add(tracked_window(81, 15, "AppB"));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(80, None, screen);
+            ws.tree.insert_with_rect(81, Some(80), screen);
+            ws.record_focus(80);
+        }
+
+        // Two intentional activations in quick succession — single-slot would
+        // forget the first one.
+        state.focus_window(80);
+        state.focus_window(81);
+
+        // A lagging poll arrives for the older activation's pid.
+        assert!(state.should_ignore_external_focus(14, None));
+        // And for the newer one.
+        assert!(state.should_ignore_external_focus(15, None));
+        // Unrelated pid still passes through.
+        assert!(!state.should_ignore_external_focus(99, None));
     }
 
     #[test]
