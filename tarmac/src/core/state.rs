@@ -958,9 +958,7 @@ impl WmState {
             Direction::Left | Direction::Right => {
                 a.y.max(b.y) < (a.y + a.height).min(b.y + b.height)
             }
-            Direction::Up | Direction::Down => {
-                a.x.max(b.x) < (a.x + a.width).min(b.x + b.width)
-            }
+            Direction::Up | Direction::Down => a.x.max(b.x) < (a.x + a.width).min(b.x + b.width),
         }
     }
 
@@ -3644,11 +3642,17 @@ mod tests {
         state.remember_focus_transition(2, Direction::Left, 1, &geoms);
 
         assert_eq!(
-            state.focus_return_memory.get(&(2, Direction::Left)).copied(),
+            state
+                .focus_return_memory
+                .get(&(2, Direction::Left))
+                .copied(),
             Some(1)
         );
         assert_eq!(
-            state.focus_return_memory.get(&(1, Direction::Right)).copied(),
+            state
+                .focus_return_memory
+                .get(&(1, Direction::Right))
+                .copied(),
             Some(2)
         );
     }
