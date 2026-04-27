@@ -59,6 +59,10 @@ pub struct WmState {
     /// matched against the lagging `NSWorkspace.frontmostApplication` poll
     /// without the most recent entry clobbering older ones.
     recent_internal_focus: Vec<(WindowId, i32, std::time::Instant)>,
+    /// While set, drop incoming external-focus callbacks unconditionally.
+    /// Armed on workspace switch to absorb the storm of frontmost-app
+    /// transitions macOS reports while AX activations propagate.
+    workspace_switch_silence_until: Option<std::time::Instant>,
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
@@ -96,6 +100,7 @@ impl WmState {
             ffm_last_window: None,
             focus_return_memory: HashMap::new(),
             recent_internal_focus: Vec::new(),
+            workspace_switch_silence_until: None,
             drag: None,
             focus_follows_mouse: true,
             mouse_follows_focus: true,
@@ -973,6 +978,28 @@ impl WmState {
         ));
     }
 
+    /// How long after a workspace switch to drop external-focus callbacks.
+    /// Covers the apply_layout 50ms sleep, AX activation propagation, and
+    /// several frontmost-app poll cycles before the OS state settles.
+    const WORKSPACE_SWITCH_SILENCE: std::time::Duration =
+        std::time::Duration::from_millis(400);
+
+    fn arm_workspace_switch_silence(&mut self) {
+        self.workspace_switch_silence_until =
+            Some(std::time::Instant::now() + Self::WORKSPACE_SWITCH_SILENCE);
+    }
+
+    fn is_in_workspace_switch_silence(&mut self) -> bool {
+        let Some(until) = self.workspace_switch_silence_until else {
+            return false;
+        };
+        if std::time::Instant::now() >= until {
+            self.workspace_switch_silence_until = None;
+            return false;
+        }
+        true
+    }
+
     fn should_ignore_external_focus(&mut self, pid: i32, requested: Option<WindowId>) -> bool {
         self.prune_recent_internal_focus();
         if self.recent_internal_focus.is_empty() {
@@ -1109,6 +1136,9 @@ impl WmState {
     }
 
     pub fn adopt_external_app_focus(&mut self, pid: i32, requested: Option<WindowId>) {
+        if self.is_in_workspace_switch_silence() {
+            return;
+        }
         if self.should_ignore_external_focus(pid, requested) {
             return;
         }
@@ -1619,6 +1649,13 @@ impl WmState {
         }
 
         tracing::info!(from = current_idx + 1, to = %target, "switching workspace");
+
+        // Drop external-focus callbacks for a beat. While AX activations
+        // propagate and apply_layout settles, NSWorkspace.frontmostApplication
+        // can flip back through the previously-focused app and the 50ms poll
+        // would otherwise interpret it as an external focus event and yank us
+        // back across workspaces.
+        self.arm_workspace_switch_silence();
 
         // Case 1: Target workspace is already visible on some monitor → jump focus
         if let Some(other_mi) = self.monitor_showing_workspace(target_idx) {
@@ -3723,6 +3760,47 @@ mod tests {
             state.active_workspace().tree.stack_info(51),
             Some((vec![50, 51], 1))
         );
+    }
+
+    #[test]
+    fn workspace_switch_silences_external_app_focus_callback() {
+        // Regression: a frontmost-app poll that arrives mid workspace switch
+        // (with a stale pid that doesn't match the ring) used to switch us
+        // back across workspaces, kicking off the rapid-cycling loop.
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(90, 21, "AppA"));
+        state.registry.add(tracked_window(91, 22, "AppB"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(90, None, screen);
+            ws.record_focus(90);
+        }
+        {
+            let ws = state.workspaces.get_mut(1);
+            ws.tree.insert_with_rect(91, None, screen);
+            ws.record_focus(91);
+        }
+        state.sync_workspace_visibility();
+
+        state.switch_workspace(&WorkspaceTarget::Numbered(2));
+        assert_eq!(state.monitors[0].active_workspace, 1);
+
+        // Lagging poll for the previous workspace's frontmost app — must not
+        // yank us back to ws1 while the silence latch is armed.
+        state.adopt_external_app_focus(21, None);
+        assert_eq!(state.monitors[0].active_workspace, 1);
     }
 
     #[test]
