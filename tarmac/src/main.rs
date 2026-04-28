@@ -428,6 +428,7 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
     WM_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.process_events();
+            state.borders.health_check();
         }
     });
 

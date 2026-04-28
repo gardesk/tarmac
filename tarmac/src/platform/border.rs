@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 /// RGBA color for border configuration.
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +69,21 @@ pub struct BorderManager {
     pub unfocused_color: BorderColor,
     pub radius: f64,
     child: Option<Child>,
+    /// Timestamps of recent automatic respawns (oldest first). Used to
+    /// rate-limit the watchdog so a permanently-broken ers backs off
+    /// instead of fork-bombing the system.
+    recent_restarts: Vec<Instant>,
+    /// When set, suppress further respawn attempts until this time.
+    backoff_until: Option<Instant>,
+    /// Last time `health_check` ran try_wait on the child. Throttles the
+    /// poll to ~1Hz from the 50ms run-loop tick.
+    last_health_check: Option<Instant>,
 }
+
+const RESTART_WINDOW: Duration = Duration::from_secs(60);
+const RESTART_BUDGET: usize = 5;
+const BACKOFF_DURATION: Duration = Duration::from_secs(300);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 
 impl BorderManager {
     #[allow(clippy::new_without_default)]
@@ -79,6 +94,9 @@ impl BorderManager {
             unfocused_color: BorderColor::from_hex("#2d2d2d"),
             radius: 10.0,
             child: None,
+            recent_restarts: Vec::new(),
+            backoff_until: None,
+            last_health_check: None,
         }
     }
 
@@ -139,8 +157,81 @@ impl BorderManager {
         self.child = None;
     }
 
-    /// Restart ers with current settings (used on config reload).
+    /// Restart ers with current settings (used on config reload). Resets
+    /// the watchdog's backoff so a deliberate user reload always tries
+    /// to spawn fresh.
     pub fn restart(&mut self) {
+        self.recent_restarts.clear();
+        self.backoff_until = None;
+        self.spawn();
+    }
+
+    /// Periodically reap the ers child and respawn it if it died, so a
+    /// crash inside the renderer doesn't strand tarmac with no borders.
+    /// Throttled internally so callers can invoke from the run-loop tick.
+    /// Restarts are budgeted: more than `RESTART_BUDGET` restarts inside
+    /// `RESTART_WINDOW` triggers a `BACKOFF_DURATION` cooldown, after
+    /// which the watchdog tries once more.
+    pub fn health_check(&mut self) {
+        if !self.is_enabled() {
+            return;
+        }
+        let now = Instant::now();
+        if let Some(prev) = self.last_health_check
+            && now.duration_since(prev) < HEALTH_CHECK_INTERVAL
+        {
+            return;
+        }
+        self.last_health_check = Some(now);
+
+        let died = match self.child.as_mut() {
+            Some(child) => match child.try_wait() {
+                Ok(Some(status)) => Some(status),
+                Ok(None) => None,
+                Err(e) => {
+                    tracing::warn!(err = %e, "ers try_wait failed");
+                    None
+                }
+            },
+            None => None,
+        };
+
+        let Some(status) = died else {
+            return;
+        };
+        // Drop the dead handle so kill()/spawn() don't try to wait on it
+        // again.
+        self.child = None;
+
+        if let Some(until) = self.backoff_until
+            && now < until
+        {
+            tracing::warn!(
+                ?status,
+                remaining_secs = (until - now).as_secs(),
+                "ers exited; respawn suppressed by backoff"
+            );
+            return;
+        }
+        self.backoff_until = None;
+
+        // Sliding-window rate limit.
+        let cutoff = now - RESTART_WINDOW;
+        self.recent_restarts.retain(|t| *t >= cutoff);
+        if self.recent_restarts.len() >= RESTART_BUDGET {
+            tracing::error!(
+                ?status,
+                budget = RESTART_BUDGET,
+                window_secs = RESTART_WINDOW.as_secs(),
+                "ers crashed too many times; backing off"
+            );
+            self.backoff_until = Some(now + BACKOFF_DURATION);
+            self.recent_restarts.clear();
+            return;
+        }
+
+        tracing::warn!(?status, "ers exited unexpectedly; respawning");
+        self.recent_restarts.push(now);
         self.spawn();
     }
 
