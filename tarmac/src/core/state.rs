@@ -335,8 +335,8 @@ impl WmState {
         for w in &windows {
             let cx = w.x + w.width / 2.0;
             let cy = w.y + w.height / 2.0;
-            let mi = super::monitor::index_at_point(&self.monitors, cx, cy)
-                .unwrap_or(original_focused);
+            let mi =
+                super::monitor::index_at_point(&self.monitors, cx, cy).unwrap_or(original_focused);
             self.focused_monitor = mi;
             self.add_window_to_active(
                 &w.id,
@@ -1344,9 +1344,7 @@ impl WmState {
                     crate::platform::workspace_observer::frontmost_regular_application_pid()
                         == Some(pid)
                 });
-                if !app_already_frontmost
-                    && let Some(pid) = target_pid
-                {
+                if !app_already_frontmost && let Some(pid) = target_pid {
                     let app_ref =
                         unsafe { objc2_application_services::AXUIElement::new_application(pid) };
                     let frontmost_key =
@@ -3398,11 +3396,7 @@ fn should_auto_float(subrole: &str, ax_ref: &AXUIElement) -> bool {
 
     if matches!(
         subrole,
-        "AXDialog"
-            | "AXSystemDialog"
-            | "AXSheet"
-            | "AXFloatingWindow"
-            | "AXSystemFloatingWindow"
+        "AXDialog" | "AXSystemDialog" | "AXSheet" | "AXFloatingWindow" | "AXSystemFloatingWindow"
     ) {
         return true;
     }
