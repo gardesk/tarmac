@@ -2915,7 +2915,7 @@ impl WmState {
             }
         }
 
-        let should_float = rule_float.unwrap_or_else(|| should_auto_float(subrole, width, height));
+        let should_float = rule_float.unwrap_or_else(|| should_auto_float(subrole, &ax_ref));
 
         self.registry.add(WindowState {
             id: *id,
@@ -3225,11 +3225,30 @@ impl WmState {
 }
 
 /// Check if a window should automatically float based on its subrole and size.
-fn should_auto_float(subrole: &str, _width: f64, _height: f64) -> bool {
-    matches!(
+fn should_auto_float(subrole: &str, ax_ref: &AXUIElement) -> bool {
+    use crate::platform::accessibility::ax_get_bool;
+    use objc2_core_foundation::CFString;
+
+    if matches!(
         subrole,
-        "AXDialog" | "AXSheet" | "AXFloatingWindow" | "AXSystemFloatingWindow"
-    )
+        "AXDialog"
+            | "AXSystemDialog"
+            | "AXSheet"
+            | "AXFloatingWindow"
+            | "AXSystemFloatingWindow"
+    ) {
+        return true;
+    }
+
+    // Many "modal-feeling" NSWindows ship with subrole=AXStandardWindow but
+    // mark AXModal=true. Treat those as floats so save/confirm dialogs and
+    // app-defined modals don't get tiled alongside their parent window.
+    let modal_attr = CFString::from_static_str("AXModal");
+    if ax_get_bool(ax_ref, &modal_attr).unwrap_or(false) {
+        return true;
+    }
+
+    false
 }
 
 /// Warp the mouse cursor to the center of a rect.
