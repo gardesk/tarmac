@@ -61,9 +61,6 @@ impl Rect {
     }
 }
 
-const STACK_REVEAL_OFFSET_X: f64 = 4.0;
-const STACK_REVEAL_OFFSET_Y: f64 = 4.0;
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum Node {
     Internal {
@@ -89,12 +86,6 @@ impl Default for Node {
 }
 
 impl Node {
-    fn stack_reveal_direction(windows_len: usize, active: usize) -> f64 {
-        let left_count = active;
-        let right_count = windows_len.saturating_sub(active + 1);
-        if left_count > right_count { -1.0 } else { 1.0 }
-    }
-
     pub fn empty() -> Self {
         Node::Leaf { window: None }
     }
@@ -317,35 +308,17 @@ impl Node {
         match self {
             Node::Leaf { window: Some(w) } => vec![(*w, padded)],
             Node::Leaf { window: None } => vec![],
-            Node::Stack {
-                windows, active, ..
-            } => {
-                let active_window = windows.get(*active).copied();
-                let x_direction = Self::stack_reveal_direction(windows.len(), *active);
-                let mut geoms = Vec::with_capacity(windows.len());
-                let mut depth = 0usize;
-                for (idx, wid) in windows.iter().enumerate() {
-                    if Some(*wid) == active_window {
-                        continue;
-                    }
-                    depth += 1;
-                    geoms.push((
-                        *wid,
-                        Rect::new(
-                            padded.x + x_direction * STACK_REVEAL_OFFSET_X * depth as f64,
-                            padded.y + STACK_REVEAL_OFFSET_Y * depth as f64,
-                            padded.width,
-                            padded.height,
-                        ),
-                    ));
-                    if idx == *active {
-                        depth = depth.saturating_sub(1);
-                    }
-                }
-                if let Some(wid) = active_window {
-                    geoms.push((wid, padded));
-                }
-                geoms
+            Node::Stack { windows, .. } => {
+                // All stack members share the tile's full rect. Non-active
+                // windows sit fully behind the active in z-order. The
+                // previous "Slack-style reveal" offset (origin += depth *
+                // STACK_REVEAL_OFFSET) leaked: the depth counter never
+                // reset past the active member, so windows iterated after
+                // the active in insertion order accumulated progressively
+                // larger offsets and visibly drifted away from the tile
+                // (user-reported as "the windows are not sized and
+                // positioned as if they are members of the stack").
+                windows.iter().map(|wid| (*wid, padded)).collect()
             }
             Node::Internal {
                 split,
@@ -838,6 +811,35 @@ impl Node {
 
     pub fn make_stack_for_window(&mut self, window: WindowId) -> bool {
         self.make_stack_for_window_impl(window)
+    }
+
+    /// Replace the entire tree with a single root-level Stack containing
+    /// every window currently in the tree. Used as overflow remediation
+    /// during initial discovery: if even one window can't fit its tile in
+    /// the BSP layout we'd otherwise produce, just stack everything into
+    /// one tile so the user gets a clean, navigable layout instead of a
+    /// staircase with a partial stack at the bottom.
+    pub fn collapse_to_root_stack(&mut self, active_window: WindowId) -> bool {
+        match self {
+            Node::Internal { .. } => {
+                let previous = self.clone();
+                let windows = self.windows();
+                if windows.is_empty() {
+                    return false;
+                }
+                let active = windows
+                    .iter()
+                    .position(|wid| *wid == active_window)
+                    .unwrap_or(0);
+                *self = Node::Stack {
+                    windows,
+                    active,
+                    previous: Box::new(previous),
+                };
+                true
+            }
+            _ => false,
+        }
     }
 
     fn make_stack_for_window_impl(&mut self, window: WindowId) -> bool {
@@ -1488,37 +1490,27 @@ mod tests {
     }
 
     #[test]
-    fn stacked_render_geometries_reveal_background_windows_to_the_right_when_right_biased() {
-        let tree = Node::Stack {
-            windows: vec![1, 2, 3],
-            active: 0,
-            previous: Box::new(Node::Leaf { window: Some(1) }),
-        };
-        let geoms = tree.calculate_geometries(SCREEN);
-        let g1 = geoms.iter().find(|(wid, _)| *wid == 1).unwrap().1;
-        let g2 = geoms.iter().find(|(wid, _)| *wid == 2).unwrap().1;
-
-        assert!(g2.x > g1.x);
-        assert!(g2.y > g1.y);
-        assert_eq!(g2.width, g1.width);
-        assert_eq!(g2.height, g1.height);
-    }
-
-    #[test]
-    fn stacked_render_geometries_reveal_background_windows_to_the_left_when_left_biased() {
-        let tree = Node::Stack {
-            windows: vec![1, 2, 3],
-            active: 2,
-            previous: Box::new(Node::Leaf { window: Some(3) }),
-        };
-        let geoms = tree.calculate_geometries(SCREEN);
-        let g2 = geoms.iter().find(|(wid, _)| *wid == 2).unwrap().1;
-        let g3 = geoms.iter().find(|(wid, _)| *wid == 3).unwrap().1;
-
-        assert!(g2.x < g3.x);
-        assert!(g2.y > g3.y);
-        assert_eq!(g2.width, g3.width);
-        assert_eq!(g2.height, g3.height);
+    fn stacked_render_geometries_share_the_tile_rect() {
+        // All stack members occupy the full tile rect, regardless of
+        // which is active. Non-active windows sit fully behind the
+        // active in z-order — no Slack-style peek offset (removed:
+        // its depth counter accumulated past the active position
+        // and produced visibly drifting non-active windows).
+        for active in 0..3 {
+            let tree = Node::Stack {
+                windows: vec![1, 2, 3],
+                active,
+                previous: Box::new(Node::Leaf { window: Some(1) }),
+            };
+            let geoms = tree.calculate_geometries(SCREEN);
+            assert_eq!(geoms.len(), 3);
+            for (_, rect) in &geoms {
+                assert_eq!(rect.x, SCREEN.x);
+                assert_eq!(rect.y, SCREEN.y);
+                assert_eq!(rect.width, SCREEN.width);
+                assert_eq!(rect.height, SCREEN.height);
+            }
+        }
     }
 
     #[test]
