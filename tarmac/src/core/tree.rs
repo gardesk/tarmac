@@ -308,7 +308,9 @@ impl Node {
         match self {
             Node::Leaf { window: Some(w) } => vec![(*w, padded)],
             Node::Leaf { window: None } => vec![],
-            Node::Stack { windows, .. } => {
+            Node::Stack {
+                windows, active, ..
+            } => {
                 // All stack members share the tile's full rect. Non-active
                 // windows sit fully behind the active in z-order. The
                 // previous "Slack-style reveal" offset (origin += depth *
@@ -318,7 +320,27 @@ impl Node {
                 // larger offsets and visibly drifted away from the tile
                 // (user-reported as "the windows are not sized and
                 // positioned as if they are members of the stack").
-                windows.iter().map(|wid| (*wid, padded)).collect()
+                //
+                // Order matters here even though every member shares the
+                // same rect: apply_layout walks this vec and issues AX
+                // position writes per element, and macOS z-orders whichever
+                // window was positioned last to the top of its level.
+                // Iterating in insertion order would make the last-inserted
+                // member visible regardless of `active`. Putting the active
+                // member last keeps it on top — including when focus leaves
+                // the stack to another monitor and apply_layout re-runs on
+                // the source workspace (visible artifact: the "wrong" stack
+                // member jumps to the top after mod+arrow off the stack).
+                let mut ordered: Vec<(WindowId, Rect)> = Vec::with_capacity(windows.len());
+                for (i, wid) in windows.iter().enumerate() {
+                    if i != *active {
+                        ordered.push((*wid, padded));
+                    }
+                }
+                if let Some(active_wid) = windows.get(*active) {
+                    ordered.push((*active_wid, padded));
+                }
+                ordered
             }
             Node::Internal {
                 split,
