@@ -1296,17 +1296,30 @@ impl WmState {
                 // 4. Set AXMain on window (makes it the key window)
                 // 5. Set AXFocused on window (tells AX this is focused)
                 //
-                // Setting AXFrontmost on the app AND calling activate_app
-                // covers both same-app (WezTerm→WezTerm) and cross-app cases.
-                if let Some(w) = self.registry.get(id) {
-                    let app_ref = unsafe {
-                        objc2_application_services::AXUIElement::new_application(w.app_pid)
-                    };
+                // Steps 1+2 are skipped when the target's app is already
+                // frontmost: NSRunningApplication.activate reshuffles every
+                // window of the app globally (a documented macOS quirk),
+                // which jarringly reorders stack siblings on monitors the
+                // user isn't even interacting with — e.g. focusing one
+                // Ghostty on monitor B flips which Ghostty is on top of a
+                // stack on monitor A. AXRaise on the specific target is
+                // per-window and doesn't shuffle siblings, so it's safe to
+                // keep.
+                let target_pid = self.registry.get(id).map(|w| w.app_pid);
+                let app_already_frontmost = target_pid.is_some_and(|pid| {
+                    crate::platform::workspace_observer::frontmost_regular_application_pid()
+                        == Some(pid)
+                });
+                if !app_already_frontmost
+                    && let Some(pid) = target_pid
+                {
+                    let app_ref =
+                        unsafe { objc2_application_services::AXUIElement::new_application(pid) };
                     let frontmost_key =
                         objc2_core_foundation::CFString::from_static_str("AXFrontmost");
                     let _ =
                         crate::platform::accessibility::ax_set_bool(&app_ref, &frontmost_key, true);
-                    crate::platform::application::activate_app(w.app_pid);
+                    crate::platform::application::activate_app(pid);
                 }
                 let _ = ax_perform_action(ax_ref, "AXRaise");
                 let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");

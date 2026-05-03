@@ -139,7 +139,7 @@ fn current_regular_pids() -> HashSet<i32> {
     current_pids
 }
 
-fn frontmost_regular_application_pid() -> Option<i32> {
+pub fn frontmost_regular_application_pid() -> Option<i32> {
     let workspace = NSWorkspace::sharedWorkspace();
     let app = workspace.frontmostApplication()?;
     (app.activationPolicy() == NSApplicationActivationPolicy::Regular)
