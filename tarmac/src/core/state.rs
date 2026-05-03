@@ -318,7 +318,26 @@ impl WmState {
         );
 
         let windows = discover_all_windows();
+        // Route each discovered window to the workspace active on the
+        // monitor it physically lives on, not always the cursor's
+        // monitor's workspace. add_window_to_active resolves the target
+        // workspace via active_workspace_mut() which reads
+        // focused_monitor — temporarily point that at each window's
+        // monitor for the duration of the insert, then restore.
+        // Without this, windows on non-cursor monitors get inserted
+        // into the cursor monitor's BSP tree and apply_layout asks AX
+        // to move them across displays; some apps (Ghostty in
+        // particular) fail or race that move and end up logically in
+        // the wrong workspace's tree while remaining physically on
+        // their original monitor — visible to the user as windows
+        // that are reachable via stack-cycle but never join the tile.
+        let original_focused = self.focused_monitor;
         for w in &windows {
+            let cx = w.x + w.width / 2.0;
+            let cy = w.y + w.height / 2.0;
+            let mi = super::monitor::index_at_point(&self.monitors, cx, cy)
+                .unwrap_or(original_focused);
+            self.focused_monitor = mi;
             self.add_window_to_active(
                 &w.id,
                 w.app_pid,
@@ -334,6 +353,7 @@ impl WmState {
                 w.ax_ref.clone(),
             );
         }
+        self.focused_monitor = original_focused;
 
         tracing::info!(
             windows = self.registry.count(),
