@@ -439,7 +439,7 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             // both the AX Destroyed notification and the workspace
             // polling — otherwise a stale wid in the BSP tree leaves an
             // empty tile that the surviving sibling won't fill.
-            if tick % 20 == 0 {
+            if tick.is_multiple_of(20) {
                 state.reconcile_registry_against_window_server();
             }
         }
