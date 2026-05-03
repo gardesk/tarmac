@@ -1161,16 +1161,29 @@ impl WmState {
         if self.recent_internal_focus.is_empty() {
             return false;
         }
-        match requested {
-            Some(id) => self
+        // Ignore the event if either (a) the requested window is one we
+        // just internally focused — re-adopting it is at best a no-op — or
+        // (b) the event's pid matches an app we just activated. Side-effect
+        // AXFocusedWindowChanged notifications fire for *other* windows of
+        // the activated app (e.g. activating Ghostty window A on monitor B
+        // causes Ghostty to also emit FocusChanged for the previous key
+        // window B in a stack on monitor A), and adopting those events
+        // perpetually drags focus back into the stack we were trying to
+        // mod+arrow out of. The 600ms TTL is short enough that genuine
+        // user clicks on a sibling window of the same app within that
+        // window are rare; if one does happen we miss it, which is
+        // strictly less disruptive than the cross-monitor focus loop.
+        if let Some(id) = requested
+            && self
                 .recent_internal_focus
                 .iter()
-                .any(|(eid, _, _)| *eid == id),
-            None => self
-                .recent_internal_focus
-                .iter()
-                .any(|(_, epid, _)| *epid == pid),
+                .any(|(eid, _, _)| *eid == id)
+        {
+            return true;
         }
+        self.recent_internal_focus
+            .iter()
+            .any(|(_, epid, _)| *epid == pid)
     }
 
     fn is_external_focus_candidate(&self, id: WindowId) -> bool {
