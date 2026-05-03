@@ -454,11 +454,26 @@ impl WmState {
             let ws = self.workspaces.get(ws_idx);
             let screen_rect = self.monitor_rect(mi);
             let geometries = self.workspace_render_geometries(ws_idx, screen_rect);
+            // Only the active member of each stack lives at the tile rect.
+            // Non-active members get staged off-screen via hide_window so
+            // macOS's per-app global z-order cannot surface a non-active
+            // member above the active one (which happened when stacks
+            // contained windows from different apps and the user focused
+            // a sibling of one of those apps elsewhere — e.g. a Ghostty
+            // member of a Messages-active stack rising to the top of the
+            // tile when the user focused a different Ghostty on another
+            // monitor). focus_geometries returns one entry per visible
+            // tile (active for stacks, the leaf window for BSP leaves), so
+            // the difference vs render geometries is exactly the set of
+            // non-active stack members.
+            let actives = self.workspace_focus_geometries(ws_idx, screen_rect);
+            let active_ids: std::collections::HashSet<super::window::WindowId> =
+                actives.iter().map(|(w, _)| *w).collect();
             tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
 
-            for (wid, rect) in &geometries {
+            for (wid, rect) in &actives {
                 tracing::debug!(
                     wid,
                     x = rect.x,
@@ -468,6 +483,12 @@ impl WmState {
                     "tile"
                 );
                 self.show_window(*wid, *rect);
+            }
+            for (wid, _) in &geometries {
+                if !active_ids.contains(wid) {
+                    tracing::debug!(wid, "stack non-active hidden off-screen");
+                    self.hide_window(*wid);
+                }
             }
 
             for fw in &ws.floating {
