@@ -367,7 +367,7 @@ impl WmState {
         self.apply_layout();
         std::thread::sleep(std::time::Duration::from_millis(50));
         self.apply_layout();
-        self.fix_oversized_windows();
+        self.fix_oversized_windows_aggressive();
         self.update_borders();
         self.install_observers_for_all();
 
@@ -562,7 +562,23 @@ impl WmState {
     /// After layout, check for windows that overflow their tiles.
     /// Try swapping the oversized window into the largest available tile.
     /// If it still doesn't fit, auto-float it.
+    ///
+    /// `aggressive` is set during initial discovery: if the BSP layout would
+    /// leave any window unable to fit its tile, collapse the entire workspace
+    /// into a single root-level stack instead of producing the hybrid
+    /// "few-tiles-plus-corner-stack" shape that arises from the staircase BSP
+    /// shape on cold start with many windows. Normal runtime overflow keeps
+    /// the original Phase 2 behavior — small subtree stacks are fine when the
+    /// user has already arranged the layout.
     pub fn fix_oversized_windows(&mut self) {
+        self.fix_oversized_windows_with(false);
+    }
+
+    pub fn fix_oversized_windows_aggressive(&mut self) {
+        self.fix_oversized_windows_with(true);
+    }
+
+    fn fix_oversized_windows_with(&mut self, aggressive: bool) {
         // Give apps time to settle to their actual minimum size after apply_layout.
         // Some apps (e.g. Messages) handle AX resize asynchronously — they ack the
         // request but snap to their minimum size later.
@@ -663,6 +679,10 @@ impl WmState {
             }
 
             // Phase 2: Replace the smallest conflicting subtree with a stack.
+            // In aggressive mode (cold start), collapse the entire workspace
+            // tree into one root-level stack on the first oversized window,
+            // instead of leaving a hybrid layout where some windows got their
+            // own tile and the rest piled into a corner subtree.
             loop {
                 let geometries = self.workspace_focus_geometries(ws_idx, screen_rect);
                 if geometries.is_empty() {
@@ -691,6 +711,26 @@ impl WmState {
                     Some(v) => v,
                     None => break,
                 };
+
+                if aggressive {
+                    if self
+                        .workspaces
+                        .get_mut(ws_idx)
+                        .tree
+                        .collapse_to_root_stack(oversized_wid)
+                    {
+                        tracing::info!(
+                            id = oversized_wid,
+                            min_w,
+                            min_h,
+                            ws = ws_idx + 1,
+                            "cold-start overflow: collapsing workspace into root stack"
+                        );
+                        self.apply_layout();
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    break;
+                }
 
                 if self
                     .workspaces
