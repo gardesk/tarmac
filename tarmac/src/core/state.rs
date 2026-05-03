@@ -542,6 +542,12 @@ impl WmState {
         let _ = ax_set_size(ax_ref, rect.width, rect.height);
         let _ = ax_set_position(ax_ref, rect.x, rect.y);
         let _ = ax_set_size(ax_ref, rect.width, rect.height);
+        // Some apps silently ignore AX-set-position (observed: windows that
+        // were previously fullscreen/zoomed, or processes whose AX state has
+        // diverged from the WindowServer). Backstop the AX move with a direct
+        // SkyLight move so the visible position matches what we asked for.
+        // Idempotent for windows already at (rect.x, rect.y).
+        let _ = crate::platform::skylight::move_window(wid, rect.x, rect.y);
         let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 1.0);
         let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
 
