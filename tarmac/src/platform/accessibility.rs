@@ -255,7 +255,12 @@ pub fn is_manageable_window(element: &AXUIElement) -> bool {
 
     let dominated = matches!(
         subrole.as_str(),
-        "AXStandardWindow" | "AXDialog" | "AXFloatingWindow"
+        "AXStandardWindow"
+            | "AXDialog"
+            | "AXSystemDialog"
+            | "AXSheet"
+            | "AXFloatingWindow"
+            | "AXSystemFloatingWindow"
     );
     if !dominated {
         tracing::trace!(role, subrole, title, "skipping non-standard subrole");
