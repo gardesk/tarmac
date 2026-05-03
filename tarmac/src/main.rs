@@ -425,10 +425,23 @@ fn install_polling_timer() {
 }
 
 unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static TICK: AtomicU32 = AtomicU32::new(0);
+    let tick = TICK.fetch_add(1, Ordering::Relaxed);
+
     WM_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.process_events();
             state.borders.health_check();
+            // Once a second (timer fires every 50ms), reconcile the
+            // registry against the live WindowServer state. This is the
+            // safety net that catches windows whose close was missed by
+            // both the AX Destroyed notification and the workspace
+            // polling — otherwise a stale wid in the BSP tree leaves an
+            // empty tile that the surviving sibling won't fill.
+            if tick % 20 == 0 {
+                state.reconcile_registry_against_window_server();
+            }
         }
     });
 

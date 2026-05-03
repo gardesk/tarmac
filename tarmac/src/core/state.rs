@@ -359,6 +359,46 @@ impl WmState {
         self.ax_refs.get(&id)
     }
 
+    /// Reverse-lookup a window id from its AXUIElement. Used by the
+    /// AXUIElementDestroyed handler when the element is already invalidated
+    /// by macOS at notification time, so `_AXUIElementGetWindow` returns
+    /// `kAXErrorInvalidUIElement` and we cannot extract the wid directly.
+    /// CFEqual on AXUIElement compares element identity, not the underlying
+    /// window's liveness, so this still works after destruction.
+    fn find_window_by_ax_element(&self, target: &AXUIElement) -> Option<WindowId> {
+        use objc2_core_foundation::CFType;
+        let target_cf: &CFType = target.as_ref();
+        self.ax_refs
+            .iter()
+            .find(|(_, elem)| (elem.as_ref() as &CFType) == target_cf)
+            .map(|(id, _)| *id)
+    }
+
+    /// Reap any wid in the registry that is no longer present in CGWindowList
+    /// (all layers, on- and off-screen) and is not currently staged-hidden by
+    /// tarmac itself. This is the authoritative safety net for close detection
+    /// — the AX `Destroyed` notification can fire with an already-invalidated
+    /// element, and the workspace polling path can race with workspace
+    /// switches. A 1Hz reconcile guarantees the tree never holds onto a wid
+    /// that the WindowServer has actually destroyed.
+    pub fn reconcile_registry_against_window_server(&mut self) {
+        use crate::platform::application::get_cg_window_list_all_layers;
+        let live_wids: std::collections::HashSet<u32> = get_cg_window_list_all_layers()
+            .into_iter()
+            .map(|info| info.wid)
+            .collect();
+        let mut stale: Vec<u32> = Vec::new();
+        for w in self.registry.all() {
+            if !live_wids.contains(&w.id) && !self.is_window_hidden(w.id) {
+                stale.push(w.id);
+            }
+        }
+        for wid in stale {
+            tracing::info!(wid, "reconcile: window vanished from WindowServer, reaping");
+            self.on_window_closed(wid);
+        }
+    }
+
     fn workspace_render_geometries(&self, ws_idx: usize, rect: Rect) -> Vec<(WindowId, Rect)> {
         let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
         self.workspaces
@@ -3070,7 +3110,15 @@ impl WmState {
                 self.fix_oversized_windows();
             }
             WindowEvent::Destroyed { element, .. } => {
-                if let Ok(id) = ax_get_window_id(element)
+                // _AXUIElementGetWindow frequently returns kAXErrorInvalidUIElement
+                // by the time AXUIElementDestroyed fires (the underlying window is
+                // already gone). Fall back to identifying the wid by AXUIElement
+                // identity in our own ax_refs map — that survives destruction
+                // because we hold a CFRetained.
+                let id = ax_get_window_id(element)
+                    .ok()
+                    .or_else(|| self.find_window_by_ax_element(element));
+                if let Some(id) = id
                     && self.registry.contains(id)
                 {
                     tracing::info!(id, app = app_name, "window destroyed -> retiling");
@@ -3087,6 +3135,12 @@ impl WmState {
                         }
                     }
                     self.apply_layout();
+                } else if id.is_none() {
+                    tracing::debug!(
+                        app = app_name,
+                        "Destroyed event with unidentifiable element \
+                         — polling fallback will catch it"
+                    );
                 }
             }
             WindowEvent::FocusChanged { element, .. } => {
