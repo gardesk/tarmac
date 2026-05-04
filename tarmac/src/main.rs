@@ -702,7 +702,7 @@ fn process_ipc_command(
                     .monitor_showing_workspace(ws_idx)
                     .map(|mi| state.monitor_rect(mi))
                     .unwrap_or_else(|| state.focused_rect());
-                let (gap_inner, gap_outer) = state.workspace_gaps(ws_idx);
+                let (gap_inner, gap_outer) = state.effective_gaps(ws_idx);
                 let geoms = ws
                     .tree
                     .calculate_geometries_with_gaps(sr, gap_inner, gap_outer, true);

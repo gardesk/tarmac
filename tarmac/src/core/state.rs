@@ -419,8 +419,23 @@ impl WmState {
         }
     }
 
-    fn workspace_render_geometries(&self, ws_idx: usize, rect: Rect) -> Vec<(WindowId, Rect)> {
+    /// Inflate the user-configured gaps by ers's border width so the
+    /// configured value is the *visible* empty space between tiles, not
+    /// the gross window-rect-to-window-rect distance. Ers draws border
+    /// overlays 4px (or whatever `border_width` is) outside each window's
+    /// frame; with a raw 8px tile gap, two adjacent windows' 4px borders
+    /// fill the entire gap and visually touch. Adding 2 * border_width
+    /// to inner gaps and 1 * border_width to outer gaps reserves space
+    /// for the borders so the configured gap survives as visible empty
+    /// space.
+    pub fn effective_gaps(&self, ws_idx: usize) -> (f64, f64) {
         let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
+        let bw = self.borders.border_width.max(0.0);
+        (gap_inner + 2.0 * bw, gap_outer + bw)
+    }
+
+    fn workspace_render_geometries(&self, ws_idx: usize, rect: Rect) -> Vec<(WindowId, Rect)> {
+        let (gap_inner, gap_outer) = self.effective_gaps(ws_idx);
         self.workspaces
             .get(ws_idx)
             .tree
@@ -428,7 +443,7 @@ impl WmState {
     }
 
     fn workspace_focus_geometries(&self, ws_idx: usize, rect: Rect) -> Vec<(WindowId, Rect)> {
-        let (gap_inner, gap_outer) = self.workspace_gaps(ws_idx);
+        let (gap_inner, gap_outer) = self.effective_gaps(ws_idx);
         self.workspaces
             .get(ws_idx)
             .tree
@@ -571,6 +586,27 @@ impl WmState {
         let _ = crate::platform::skylight::move_window(wid, rect.x, rect.y);
         let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 1.0);
         let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
+
+        if let (Ok((ax, ay)), Ok((aw, ah))) = (ax_get_position(ax_ref), ax_get_size(ax_ref)) {
+            let dx = (ax - rect.x).abs();
+            let dy = (ay - rect.y).abs();
+            let dw = (aw - rect.width).abs();
+            let dh = (ah - rect.height).abs();
+            if dx > 1.0 || dy > 1.0 || dw > 1.0 || dh > 1.0 {
+                tracing::debug!(
+                    wid,
+                    req_x = rect.x,
+                    req_y = rect.y,
+                    req_w = rect.width,
+                    req_h = rect.height,
+                    got_x = ax,
+                    got_y = ay,
+                    got_w = aw,
+                    got_h = ah,
+                    "show_window mismatch"
+                );
+            }
+        }
 
         // Restore AXEnhancedUserInterface
         if was_eui == Some(true)
@@ -1654,7 +1690,7 @@ impl WmState {
         let window_under = if let Some(special_idx) = special_ws_idx {
             let sr = self.monitor_rect(mi);
             let ws = self.workspaces.get(special_idx);
-            let (gap_inner, gap_outer) = self.workspace_gaps(special_idx);
+            let (gap_inner, gap_outer) = self.effective_gaps(special_idx);
 
             // Look up config for this special workspace's overlay rect
             let special_name = match &ws.id {
@@ -2241,7 +2277,7 @@ impl WmState {
             let overlay_rect = Rect::new(overlay_x, overlay_y, overlay_w, overlay_h);
 
             // Compute geometries and collect data before calling self methods
-            let (gap_inner, gap_outer) = self.workspace_gaps(special_idx);
+            let (gap_inner, gap_outer) = self.effective_gaps(special_idx);
             let geoms =
                 ws.tree
                     .calculate_geometries_with_gaps(overlay_rect, gap_inner, gap_outer, true);
@@ -2441,7 +2477,7 @@ impl WmState {
 
         // Get target monitor's screen rect for layout
         let target_rect = self.monitor_rect(target_mi);
-        let (target_gap_inner, target_gap_outer) = self.workspace_gaps(target_ws_idx);
+        let (target_gap_inner, target_gap_outer) = self.effective_gaps(target_ws_idx);
 
         // Find which workspace the window is actually on
         let current_idx = match self.workspaces.find_window(focused) {
