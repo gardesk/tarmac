@@ -843,11 +843,42 @@ impl WmState {
 
             if !at_edge && let Some(default_target) = Node::find_adjacent(&geoms, from, direction) {
                 let candidates = Node::adjacent_candidates(&geoms, from, direction);
+                let from_rect = geoms.iter().find(|(w, _)| *w == from).map(|(_, r)| *r);
+                let default_rect = geoms
+                    .iter()
+                    .find(|(w, _)| *w == default_target)
+                    .map(|(_, r)| *r);
                 let target = self
                     .focus_return_memory
                     .get(&(from, direction))
                     .copied()
-                    .filter(|remembered| candidates.contains(remembered))
+                    .filter(|remembered| {
+                        if !candidates.contains(remembered) {
+                            return false;
+                        }
+                        // Only honor remembered target when its distance is
+                        // close to the default's. Otherwise topology has
+                        // changed (e.g., a new window appeared between
+                        // source and remembered target) and the memory is
+                        // stale.
+                        let Some(remembered_rect) = geoms
+                            .iter()
+                            .find(|(w, _)| *w == *remembered)
+                            .map(|(_, r)| *r)
+                        else {
+                            return false;
+                        };
+                        let (Some(fr), Some(dr)) = (from_rect, default_rect) else {
+                            return true;
+                        };
+                        let d_default = Node::adjacent_distance(&fr, &dr, direction);
+                        let d_remembered =
+                            Node::adjacent_distance(&fr, &remembered_rect, direction);
+                        // Memory wins when within 32px (a typical gap +
+                        // border) of the default's distance — that's the
+                        // tie-breaker regime memory is meant for.
+                        d_remembered - d_default <= 32.0
+                    })
                     .unwrap_or(default_target);
                 self.focus_window(target);
                 self.remember_focus_transition(from, direction, target, &geoms);
@@ -3835,6 +3866,72 @@ mod tests {
                 .copied(),
             Some(2)
         );
+    }
+
+    /// Regression: a stale focus_return_memory entry from a prior layout
+    /// (when only the far-left window existed as a Left candidate from
+    /// the source) must not override the obvious nearest-neighbor
+    /// default after a new window appears between source and the
+    /// remembered target. Reproduces the widescreen layout where
+    /// pressing Left from the bottom-right tile would skip the new
+    /// middle-tall window and land on the far-left tile.
+    #[test]
+    fn focus_memory_yields_to_closer_default_when_topology_grows() {
+        let mut state = WmState::new();
+        // Original 3-window layout: far-left tall (1), upper-right (2),
+        // lower-right (3). From 3, Left has only 1 as a candidate.
+        let geoms_before = vec![
+            (1u32, Rect::new(0.0, 0.0, 500.0, 1000.0)),
+            (2u32, Rect::new(500.0, 0.0, 500.0, 500.0)),
+            (3u32, Rect::new(500.0, 500.0, 500.0, 500.0)),
+        ];
+        state.remember_focus_transition(3, Direction::Left, 1, &geoms_before);
+        assert_eq!(
+            state.focus_return_memory.get(&(3, Direction::Left)).copied(),
+            Some(1)
+        );
+
+        // New 4-window layout: a middle-tall (4) appears between the
+        // left column and the right column. Now Left from 3 should
+        // pick 4, not the stale memorized 1.
+        let geoms_after = vec![
+            (1u32, Rect::new(0.0, 0.0, 250.0, 1000.0)),
+            (4u32, Rect::new(250.0, 0.0, 250.0, 1000.0)),
+            (2u32, Rect::new(500.0, 0.0, 500.0, 500.0)),
+            (3u32, Rect::new(500.0, 500.0, 500.0, 500.0)),
+        ];
+        let from_rect = geoms_after[3].1;
+        let default_target = Node::find_adjacent(&geoms_after, 3, Direction::Left).unwrap();
+        assert_eq!(default_target, 4);
+        let candidates = Node::adjacent_candidates(&geoms_after, 3, Direction::Left);
+        let default_rect = geoms_after
+            .iter()
+            .find(|(w, _)| *w == default_target)
+            .map(|(_, r)| *r)
+            .unwrap();
+        let target = state
+            .focus_return_memory
+            .get(&(3, Direction::Left))
+            .copied()
+            .filter(|remembered| {
+                if !candidates.contains(remembered) {
+                    return false;
+                }
+                let Some(remembered_rect) = geoms_after
+                    .iter()
+                    .find(|(w, _)| *w == *remembered)
+                    .map(|(_, r)| *r)
+                else {
+                    return false;
+                };
+                let d_default =
+                    Node::adjacent_distance(&from_rect, &default_rect, Direction::Left);
+                let d_remembered =
+                    Node::adjacent_distance(&from_rect, &remembered_rect, Direction::Left);
+                d_remembered - d_default <= 32.0
+            })
+            .unwrap_or(default_target);
+        assert_eq!(target, 4, "stale memory should yield to closer default");
     }
 
     #[test]

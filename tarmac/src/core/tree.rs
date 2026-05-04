@@ -558,7 +558,7 @@ impl Node {
     /// overlaps with the source. Ties broken by horizontal gap.
     /// For Up/Down: prefer the closest window whose horizontal extent
     /// overlaps with the source. Ties broken by vertical gap.
-    fn adjacent_distance(from: &Rect, to: &Rect, direction: Direction) -> f64 {
+    pub fn adjacent_distance(from: &Rect, to: &Rect, direction: Direction) -> f64 {
         match direction {
             Direction::Left | Direction::Right => {
                 // Horizontal gap: edge-to-edge distance
