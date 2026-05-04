@@ -168,6 +168,41 @@ pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
         });
     }
 
+    // macOS reserves the menu-bar zone globally in CG y-coords, even on
+    // non-primary displays whose NSScreen.visibleFrame falsely reports
+    // the full frame as usable. Symptoms: AX position requests above the
+    // primary's menu-bar bottom get clamped on the secondary, leaving
+    // visible top gap missing and pushing the bottom past the requested
+    // rect (observed on a 3440×1440 widescreen positioned to the left of
+    // a Retina laptop, where the OS clamped any requested y<30 to y=30).
+    // Reservation: clamp every non-primary display whose usable_frame
+    // top is above the primary's usable_frame top (in CG coords) — but
+    // only when their CG regions overlap on the y-axis at all.
+    if let Some(primary_top) = monitors
+        .iter()
+        .find(|m| m.is_primary)
+        .map(|m| m.usable_frame.y)
+    {
+        for m in monitors.iter_mut() {
+            if m.is_primary {
+                continue;
+            }
+            let bottom = m.usable_frame.y + m.usable_frame.height;
+            if m.usable_frame.y < primary_top && bottom > primary_top {
+                let dy = primary_top - m.usable_frame.y;
+                m.usable_frame.y = primary_top;
+                m.usable_frame.height = (m.usable_frame.height - dy).max(0.0);
+                tracing::debug!(
+                    id = m.id,
+                    reserved_top = dy,
+                    new_y = m.usable_frame.y,
+                    new_h = m.usable_frame.height,
+                    "applied global menu-bar reservation to secondary display"
+                );
+            }
+        }
+    }
+
     tracing::info!(count = monitors.len(), "displays discovered");
     for m in &monitors {
         tracing::debug!(
