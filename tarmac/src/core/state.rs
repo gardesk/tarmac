@@ -3969,7 +3969,10 @@ mod tests {
         ];
         state.remember_focus_transition(3, Direction::Left, 1, &geoms_before);
         assert_eq!(
-            state.focus_return_memory.get(&(3, Direction::Left)).copied(),
+            state
+                .focus_return_memory
+                .get(&(3, Direction::Left))
+                .copied(),
             Some(1)
         );
 
@@ -4006,8 +4009,7 @@ mod tests {
                 else {
                     return false;
                 };
-                let d_default =
-                    Node::adjacent_distance(&from_rect, &default_rect, Direction::Left);
+                let d_default = Node::adjacent_distance(&from_rect, &default_rect, Direction::Left);
                 let d_remembered =
                     Node::adjacent_distance(&from_rect, &remembered_rect, Direction::Left);
                 d_remembered - d_default <= 32.0
