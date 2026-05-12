@@ -1020,6 +1020,8 @@ impl WmState {
             if self.active_workspace_mut().tree.swap(focused, target) {
                 self.apply_layout();
                 self.fix_oversized_windows();
+                let ws_idx = self.active_ws_idx();
+                self.sync_mouse_after_focus(ws_idx, focused);
             }
             return;
         }
@@ -1097,13 +1099,32 @@ impl WmState {
             .monitor_showing_workspace(ws_idx)
             .map_or_else(|| self.focused_rect(), |mi| self.monitor_rect(mi));
         let geoms = self.workspace_focus_geometries(ws_idx, rect);
-        if let Some((_, target_rect)) = geoms.iter().find(|(wid, _)| *wid == id) {
-            warp_mouse_to_center(target_rect);
-        } else {
-            warp_mouse_to_center(&rect);
+        let target_rect = geoms
+            .iter()
+            .find(|(wid, _)| *wid == id)
+            .map(|(_, r)| *r)
+            .unwrap_or(rect);
+
+        // Skip the warp when the cursor is already inside the target
+        // rect. This is the user's typical state (mouse-follows-focus
+        // already keeps the cursor over the focused window) and warping
+        // again only matters when adoption moves focus elsewhere. It
+        // also kills any feedback loop where a rapid stream of
+        // adopt_external_focus calls would otherwise spam warps and
+        // freeze the cursor at the rect's center.
+        let (cx, cy) = crate::platform::display::get_cursor_position();
+        if target_rect.contains_point(cx, cy) {
+            return;
         }
+
+        // Set cooldown BEFORE the warp so the synthetic mouseMoved event
+        // posted by warp_mouse arrives at the FFM handler with the
+        // cooldown already armed. Otherwise the order is racy: the tap
+        // callback can fire on the same runloop spin and slip past an
+        // unarmed cooldown.
         self.ffm_cooldown_until =
             Some(std::time::Instant::now() + std::time::Duration::from_millis(200));
+        warp_mouse_to_center(&target_rect);
     }
 
     fn opposite_direction(direction: super::tree::Direction) -> super::tree::Direction {
@@ -1332,6 +1353,7 @@ impl WmState {
             return;
         };
 
+        let prev_monitor = self.focused_monitor;
         self.focus_window_impl(id, false);
 
         if let Some(mi) = self.monitor_showing_workspace(ws_idx) {
@@ -1339,7 +1361,17 @@ impl WmState {
                 self.dismiss_special_on_monitor(mi);
             }
             self.focused_monitor = mi;
-            self.sync_mouse_after_focus(ws_idx, id);
+            // Only warp on cross-monitor adoption. Misbehaving apps (e.g.
+            // Messages) emit AXFocusedWindowChanged hundreds of times per
+            // second under bad geometry; warping on every one freezes the
+            // cursor at the focused window's center because each warp
+            // races the next AX event. The user didn't request these
+            // re-focus events — leave the cursor where they put it.
+            if mi != prev_monitor {
+                self.sync_mouse_after_focus(ws_idx, id);
+            } else {
+                self.ffm_last_window = Some(id);
+            }
             return;
         }
 
@@ -2543,6 +2575,7 @@ impl WmState {
         // Focus the target monitor
         self.focused_monitor = target_mi;
         self.focus_window(focused);
+        self.sync_mouse_after_focus(target_ws_idx, focused);
 
         tracing::info!(id = focused, monitor = target_mi, "moved window to monitor");
     }
@@ -2993,15 +3026,27 @@ impl WmState {
         self.prune_focus_memory_for_window(id);
 
         // Find the workspace containing this window and remove from it
+        let mut new_focus: Option<(usize, WindowId)> = None;
         if let Some(ws_idx) = self.workspaces.find_window(id) {
             let ws = self.workspaces.get_mut(ws_idx);
             ws.floating.retain(|f| f.id != id);
             ws.tree.remove(id);
             if ws.focused == Some(id) {
                 ws.pop_focus();
+                if let Some(next) = ws.focused {
+                    new_focus = Some((ws_idx, next));
+                }
             }
         }
         self.apply_layout();
+
+        // pop_focus only updates WM state — without an AX activation the
+        // receiving window has no key focus and the user gets the system
+        // bell on the next keystroke. Drive the full focus path.
+        if let Some((ws_idx, next)) = new_focus {
+            self.focus_window(next);
+            self.sync_mouse_after_focus(ws_idx, next);
+        }
     }
 
     pub fn on_app_launched(&mut self, pid: i32, name: &str, bundle_id: &str) {
@@ -3056,6 +3101,8 @@ impl WmState {
         }
         if !removed.is_empty() {
             // Fix focus on any affected workspace
+            let active_ws_idx = self.active_ws_idx();
+            let mut active_ws_new_focus: Option<WindowId> = None;
             for ws_idx in 0..self.workspaces.count() {
                 let ws = self.workspaces.get_mut(ws_idx);
                 if ws
@@ -3063,9 +3110,20 @@ impl WmState {
                     .is_some_and(|f| removed.iter().any(|w| w.id == f))
                 {
                     ws.pop_focus();
+                    if ws_idx == active_ws_idx {
+                        active_ws_new_focus = ws.focused;
+                    }
                 }
             }
             self.apply_layout();
+            // The active workspace's new focused window needs an AX
+            // activation, otherwise the next keystroke rings the system
+            // bell. Background workspaces don't need this since the user
+            // can't type into them until they're switched to.
+            if let Some(next) = active_ws_new_focus {
+                self.focus_window(next);
+                self.sync_mouse_after_focus(active_ws_idx, next);
+            }
             tracing::info!(pid, removed = removed.len(), "app terminated -> retiled");
         }
     }
@@ -3300,19 +3358,7 @@ impl WmState {
                     && self.registry.contains(id)
                 {
                     tracing::info!(id, app = app_name, "window destroyed -> retiling");
-                    self.registry.remove(id);
-                    self.ax_refs.remove(&id);
-                    self.prune_focus_memory_for_window(id);
-                    // Find the workspace containing this window and remove from it
-                    if let Some(ws_idx) = self.workspaces.find_window(id) {
-                        let ws = self.workspaces.get_mut(ws_idx);
-                        ws.floating.retain(|f| f.id != id);
-                        ws.tree.remove(id);
-                        if ws.focused == Some(id) {
-                            ws.pop_focus();
-                        }
-                    }
-                    self.apply_layout();
+                    self.on_window_closed(id);
                 } else if id.is_none() {
                     tracing::debug!(
                         app = app_name,
