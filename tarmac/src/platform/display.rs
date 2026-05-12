@@ -405,18 +405,23 @@ unsafe extern "C" {
     ) -> i32;
     fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
     fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+    #[cfg_attr(test, allow(dead_code))]
     fn CGEventCreateMouseEvent(
         source: *const std::ffi::c_void,
         mouse_type: u32,
         mouse_cursor_position: CGPoint,
         mouse_button: u32,
     ) -> *mut std::ffi::c_void;
+    #[cfg_attr(test, allow(dead_code))]
     fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
     fn CFRelease(cf: *const std::ffi::c_void);
 }
 
+#[cfg_attr(test, allow(dead_code))]
 const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
+#[cfg_attr(test, allow(dead_code))]
 const K_CG_HID_EVENT_TAP: u32 = 0;
+#[cfg_attr(test, allow(dead_code))]
 const K_CG_MOUSE_BUTTON_LEFT: u32 = 0;
 
 #[cfg(test)]
