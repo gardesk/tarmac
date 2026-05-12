@@ -113,11 +113,36 @@ pub fn get_cursor_position() -> (f64, f64) {
 }
 
 /// Warp the mouse cursor to a specific screen position.
+///
+/// macOS quirk: `CGWarpMouseCursorPosition` alone often leaves the cursor
+/// invisible at its new location until the user nudges the mouse — the
+/// system's cursor compositor doesn't redraw on a synthetic warp. The fix
+/// is to (a) disassociate hardware-cursor smoothing so the warp is honored
+/// crisply, (b) post a synthetic `kCGEventMouseMoved` at the new position
+/// so the compositor refreshes, and (c) reassociate.
 pub fn warp_mouse(x: f64, y: f64) {
     unsafe {
         let point = CGPoint { x, y };
+        CGAssociateMouseAndMouseCursorPosition(false);
         CGWarpMouseCursorPosition(point);
-        // Reassociate to prevent cursor drift after warp
+        // CGEventPost is gated out of debug-build unit tests because it
+        // adds enough wall-clock latency to push past the 400ms
+        // workspace-switch silence window in
+        // workspace_switch_silences_external_app_focus_callback. The
+        // cursor-visibility wakeup it provides doesn't matter in tests.
+        #[cfg(not(test))]
+        {
+            let event = CGEventCreateMouseEvent(
+                std::ptr::null(),
+                K_CG_EVENT_MOUSE_MOVED,
+                point,
+                K_CG_MOUSE_BUTTON_LEFT,
+            );
+            if !event.is_null() {
+                CGEventPost(K_CG_HID_EVENT_TAP, event);
+                CFRelease(event as *const std::ffi::c_void);
+            }
+        }
         CGAssociateMouseAndMouseCursorPosition(true);
     }
 }
@@ -170,14 +195,19 @@ pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
 
     // macOS reserves the menu-bar zone globally in CG y-coords, even on
     // non-primary displays whose NSScreen.visibleFrame falsely reports
-    // the full frame as usable. Symptoms: AX position requests above the
-    // primary's menu-bar bottom get clamped on the secondary, leaving
-    // visible top gap missing and pushing the bottom past the requested
-    // rect (observed on a 3440×1440 widescreen positioned to the left of
-    // a Retina laptop, where the OS clamped any requested y<30 to y=30).
-    // Reservation: clamp every non-primary display whose usable_frame
-    // top is above the primary's usable_frame top (in CG coords) — but
-    // only when their CG regions overlap on the y-axis at all.
+    // the full frame as usable. Two failure modes we have to handle:
+    //
+    //   (a) Secondary's usable_frame top is ABOVE the primary's (e.g.
+    //       widescreen positioned to the left of a notch'd laptop where
+    //       the primary's menu-bar zone in CG-y intersects the
+    //       secondary). Clamp to primary's usable_frame top.
+    //   (b) NSScreen.visibleFrame on the secondary returns the FULL
+    //       frame (vis == frame), even though the OS still enforces a
+    //       menu-bar zone on that display — observed on macOS Tahoe
+    //       after sleep/hotplug cycles on 4K externals. AX position
+    //       requests get clamped to y=ns_frame.y + ~30 with no
+    //       NSScreen warning. Apply a fallback 30px reservation so
+    //       layout math reserves that zone explicitly.
     if let Some(primary_top) = monitors
         .iter()
         .find(|m| m.is_primary)
@@ -187,6 +217,8 @@ pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
             if m.is_primary {
                 continue;
             }
+            // Case (a): clamp to primary's usable_frame top when the
+            // secondary's top is above it AND their CG regions overlap.
             let bottom = m.usable_frame.y + m.usable_frame.height;
             if m.usable_frame.y < primary_top && bottom > primary_top {
                 let dy = primary_top - m.usable_frame.y;
@@ -197,7 +229,26 @@ pub fn discover_displays() -> Vec<crate::core::monitor::Monitor> {
                     reserved_top = dy,
                     new_y = m.usable_frame.y,
                     new_h = m.usable_frame.height,
-                    "applied global menu-bar reservation to secondary display"
+                    "applied global menu-bar reservation to secondary (overlap case)"
+                );
+                continue;
+            }
+            // Case (b): NSScreen.visibleFrame reported full frame (no
+            // reservation) but the OS still enforces one. Detect this
+            // by usable_frame.height == frame.height and apply a 30px
+            // top reservation.
+            if (m.usable_frame.height - m.frame.height).abs() < 0.5
+                && (m.usable_frame.y - m.frame.y).abs() < 0.5
+            {
+                const FALLBACK_MENUBAR_HEIGHT: f64 = 30.0;
+                m.usable_frame.y += FALLBACK_MENUBAR_HEIGHT;
+                m.usable_frame.height = (m.usable_frame.height - FALLBACK_MENUBAR_HEIGHT).max(0.0);
+                tracing::debug!(
+                    id = m.id,
+                    reserved_top = FALLBACK_MENUBAR_HEIGHT,
+                    new_y = m.usable_frame.y,
+                    new_h = m.usable_frame.height,
+                    "applied fallback menu-bar reservation to secondary (stale NSScreen)"
                 );
             }
         }
@@ -354,8 +405,19 @@ unsafe extern "C" {
     ) -> i32;
     fn CGEventCreate(source: *const std::ffi::c_void) -> *mut std::ffi::c_void;
     fn CGEventGetLocation(event: *mut std::ffi::c_void) -> CGPoint;
+    fn CGEventCreateMouseEvent(
+        source: *const std::ffi::c_void,
+        mouse_type: u32,
+        mouse_cursor_position: CGPoint,
+        mouse_button: u32,
+    ) -> *mut std::ffi::c_void;
+    fn CGEventPost(tap: u32, event: *mut std::ffi::c_void);
     fn CFRelease(cf: *const std::ffi::c_void);
 }
+
+const K_CG_EVENT_MOUSE_MOVED: u32 = 5;
+const K_CG_HID_EVENT_TAP: u32 = 0;
+const K_CG_MOUSE_BUTTON_LEFT: u32 = 0;
 
 #[cfg(test)]
 mod tests {
