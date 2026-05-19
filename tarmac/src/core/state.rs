@@ -385,6 +385,14 @@ impl WmState {
             "initial window registry populated"
         );
 
+        // Catch BSP overflow from tree geometry before writing AX. Without
+        // this, the first apply_layout writes sub-pixel tile rects for the
+        // overflow case (observed 2026-05-19: 17 windows in workspace 1
+        // produced req_w=0, req_h=0 tiles macOS clamped to 105×33 on top of
+        // each other), leaving the user looking at overlapping windows
+        // until fix_oversized_windows_aggressive kicks in a second later.
+        self.proactive_overflow_normalize();
+
         // Apply layout twice: first pass moves windows to the correct
         // monitor, second pass resizes correctly since they're already there.
         // Needed because macOS AX constrains resize to the window's current
@@ -652,6 +660,81 @@ impl WmState {
     /// shape on cold start with many windows. Normal runtime overflow keeps
     /// the original Phase 2 behavior — small subtree stacks are fine when the
     /// user has already arranged the layout.
+    /// Pre-flight check: scan each visible workspace's BSP-computed tile
+    /// geometry and, if any tile would be smaller than the OS will accept
+    /// for a normal window, collapse that workspace into a root stack
+    /// before apply_layout writes the broken layout to AX.
+    ///
+    /// This is the proactive counterpart to fix_oversized_windows: the
+    /// latter runs *after* apply_layout has already produced visible 0×0
+    /// tiles and the OS has clamped them to its minimum (105×33 on
+    /// Tahoe), leaving the user staring at overlapping windows for a
+    /// full half-second before the safety net kicks in. By catching
+    /// overflow purely from tree geometry — no AX calls — we can fix it
+    /// before it ever reaches the screen.
+    ///
+    /// Threshold rationale: 150×100. Most apps' minimum window size is
+    /// at least 200×150 and macOS hard-clamps small windows to ~100×33;
+    /// 150×100 is conservatively below any legitimately small tile in a
+    /// normal BSP layout (a 5-way split of a 1728-px-wide laptop is still
+    /// ~340 px) while large enough to catch every overflow pattern seen
+    /// in the wild.
+    pub fn proactive_overflow_normalize(&mut self) {
+        const MIN_TILE_W: f64 = 150.0;
+        const MIN_TILE_H: f64 = 100.0;
+
+        let monitor_count = self.monitors.len();
+        for mi in 0..monitor_count {
+            let ws_idx = self.monitors[mi].active_workspace;
+            let screen_rect = self.monitor_rect(mi);
+            let geometries = self.workspace_focus_geometries(ws_idx, screen_rect);
+            if geometries.len() <= 1 {
+                continue;
+            }
+
+            // Pick the worst-offending tile and use its window as the active
+            // for the collapsed stack so focus lands on the most recently
+            // problematic window. Falls back to the focused window if any.
+            let worst = geometries
+                .iter()
+                .filter(|(_, r)| r.width < MIN_TILE_W || r.height < MIN_TILE_H)
+                .min_by(|(_, a), (_, b)| {
+                    let area_a = a.width * a.height;
+                    let area_b = b.width * b.height;
+                    area_a
+                        .partial_cmp(&area_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+            let Some((overflow_wid, overflow_rect)) = worst else {
+                continue;
+            };
+            let active = self
+                .workspaces
+                .get(ws_idx)
+                .focused
+                .unwrap_or(*overflow_wid);
+            let min_w = overflow_rect.width;
+            let min_h = overflow_rect.height;
+
+            if self
+                .workspaces
+                .get_mut(ws_idx)
+                .tree
+                .collapse_to_root_stack(active)
+            {
+                tracing::info!(
+                    ws = ws_idx + 1,
+                    smallest_tile_w = min_w,
+                    smallest_tile_h = min_h,
+                    threshold_w = MIN_TILE_W,
+                    threshold_h = MIN_TILE_H,
+                    "proactive collapse: workspace overflow detected, collapsing to root stack"
+                );
+            }
+        }
+    }
+
     pub fn fix_oversized_windows(&mut self) {
         self.fix_oversized_windows_with(false);
     }
@@ -4566,6 +4649,92 @@ mod tests {
         assert_eq!(
             state.active_workspace().tree.stack_info(2),
             Some((vec![2, 3], 0))
+        );
+    }
+
+    #[test]
+    fn proactive_overflow_normalize_collapses_workspace_with_sub_threshold_tiles() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1728.0, 1084.0),
+            usable_frame: Rect::new(0.0, 33.0, 1728.0, 1051.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        // Insert 17 windows into ws0's tree, mirroring the disaster log
+        // (workspace 1 received all discovered windows after restart).
+        for wid in 1u32..=17 {
+            state.registry.add(tracked_window(wid, 100, "Ghost"));
+            state
+                .workspaces
+                .get_mut(0)
+                .tree
+                .insert_with_rect(wid, None, screen);
+        }
+        // Sanity: with 17 windows in BSP, at least one tile is sub-threshold.
+        let geoms = state.workspaces.get(0).tree.calculate_geometries(screen);
+        assert!(geoms.len() > 1, "tree must produce multiple tiles");
+        let smallest_w = geoms
+            .iter()
+            .map(|(_, r)| r.width)
+            .fold(f64::INFINITY, f64::min);
+        let smallest_h = geoms
+            .iter()
+            .map(|(_, r)| r.height)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            smallest_w < 150.0 || smallest_h < 100.0,
+            "test setup failed: smallest tile {smallest_w}x{smallest_h} should be sub-threshold"
+        );
+
+        state.proactive_overflow_normalize();
+
+        // After normalization the tree should be a single root stack — only
+        // one entry in focus_geometries.
+        let after = state.workspace_focus_geometries(0, screen);
+        assert_eq!(
+            after.len(),
+            1,
+            "workspace should collapse to a single tile, got {after:?}"
+        );
+    }
+
+    #[test]
+    fn proactive_overflow_normalize_leaves_small_workspaces_alone() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1728.0, 1084.0),
+            usable_frame: Rect::new(0.0, 33.0, 1728.0, 1051.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        // 4 windows on a normal-size monitor → roughly quarter tiles
+        // (~864×525 each), well above the threshold. Must not collapse.
+        for wid in 1u32..=4 {
+            state.registry.add(tracked_window(wid, 100, "Ghost"));
+            state
+                .workspaces
+                .get_mut(0)
+                .tree
+                .insert_with_rect(wid, None, screen);
+        }
+        let before_geoms = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let before_count = before_geoms.len();
+
+        state.proactive_overflow_normalize();
+
+        let after_count = state.workspace_focus_geometries(0, screen).len();
+        assert_eq!(
+            after_count, before_count,
+            "small workspace should not collapse: had {before_count} tiles, now {after_count}"
         );
     }
 
