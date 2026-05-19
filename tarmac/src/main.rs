@@ -435,6 +435,10 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.process_events();
             state.borders.health_check();
+            // Apply the most recent target observed during an AX focus
+            // storm once quiet mode expires, so focus settles correctly
+            // without the storm being able to drive thousands of warps.
+            state.drain_pending_ext_focus();
             // Once a second (timer fires every 50ms), reconcile the
             // registry against the live WindowServer state. This is the
             // safety net that catches windows whose close was missed by

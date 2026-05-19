@@ -1,5 +1,5 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use objc2_application_services::AXUIElement;
@@ -40,6 +40,17 @@ struct DragState {
     start_geometry: Rect,
 }
 
+/// Sliding-window size for AX focus storm detection.
+const EXT_FOCUS_STORM_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
+/// Adoption count inside the window above which we declare a storm and
+/// enter quiet mode. Pathological apps (Messages, Safari dialogs) have been
+/// observed at >2000 events/sec; normal user navigation peaks at ~30/sec.
+const EXT_FOCUS_STORM_THRESHOLD: usize = 20;
+/// Duration of quiet mode once a storm is detected. After it expires, the
+/// most recent target observed during quiet is applied as a single focus
+/// adoption via the polling tick.
+const EXT_FOCUS_QUIET_DURATION: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Central state for the window manager.
 pub struct WmState {
     pub registry: WindowRegistry,
@@ -63,6 +74,17 @@ pub struct WmState {
     /// Armed on workspace switch to absorb the storm of frontmost-app
     /// transitions macOS reports while AX activations propagate.
     workspace_switch_silence_until: Option<std::time::Instant>,
+    /// Sliding window of recent adopt_external_focus timestamps used to
+    /// detect AX focus storms (misbehaving apps emitting hundreds of
+    /// AXFocusedWindowChanged events per second). When the rate breaches
+    /// EXT_FOCUS_STORM_THRESHOLD events inside EXT_FOCUS_STORM_WINDOW,
+    /// adoption enters quiet mode until `ext_focus_quiet_until`.
+    ext_focus_history: VecDeque<std::time::Instant>,
+    /// While set, drop incoming external-focus adoptions; the latest target
+    /// observed during quiet is stashed in `ext_focus_pending_target` and
+    /// applied once via the polling tick after quiet expires.
+    ext_focus_quiet_until: Option<std::time::Instant>,
+    ext_focus_pending_target: Option<WindowId>,
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
@@ -101,6 +123,9 @@ impl WmState {
             focus_return_memory: HashMap::new(),
             recent_internal_focus: Vec::new(),
             workspace_switch_silence_until: None,
+            ext_focus_history: VecDeque::new(),
+            ext_focus_quiet_until: None,
+            ext_focus_pending_target: None,
             drag: None,
             focus_follows_mouse: true,
             mouse_follows_focus: true,
@@ -1349,6 +1374,9 @@ impl WmState {
     }
 
     fn adopt_external_focus(&mut self, id: WindowId) {
+        if self.rate_limit_external_focus(id) {
+            return;
+        }
         let Some(ws_idx) = self.workspaces.find_window(id) else {
             return;
         };
@@ -1400,6 +1428,84 @@ impl WmState {
                     self.sync_mouse_after_focus(ws_idx, id);
                 }
             }
+        }
+    }
+
+    /// Rate-limit external focus adoptions to break self-perpetuating AX
+    /// focus storms between misbehaving apps (the disaster of 2026-05-19:
+    /// four AXDialog windows ping-ponged focus at 2 kHz, warping the mouse
+    /// thousands of times per second across two monitors). Returns true if
+    /// the call should be dropped — caller should bail immediately.
+    ///
+    /// During quiet mode the most recent target is stashed in
+    /// `ext_focus_pending_target` and applied later via
+    /// `drain_pending_ext_focus` from the polling tick, so the user still
+    /// ends up at the correct final focus once the storm subsides.
+    fn rate_limit_external_focus(&mut self, id: WindowId) -> bool {
+        let now = std::time::Instant::now();
+
+        // Drain history entries that have fallen out of the sliding window.
+        while let Some(t) = self.ext_focus_history.front() {
+            if now.duration_since(*t) > EXT_FOCUS_STORM_WINDOW {
+                self.ext_focus_history.pop_front();
+            } else {
+                break;
+            }
+        }
+
+        // Active quiet mode — stash latest target and skip processing.
+        if let Some(until) = self.ext_focus_quiet_until {
+            if now < until {
+                self.ext_focus_pending_target = Some(id);
+                return true;
+            }
+            // Quiet expired between ticks; fall through and let the current
+            // event proceed normally. drain_pending_ext_focus may have
+            // already applied the pending target — that's fine, this is
+            // just the next real event.
+            self.ext_focus_quiet_until = None;
+            self.ext_focus_pending_target = None;
+            self.ext_focus_history.clear();
+        }
+
+        self.ext_focus_history.push_back(now);
+
+        if self.ext_focus_history.len() > EXT_FOCUS_STORM_THRESHOLD {
+            let count = self.ext_focus_history.len();
+            self.ext_focus_quiet_until = Some(now + EXT_FOCUS_QUIET_DURATION);
+            self.ext_focus_pending_target = Some(id);
+            self.ext_focus_history.clear();
+            tracing::warn!(
+                count,
+                window_ms = EXT_FOCUS_STORM_WINDOW.as_millis() as u64,
+                quiet_ms = EXT_FOCUS_QUIET_DURATION.as_millis() as u64,
+                target = id,
+                "external focus storm detected — entering quiet mode"
+            );
+            return true;
+        }
+
+        false
+    }
+
+    /// Called from the polling tick. If quiet mode has expired and we
+    /// stashed a target during the storm, apply it now so focus settles on
+    /// the latest AX-reported window.
+    pub fn drain_pending_ext_focus(&mut self) {
+        let Some(until) = self.ext_focus_quiet_until else {
+            return;
+        };
+        if std::time::Instant::now() < until {
+            return;
+        }
+        self.ext_focus_quiet_until = None;
+        self.ext_focus_history.clear();
+        if let Some(target) = self.ext_focus_pending_target.take() {
+            tracing::debug!(target, "ext focus quiet expired — applying deferred target");
+            // Re-enter adoption; rate_limit_external_focus will see a fresh
+            // history and proceed normally. If the storm is ongoing it'll
+            // re-arm quiet on the very next AX event.
+            self.adopt_external_focus(target);
         }
     }
 
@@ -4461,6 +4567,85 @@ mod tests {
             state.active_workspace().tree.stack_info(2),
             Some((vec![2, 3], 0))
         );
+    }
+
+    #[test]
+    fn rate_limit_external_focus_enters_quiet_after_threshold_burst() {
+        let mut state = WmState::new();
+        // First THRESHOLD calls inside the sliding window must all pass
+        // through (return false = "do not drop").
+        for i in 0..EXT_FOCUS_STORM_THRESHOLD as u32 {
+            assert!(
+                !state.rate_limit_external_focus(i),
+                "call {i} should not be rate-limited"
+            );
+        }
+        // The next call exceeds threshold and trips quiet mode.
+        assert!(state.rate_limit_external_focus(999));
+        assert!(state.ext_focus_quiet_until.is_some());
+        assert_eq!(state.ext_focus_pending_target, Some(999));
+        // Storm is cleared so the next ticks won't trip immediately on stale
+        // history once quiet expires.
+        assert!(state.ext_focus_history.is_empty());
+
+        // While in quiet, subsequent adoptions should be dropped and update
+        // the pending target to whichever id arrived most recently.
+        assert!(state.rate_limit_external_focus(1234));
+        assert_eq!(state.ext_focus_pending_target, Some(1234));
+    }
+
+    #[test]
+    fn rate_limit_external_focus_resumes_after_quiet_expires() {
+        let mut state = WmState::new();
+        // Trip the storm.
+        for i in 0..=EXT_FOCUS_STORM_THRESHOLD as u32 {
+            state.rate_limit_external_focus(i);
+        }
+        assert!(state.ext_focus_quiet_until.is_some());
+
+        // Force quiet to "already expired" without sleeping.
+        state.ext_focus_quiet_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(10));
+
+        // Next call should fall through, clear quiet, and proceed.
+        assert!(!state.rate_limit_external_focus(42));
+        assert!(state.ext_focus_quiet_until.is_none());
+        assert!(state.ext_focus_pending_target.is_none());
+    }
+
+    #[test]
+    fn drain_pending_ext_focus_noop_when_quiet_not_set() {
+        let mut state = WmState::new();
+        state.ext_focus_pending_target = Some(7); // stale (shouldn't be applied)
+        state.drain_pending_ext_focus();
+        // No quiet armed → nothing drained, pending preserved untouched.
+        assert_eq!(state.ext_focus_pending_target, Some(7));
+    }
+
+    #[test]
+    fn drain_pending_ext_focus_holds_until_quiet_expires() {
+        let mut state = WmState::new();
+        state.ext_focus_pending_target = Some(7);
+        state.ext_focus_quiet_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(10));
+        state.drain_pending_ext_focus();
+        // Quiet still active → no drain.
+        assert_eq!(state.ext_focus_pending_target, Some(7));
+        assert!(state.ext_focus_quiet_until.is_some());
+    }
+
+    #[test]
+    fn drain_pending_ext_focus_consumes_target_after_expiry() {
+        let mut state = WmState::new();
+        // Pending target points at a window that won't resolve in workspaces
+        // (registry is empty), so adopt_external_focus early-returns; we
+        // just care that drain consumes pending and clears quiet state.
+        state.ext_focus_pending_target = Some(7);
+        state.ext_focus_quiet_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        state.drain_pending_ext_focus();
+        assert_eq!(state.ext_focus_pending_target, None);
+        assert!(state.ext_focus_quiet_until.is_none());
     }
 
     #[test]
