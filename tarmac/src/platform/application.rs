@@ -36,6 +36,16 @@ pub struct WindowInfo {
     pub ax_ref: CFRetained<AXUIElement>,
 }
 
+/// True if the process for `pid` is a running app currently in the hidden state
+/// (e.g. via cmd+H or Hide Others). Returns false if the pid does not correspond
+/// to a known running application — callers should treat that as "not hidden,
+/// proceed normally". Used to gate window reaping: a hidden app's windows
+/// disappear from CGWindowList even though they still exist.
+pub fn app_is_hidden(pid: i32) -> bool {
+    NSRunningApplication::runningApplicationWithProcessIdentifier(pid)
+        .is_some_and(|app| app.isHidden())
+}
+
 /// Discover all running regular applications.
 pub fn discover_applications() -> Vec<AppInfo> {
     let workspace = NSWorkspace::sharedWorkspace();

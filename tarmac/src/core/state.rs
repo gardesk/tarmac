@@ -3014,10 +3014,30 @@ impl WmState {
         self.install_observer_for_app(pid, &ax_app, owner, "");
     }
 
-    pub fn on_window_closed(&mut self, wid: u32) {
+    /// Returns true if the window was actually reaped, false if the call was
+    /// a no-op (window not in registry, or suppressed because parent app is
+    /// hidden). Callers should use the return value to gate side effects
+    /// like IPC WindowClosed publishes.
+    pub fn on_window_closed(&mut self, wid: u32) -> bool {
         let id = wid as WindowId;
         if !self.registry.contains(id) {
-            return;
+            return false;
+        }
+        // Hide Others (cmd+opt+H) and single-app Hide (cmd+H) drop the app's
+        // windows from CGWindowList even though they still exist. Both the
+        // polling observer and the 1Hz reconcile interpret that absence as
+        // closure and call here. If the parent app is hidden, the windows
+        // are alive — leave them in the registry/tree so they snap back to
+        // their original tiles when the user un-hides.
+        if let Some(w) = self.registry.get(id)
+            && crate::platform::application::app_is_hidden(w.app_pid)
+        {
+            tracing::info!(
+                id,
+                pid = w.app_pid,
+                "suppressing reap: parent app is hidden, window still alive"
+            );
+            return false;
         }
         tracing::info!(id, "window closed -> retiling");
         self.borders.remove_border(id);
@@ -3047,6 +3067,7 @@ impl WmState {
             self.focus_window(next);
             self.sync_mouse_after_focus(ws_idx, next);
         }
+        true
     }
 
     pub fn on_app_launched(&mut self, pid: i32, name: &str, bundle_id: &str) {
@@ -4440,6 +4461,42 @@ mod tests {
             state.active_workspace().tree.stack_info(2),
             Some((vec![2, 3], 0))
         );
+    }
+
+    #[test]
+    fn on_window_closed_returns_false_when_wid_not_in_registry() {
+        // Establishes the bool contract used by main.rs to gate IPC publishes:
+        // an unknown wid must report "did not reap" so the WindowClosed event
+        // is not emitted to subscribers for a window we never tracked.
+        let mut state = WmState::new();
+        assert!(!state.on_window_closed(12345));
+    }
+
+    #[test]
+    fn on_window_closed_reaps_when_app_lookup_fails() {
+        // app_is_hidden returns false for pids that don't resolve to a running
+        // NSRunningApplication, so a window owned by a non-existent pid (e.g.
+        // app already terminated) must be reaped normally — not suppressed.
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        // PID -1 cannot exist as a real process; NSRunningApplication lookup
+        // returns nil, so app_is_hidden falls through to false.
+        state.registry.add(tracked_window(7777, -1, "Ghost"));
+        state
+            .workspaces
+            .get_mut(0)
+            .tree
+            .insert_with_rect(7777, None, state.monitors[0].usable_frame);
+
+        assert!(state.on_window_closed(7777));
+        assert!(!state.registry.contains(7777));
     }
 
     #[test]

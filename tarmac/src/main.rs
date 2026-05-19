@@ -137,12 +137,14 @@ fn main() {
             });
         }),
         Box::new(move |wid, _pid| {
-            WM_STATE.with(|s| {
-                if let Some(state) = s.borrow_mut().as_mut() {
-                    state.on_window_closed(wid);
-                }
+            let reaped = WM_STATE.with(|s| {
+                s.borrow_mut()
+                    .as_mut()
+                    .is_some_and(|state| state.on_window_closed(wid))
             });
-            publish_event(tarmac::ipc::events::WmEvent::WindowClosed { window_id: wid });
+            if reaped {
+                publish_event(tarmac::ipc::events::WmEvent::WindowClosed { window_id: wid });
+            }
         }),
         Box::new(move |pid| {
             WM_STATE.with(|s| {
