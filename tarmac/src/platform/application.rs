@@ -142,23 +142,37 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
 /// Discover all on-screen windows using CGWindowList as ground truth,
 /// then enrich with AX attributes. This catches apps that don't appear
 /// in NSWorkspace.runningApplications (e.g., wezterm-gui, non-bundled apps).
+///
+/// Space filtering: kCGWindowListOptionOnScreenOnly returns only windows
+/// on the currently-visible macOS Space (across all monitors), so the
+/// wid set we build from CGWindowList is the authoritative "on the
+/// current Space" filter. AX enumeration of an app's windows returns
+/// the app's windows across ALL Spaces, so we cross-reference each AX
+/// window's wid against the CGWindowList set and drop off-Space matches.
+/// Without this filter, restarting tarmac dumps every off-Space window
+/// into the currently-active tarmac workspace, blowing up its BSP tree
+/// (disaster of 2026-05-19). Off-Space windows get picked up later by
+/// the polling observer when the user switches to their Space.
 pub fn discover_all_windows() -> Vec<WindowInfo> {
     let mut all_windows = Vec::new();
     let mut seen_pids = std::collections::HashSet::new();
 
-    // Phase 1: CGWindowList — ground truth for all on-screen windows
+    // Phase 1: CGWindowList — ground truth for windows on the current Space.
     let cg_windows = get_cg_window_list();
     tracing::debug!(count = cg_windows.len(), "CGWindowList on-screen windows");
     for cg in &cg_windows {
         tracing::trace!(wid = cg.wid, pid = cg.pid, owner = %cg.owner, title = %cg.title, "CGWindowList entry");
     }
 
-    // Group by PID
+    let on_space_wids: std::collections::HashSet<u32> =
+        cg_windows.iter().map(|cg| cg.wid).collect();
     for cg in &cg_windows {
         seen_pids.insert(cg.pid);
     }
 
-    // Phase 2: For each unique PID, create an AX app ref and enumerate its windows
+    // Phase 2: For each unique PID, AX-enumerate windows and keep only the
+    // ones present in on_space_wids — that drops the app's windows on
+    // other Spaces.
     for pid in &seen_pids {
         let ax_app = unsafe { AXUIElement::new_application(*pid) };
         let ax_windows = match ax_get_windows(&ax_app) {
@@ -169,7 +183,6 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
             }
         };
 
-        // Find app name from CG data
         let app_name = cg_windows
             .iter()
             .find(|w| w.pid == *pid)
@@ -188,6 +201,16 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
                 Err(_) => continue,
             };
 
+            if !on_space_wids.contains(&id) {
+                tracing::trace!(
+                    id,
+                    pid,
+                    app = %app_name,
+                    "skipping window not on current Space"
+                );
+                continue;
+            }
+
             let title = ax_get_string(&ax_win, "AXTitle").unwrap_or_default();
             let role = ax_get_string(&ax_win, "AXRole").unwrap_or_default();
             let subrole = ax_get_string(&ax_win, "AXSubrole").unwrap_or_default();
@@ -198,7 +221,7 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
                 id,
                 app_pid: *pid,
                 app_name: app_name.clone(),
-                app_bundle_id: String::new(), // CG doesn't give bundle IDs
+                app_bundle_id: String::new(),
                 title,
                 role,
                 subrole,
@@ -211,28 +234,22 @@ pub fn discover_all_windows() -> Vec<WindowInfo> {
         }
     }
 
-    // Phase 3: Also check NSWorkspace apps (for bundle IDs and apps with no on-screen windows yet)
+    // Phase 3: NSWorkspace fill-in. For apps already discovered via CG, just
+    // upgrade their bundle id / name. Apps that have no CGWindowList entry
+    // at all are necessarily off-Space (or have no windows yet) — skip
+    // their AX enumeration entirely to keep startup focused on the visible
+    // Space. The polling observer will pick them up when they appear.
     let ns_apps = discover_applications();
     for app in &ns_apps {
         if seen_pids.contains(&app.pid) {
-            // Already handled via CG path — update bundle IDs
             for w in &mut all_windows {
                 if w.app_pid == app.pid && w.app_bundle_id.is_empty() {
                     w.app_bundle_id = app.bundle_id.clone();
                     if w.app_name.is_empty() || w.app_name == "wezterm-gui" {
-                        // Prefer NSWorkspace name if available
                         w.app_name = app.name.clone();
                     }
                 }
             }
-            continue;
-        }
-
-        // App not in CG list (no on-screen windows) — try AX anyway
-        let windows = enumerate_windows(app);
-        if !windows.is_empty() {
-            tracing::debug!(app = %app.name, count = windows.len(), "discovered windows (AX only)");
-            all_windows.extend(windows);
         }
     }
 
