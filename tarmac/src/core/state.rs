@@ -489,7 +489,7 @@ impl WmState {
                 sr_h = screen_rect.height, "apply_layout");
 
             for (wid, rect) in &actives {
-                tracing::debug!(
+                tracing::trace!(
                     wid,
                     x = rect.x,
                     y = rect.y,
@@ -501,7 +501,7 @@ impl WmState {
             }
             for (wid, _) in &geometries {
                 if !active_ids.contains(wid) {
-                    tracing::debug!(wid, "stack non-active hidden off-screen");
+                    tracing::trace!(wid, "stack non-active hidden off-screen");
                     self.hide_window(*wid);
                 }
             }
