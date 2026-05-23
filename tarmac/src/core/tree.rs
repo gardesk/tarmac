@@ -1680,6 +1680,37 @@ mod tests {
     }
 
     #[test]
+    fn nearest_to_edge_picks_topmost_on_down_cross() {
+        // Tall rect → splits are Horizontal (top/bottom). Build 4
+        // windows; pressing Down to enter this monitor should pick the
+        // topmost (smallest y) window.
+        let tall = Rect::new(0.0, 0.0, 500.0, 1080.0);
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, tall);
+        tree.insert_with_rect(2, Some(1), tall);
+        tree.insert_with_rect(3, Some(2), tall);
+        tree.insert_with_rect(4, Some(3), tall);
+        let geoms = tree.calculate_geometries(tall);
+        // Win1 ends up topmost (y=0).
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Down), Some(1));
+    }
+
+    #[test]
+    fn nearest_to_edge_picks_bottommost_on_up_cross() {
+        // 3 windows on a tall rect; 4 would land in a Vertical split
+        // alongside 3 (same y range) producing a tie. Stick with 3 so
+        // the bottommost is unambiguous.
+        let tall = Rect::new(0.0, 0.0, 500.0, 1080.0);
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, tall);
+        tree.insert_with_rect(2, Some(1), tall);
+        tree.insert_with_rect(3, Some(2), tall);
+        let geoms = tree.calculate_geometries(tall);
+        // Win3 ends up bottommost (largest y).
+        assert_eq!(Node::nearest_to_edge(&geoms, Direction::Up), Some(3));
+    }
+
+    #[test]
     fn nearest_to_edge_empty() {
         let geoms: Vec<(WindowId, Rect)> = vec![];
         assert_eq!(Node::nearest_to_edge(&geoms, Direction::Right), None);
