@@ -5016,6 +5016,123 @@ mod tests {
         assert!(!state.registry.contains(7777));
     }
 
+    /// Shared HX-04 fixture: single 1920x1080 monitor with 3 windows in a
+    /// Vertical-then-nested-Horizontal layout. Tree shape:
+    ///   Internal{V, Leaf{1}, Internal{H, Leaf{2}, Leaf{3}}}
+    /// Geometries: 1 = left half, 2 = top-right quad, 3 = bottom-right quad.
+    fn make_three_window_state() -> WmState {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        // Disable mouse_follows_focus so move_direction skips the AX warp.
+        state.mouse_follows_focus = false;
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+        for wid in 1u32..=3 {
+            state.registry.add(tracked_window(wid, 100, "Ghost"));
+        }
+        let ws = state.workspaces.get_mut(0);
+        ws.tree.insert_with_rect(1, None, screen);
+        ws.tree.insert_with_rect(2, Some(1), screen);
+        ws.tree.insert_with_rect(3, Some(2), screen);
+        state
+    }
+
+    #[test]
+    fn move_direction_relocates_to_target_leaf() {
+        // Focus window 1 (left half). Move Right computes focal at
+        // (961, 540), which falls in window 3's tile (bottom-right
+        // quad). The relocate path removes 1 and re-inserts next to 3.
+        let mut state = make_three_window_state();
+        state.workspaces.get_mut(0).focused = Some(1);
+        let screen = state.monitors[0].usable_frame;
+
+        let pre = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let pre_one = pre.iter().find(|(w, _)| *w == 1).unwrap().1;
+        assert_eq!(pre_one.x, 0.0, "test setup: 1 starts on the left");
+
+        state.move_direction(Direction::Right);
+
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_one = post.iter().find(|(w, _)| *w == 1).unwrap().1;
+        // After Move Right, 1's tile lives in the right half (x >= 960).
+        assert!(
+            post_one.x >= 960.0,
+            "window 1 should have relocated to the right half, got x={}",
+            post_one.x
+        );
+        // All 3 windows remain in the tree.
+        assert_eq!(post.len(), 3);
+    }
+
+    #[test]
+    fn move_direction_no_op_with_single_window() {
+        // Single window fills the workspace; any focal point lands
+        // outside sr. With monitors.len()==1 the cross-monitor branch
+        // returns early. Tree shape must be unchanged.
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.mouse_follows_focus = false;
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+        state.registry.add(tracked_window(7, 100, "Solo"));
+        state
+            .workspaces
+            .get_mut(0)
+            .tree
+            .insert_with_rect(7, None, screen);
+        state.workspaces.get_mut(0).focused = Some(7);
+
+        let pre = state.workspaces.get(0).tree.clone();
+        for dir in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            state.move_direction(dir);
+        }
+        let post = state.workspaces.get(0).tree.clone();
+        assert_eq!(pre, post, "single-window tree must be unchanged");
+    }
+
+    #[test]
+    fn move_direction_no_op_at_edge_when_fallback_disabled() {
+        // Window 1 already occupies the left half; pressing Move Left
+        // pushes the focal to (-1, 540), outside the workspace. With
+        // window_direction_monitor_fallback disabled the action no-ops.
+        let mut state = make_three_window_state();
+        state.workspaces.get_mut(0).focused = Some(1);
+        state.window_direction_monitor_fallback = false;
+        let screen = state.monitors[0].usable_frame;
+
+        let pre = state.workspaces.get(0).tree.clone();
+        state.move_direction(Direction::Left);
+        let post = state.workspaces.get(0).tree.clone();
+        assert_eq!(pre, post, "tree must be unchanged at edge w/o fallback");
+
+        // Sanity: with a SINGLE monitor the fallback also no-ops even
+        // when the setting is enabled, but tree must still be unchanged.
+        state.window_direction_monitor_fallback = true;
+        state.move_direction(Direction::Left);
+        let post2 = state.workspaces.get(0).tree.clone();
+        assert_eq!(pre, post2);
+
+        // And verify the workspace rect was used correctly (no crash).
+        let _ = state.workspaces.get(0).tree.calculate_geometries(screen);
+    }
+
     #[test]
     fn unstack_focused_restores_original_tree() {
         let mut state = WmState::new();
