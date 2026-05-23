@@ -1844,6 +1844,172 @@ mod tests {
         assert!(matches!(tree, Node::Leaf { window: Some(1) }));
     }
 
+    // --- HX-02 resize / set_parent_ratio tests ---
+
+    /// Insertion sequence (1,2,3,4 in order with the noted targets) on
+    /// SCREEN (1920x1080) yields:
+    ///   A(V) — root, ratio 0.5
+    ///   ├── B(H) — left half, 960x1080 (tall → Horizontal split)
+    ///   │   ├── Leaf 1
+    ///   │   └── C(V) — bottom-left quad, 960x540 (wide → Vertical split)
+    ///   │       ├── Leaf 3
+    ///   │       └── Leaf 4
+    ///   └── Leaf 2
+    /// Window 4 has matching-direction ancestors at C (Vertical) and A
+    /// (Vertical) for Left/Right resize; B (Horizontal) sits between
+    /// and does not match.
+    fn build_mixed_split_tree() -> Node {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(1), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+        tree
+    }
+
+    #[test]
+    fn resize_left_climbs_past_horizontal_parent() {
+        // Window 1's only matching-direction ancestor for Left/Right
+        // is A (root). The climb-past-non-matching behavior must find
+        // A even though Leaf{1}'s recursion bottoms out at a non-Internal.
+        let mut tree = build_mixed_split_tree();
+        let pre = tree.calculate_geometries(SCREEN);
+        let pre_one_w = pre.iter().find(|(w, _)| *w == 1).unwrap().1.width;
+        assert!(tree.resize(1, Direction::Right, 0.05, true));
+        let post = tree.calculate_geometries(SCREEN);
+        let post_one_w = post.iter().find(|(w, _)| *w == 1).unwrap().1.width;
+        assert!(post_one_w > pre_one_w, "window 1 should widen via root split");
+    }
+
+    #[test]
+    fn resize_smart_picks_deepest_matching_ancestor() {
+        // Window 4 has two matching-direction ancestors for Left/Right
+        // (C deepest, A shallowest). Smart=true → adjust C, leaving A
+        // unchanged. Verify by checking that window 2 (whose only
+        // governing ancestor is A) does NOT change size.
+        let mut tree = build_mixed_split_tree();
+        let pre = tree.calculate_geometries(SCREEN);
+        let pre_two_w = pre.iter().find(|(w, _)| *w == 2).unwrap().1.width;
+        let pre_three_w = pre.iter().find(|(w, _)| *w == 3).unwrap().1.width;
+        let pre_four_w = pre.iter().find(|(w, _)| *w == 4).unwrap().1.width;
+
+        assert!(tree.resize(4, Direction::Left, 0.05, true));
+        let post = tree.calculate_geometries(SCREEN);
+        let post_two_w = post.iter().find(|(w, _)| *w == 2).unwrap().1.width;
+        let post_three_w = post.iter().find(|(w, _)| *w == 3).unwrap().1.width;
+        let post_four_w = post.iter().find(|(w, _)| *w == 4).unwrap().1.width;
+
+        assert!(approx_eq(pre_two_w, post_two_w), "A's ratio must not change");
+        assert!(!approx_eq(pre_three_w, post_three_w));
+        assert!(!approx_eq(pre_four_w, post_four_w));
+    }
+
+    #[test]
+    fn resize_not_smart_picks_shallowest_matching_ancestor() {
+        // Same tree. Smart=false → adjust A (shallowest), leaving C
+        // unchanged. Window 2's width changes because A.right's rect
+        // expands; windows 3 and 4 share A.left's new (smaller) width
+        // but keep their internal 50/50 split (C unchanged).
+        let mut tree = build_mixed_split_tree();
+        let pre = tree.calculate_geometries(SCREEN);
+        let pre_two_w = pre.iter().find(|(w, _)| *w == 2).unwrap().1.width;
+        let pre_three_w = pre.iter().find(|(w, _)| *w == 3).unwrap().1.width;
+
+        assert!(tree.resize(4, Direction::Left, 0.05, false));
+        let post = tree.calculate_geometries(SCREEN);
+        let post_two_w = post.iter().find(|(w, _)| *w == 2).unwrap().1.width;
+        let post_three_w = post.iter().find(|(w, _)| *w == 3).unwrap().1.width;
+        let post_four_w = post.iter().find(|(w, _)| *w == 4).unwrap().1.width;
+
+        assert!(!approx_eq(pre_two_w, post_two_w), "A's ratio must change");
+        assert!(approx_eq(post_three_w, post_four_w), "C's ratio must stay 0.5");
+        assert!(!approx_eq(pre_three_w, post_three_w));
+    }
+
+    #[test]
+    fn resize_no_matching_ancestor_returns_false() {
+        // Tall rect → Horizontal split. No Vertical ancestor → Left/Right
+        // resize no-ops regardless of the smart flag.
+        let tall = Rect::new(0.0, 0.0, 500.0, 1000.0);
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, tall);
+        tree.insert_with_rect(2, Some(1), tall);
+        assert!(matches!(
+            tree,
+            Node::Internal {
+                split: SplitDirection::Horizontal,
+                ..
+            }
+        ));
+        assert!(!tree.resize(1, Direction::Left, 0.05, true));
+        assert!(!tree.resize(1, Direction::Right, 0.05, true));
+        assert!(!tree.resize(1, Direction::Left, 0.05, false));
+    }
+
+    #[test]
+    fn set_parent_ratio_sets_focused_windows_parent() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(tree.set_parent_ratio(1, 0.7));
+        match &tree {
+            Node::Internal { ratio, .. } => assert!(approx_eq(*ratio as f64, 0.7)),
+            _ => panic!("expected Internal root"),
+        }
+    }
+
+    #[test]
+    fn set_parent_ratio_clamps_below_min() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(tree.set_parent_ratio(1, 0.05));
+        match &tree {
+            Node::Internal { ratio, .. } => assert!(approx_eq(*ratio as f64, 0.1)),
+            _ => panic!("expected Internal root"),
+        }
+    }
+
+    #[test]
+    fn set_parent_ratio_clamps_above_max() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(tree.set_parent_ratio(1, 1.5));
+        match &tree {
+            Node::Internal { ratio, .. } => assert!(approx_eq(*ratio as f64, 0.9)),
+            _ => panic!("expected Internal root"),
+        }
+    }
+
+    #[test]
+    fn set_parent_ratio_returns_false_for_root() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        assert!(!tree.set_parent_ratio(1, 0.5));
+    }
+
+    #[test]
+    fn set_parent_ratio_targets_deepest_internal() {
+        // build_mixed_split_tree: A(V){B(H){L1, C(V){L3, L4}}, L2}.
+        // Window 4's deepest Internal is C. set_parent_ratio(4, 0.8)
+        // should adjust C, not A or B.
+        let mut tree = build_mixed_split_tree();
+        assert!(tree.set_parent_ratio(4, 0.8));
+        match &tree {
+            Node::Internal { left, .. } => match left.as_ref() {
+                Node::Internal { right: b_right, .. } => match b_right.as_ref() {
+                    Node::Internal { ratio: c_ratio, .. } => {
+                        assert!(approx_eq(*c_ratio as f64, 0.8));
+                    }
+                    other => panic!("expected C as Internal, got {other:?}"),
+                },
+                other => panic!("expected B as Internal, got {other:?}"),
+            },
+            other => panic!("expected A as Internal root, got {other:?}"),
+        }
+    }
+
     // --- find_leaf_at_point tests ---
 
     #[test]
