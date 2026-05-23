@@ -255,6 +255,9 @@ fn handle_action(action: Action) {
                 Action::ToggleFloat => state.toggle_float(),
                 Action::Unstack => state.unstack_focused(),
                 Action::PromoteStack => state.promote_stack_focused(),
+                Action::ToggleSplit => state.toggle_split(),
+                Action::SwapSplit => state.swap_split(),
+                Action::PromoteToRoot => state.promote_to_root(),
                 Action::ToggleSpecial(ref name) => state.toggle_special(name),
                 Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
