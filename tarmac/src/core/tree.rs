@@ -1243,6 +1243,42 @@ mod tests {
         assert!(!r.contains_point(50.0, 150.0));
     }
 
+    #[test]
+    fn focal_point_left_is_one_pixel_west_of_window() {
+        let r = Rect::new(100.0, 100.0, 200.0, 200.0);
+        let (x, y) = r.focal_point_for_direction(Direction::Left);
+        assert_eq!(x, 99.0);
+        assert_eq!(y, 200.0);
+        assert!(!r.contains_point(x, y));
+    }
+
+    #[test]
+    fn focal_point_right_is_one_pixel_east() {
+        let r = Rect::new(100.0, 100.0, 200.0, 200.0);
+        let (x, y) = r.focal_point_for_direction(Direction::Right);
+        assert_eq!(x, 301.0);
+        assert_eq!(y, 200.0);
+        assert!(!r.contains_point(x, y));
+    }
+
+    #[test]
+    fn focal_point_up_is_one_pixel_north() {
+        let r = Rect::new(100.0, 100.0, 200.0, 200.0);
+        let (x, y) = r.focal_point_for_direction(Direction::Up);
+        assert_eq!(x, 200.0);
+        assert_eq!(y, 99.0);
+        assert!(!r.contains_point(x, y));
+    }
+
+    #[test]
+    fn focal_point_down_is_one_pixel_south() {
+        let r = Rect::new(100.0, 100.0, 200.0, 200.0);
+        let (x, y) = r.focal_point_for_direction(Direction::Down);
+        assert_eq!(x, 200.0);
+        assert_eq!(y, 301.0);
+        assert!(!r.contains_point(x, y));
+    }
+
     // --- Node basic tests ---
 
     #[test]
