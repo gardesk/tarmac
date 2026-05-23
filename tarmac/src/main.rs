@@ -68,6 +68,7 @@ fn main() {
     state.mouse_follows_focus = config.settings.mouse_follows_focus;
     state.gap_inner = config.settings.gap_inner;
     state.gap_outer = config.settings.gap_outer;
+    state.smart_resizing = config.settings.smart_resizing;
     state.bar_height = config.settings.bar_height;
     state.rules = config.rules.clone();
     state.special_configs = config.special_configs.clone();
@@ -951,6 +952,7 @@ fn reload_config() {
             state.mouse_follows_focus = config.settings.mouse_follows_focus;
             state.gap_inner = config.settings.gap_inner;
             state.gap_outer = config.settings.gap_outer;
+            state.smart_resizing = config.settings.smart_resizing;
             state.bar_height = config.settings.bar_height;
             state.rules = config.rules.clone();
             state.special_configs = config.special_configs.clone();

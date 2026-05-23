@@ -90,6 +90,10 @@ pub struct WmState {
     pub mouse_follows_focus: bool,
     pub gap_inner: f64,
     pub gap_outer: f64,
+    /// HX-02: when true, `Action::Resize` adjusts the deepest matching
+    /// ancestor split (climb-past-non-matching behavior). When false,
+    /// adjusts the shallowest matching ancestor (pre-HX-02 behavior).
+    pub smart_resizing: bool,
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
@@ -131,6 +135,7 @@ impl WmState {
             mouse_follows_focus: true,
             gap_inner: 0.0,
             gap_outer: 0.0,
+            smart_resizing: true,
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
@@ -1163,10 +1168,7 @@ impl WmState {
             Some(f) => f,
             None => return,
         };
-        // HX-02: pass smart_resizing flag from settings; step 9 of HX-02
-        // wires the actual setting. For now the field doesn't exist yet
-        // so we default to true (the new climb-to-deepest behavior).
-        let smart = true;
+        let smart = self.smart_resizing;
         if self
             .active_workspace_mut()
             .tree

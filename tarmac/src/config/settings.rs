@@ -19,6 +19,11 @@ pub struct Settings {
     pub border_color_unfocused: String,
     /// Border corner radius in pixels.
     pub border_radius: f64,
+    /// HX-02: when true, `Action::Resize` adjusts the *deepest* matching
+    /// ancestor split (boundary closest to the focused window moves first).
+    /// When false, adjusts the *shallowest* matching ancestor (pre-HX-02
+    /// behavior; boundary closest to the screen edge moves first).
+    pub smart_resizing: bool,
 }
 
 impl Default for Settings {
@@ -35,6 +40,7 @@ impl Default for Settings {
             border_color_focused: "#5294e2".to_string(),
             border_color_unfocused: "#2d2d2d".to_string(),
             border_radius: 10.0,
+            smart_resizing: true,
         }
     }
 }
@@ -92,6 +98,9 @@ impl Settings {
                 if let Ok(v) = value.parse() {
                     self.border_radius = v;
                 }
+            }
+            "smart_resizing" => {
+                self.smart_resizing = value == "true";
             }
             _ => {
                 tracing::trace!(key, value, "unknown setting (ignored)");
