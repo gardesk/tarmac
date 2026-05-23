@@ -329,6 +329,14 @@ gar.set("gap_outer", 8)
 -- Behavior
 gar.set("focus_follows_mouse", "true")
 gar.set("mouse_follows_focus", "true")
+-- HX-02: when true (default), `Action::Resize` adjusts the deepest matching
+-- ancestor split — boundary nearest the focused window moves first.
+-- When false, adjusts the shallowest matching ancestor (pre-HX-02 global feel).
+gar.set("smart_resizing", "true")
+-- `tarmacctl set_ratio <0.1..0.9>` sets the focused window's parent split
+-- to an absolute ratio. Useful from Lua: gar.bind("mod+ctrl+5", function()
+--   gar.action("set_ratio", 0.5)
+-- end)
 
 -- Terminal command
 gar.set("terminal", "open -na WezTerm")
