@@ -1152,6 +1152,7 @@ fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
         border_color_unfocused: doc.managed.settings.border_color_unfocused.clone(),
         focus_follows_mouse: doc.managed.settings.focus_follows_mouse,
         mouse_follows_focus: doc.managed.settings.mouse_follows_focus,
+        smart_resizing: doc.managed.settings.smart_resizing,
         mod_key: match doc.managed.settings.mod_key {
             mods if mods == tarmac::core::input::Modifiers::OPTION => "option".to_string(),
             mods if mods == tarmac::core::input::Modifiers::CONTROL => "control".to_string(),
@@ -1649,6 +1650,10 @@ fn poll_settings_actions() {
                 }
                 SettingsAction::MouseFollowsFocus(value) => {
                     doc.managed.settings.mouse_follows_focus = value;
+                    should_write = true;
+                }
+                SettingsAction::SmartResizing(value) => {
+                    doc.managed.settings.smart_resizing = value;
                     should_write = true;
                 }
                 SettingsAction::ModKey(value) => {

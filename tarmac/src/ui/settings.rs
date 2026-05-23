@@ -134,6 +134,7 @@ pub enum SettingsAction {
     BorderColorUnfocused(String),
     FocusFollowsMouse(bool),
     MouseFollowsFocus(bool),
+    SmartResizing(bool),
     ModKey(String),
     SelectKeybind(String),
     AddKeybind,
@@ -170,6 +171,7 @@ pub struct SettingsSnapshot {
     pub border_color_unfocused: String,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
+    pub smart_resizing: bool,
     pub mod_key: String,
     pub keybinds: Vec<KeybindRow>,
     pub selected_keybind_id: Option<String>,
@@ -848,6 +850,13 @@ define_class!(
             }
         }
 
+        #[unsafe(method(onSmartResizingChanged:))]
+        fn on_smart_resizing(&self, sender: Option<&NSButton>) {
+            if let Some(sender) = sender {
+                self.emit(SettingsAction::SmartResizing(sender.state() == 1));
+            }
+        }
+
         #[unsafe(method(onModKeyChanged:))]
         fn on_mod_key_changed(&self, sender: Option<&NSPopUpButton>) {
             if let Some(sender) = sender {
@@ -1256,6 +1265,7 @@ pub struct SettingsWindow {
     unfocused_color_well: Retained<NSColorWell>,
     ffm_checkbox: Retained<NSButton>,
     mff_checkbox: Retained<NSButton>,
+    smart_resizing_checkbox: Retained<NSButton>,
     mod_key_popup: Retained<NSPopUpButton>,
     gap_inner_label: Retained<NSTextField>,
     gap_outer_label: Retained<NSTextField>,
@@ -1346,6 +1356,7 @@ impl SettingsWindow {
             unfocused_color_well: general.unfocused_color_well,
             ffm_checkbox: general.ffm_checkbox,
             mff_checkbox: general.mff_checkbox,
+            smart_resizing_checkbox: general.smart_resizing_checkbox,
             mod_key_popup: general.mod_key_popup,
             gap_inner_label: general.gap_inner_label,
             gap_outer_label: general.gap_outer_label,
@@ -1384,6 +1395,8 @@ impl SettingsWindow {
             .setState(if snapshot.focus_follows_mouse { 1 } else { 0 });
         self.mff_checkbox
             .setState(if snapshot.mouse_follows_focus { 1 } else { 0 });
+        self.smart_resizing_checkbox
+            .setState(if snapshot.smart_resizing { 1 } else { 0 });
         self.mod_key_popup
             .selectItemAtIndex(match snapshot.mod_key.as_str() {
                 "option" => 1,
@@ -1437,6 +1450,7 @@ struct GeneralTab {
     unfocused_color_well: Retained<NSColorWell>,
     ffm_checkbox: Retained<NSButton>,
     mff_checkbox: Retained<NSButton>,
+    smart_resizing_checkbox: Retained<NSButton>,
     mod_key_popup: Retained<NSPopUpButton>,
     gap_inner_label: Retained<NSTextField>,
     gap_outer_label: Retained<NSTextField>,
@@ -1622,6 +1636,16 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         y,
         sel!(onMouseFollowsFocusChanged:),
     );
+    y -= row;
+    let smart_resizing_checkbox = add_checkbox(
+        mtm,
+        &view,
+        handler,
+        "Smart resizing (resize climbs to deepest matching split)",
+        lx,
+        y,
+        sel!(onSmartResizingChanged:),
+    );
     y -= row + 18.0;
 
     add_section_label(mtm, &view, "Modifier Key", lx, y);
@@ -1648,6 +1672,7 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         unfocused_color_well,
         ffm_checkbox,
         mff_checkbox,
+        smart_resizing_checkbox,
         mod_key_popup,
         gap_inner_label,
         gap_outer_label,
