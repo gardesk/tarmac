@@ -5835,6 +5835,60 @@ mod tests {
         assert!(!state.is_dragging());
     }
 
+    // --- HX-09 drag-to-tile tests ---
+
+    #[test]
+    fn drag_threshold_cross_floats_tiled_window() {
+        let mut state = make_focal_test_state();
+        // Window 1 lives at (0,0,960,1080). Drag from inside its tile.
+        state.begin_move_drag(100.0, 100.0);
+        assert!(state.drag_threshold_active);
+        assert!(state.workspaces.get(0).tree.contains(1));
+        assert!(state.workspaces.get(0).floating.is_empty());
+
+        // Move past threshold.
+        state.update_drag(200.0, 100.0);
+        assert!(!state.drag_threshold_active);
+        assert_eq!(
+            state.drag.map(|d| d.mode),
+            Some(DragMode::TiledRelocate),
+            "mode should be TiledRelocate"
+        );
+        // Tree no longer has window 1.
+        assert!(!state.workspaces.get(0).tree.contains(1));
+        // Floating list has it.
+        assert!(state.workspaces.get(0).floating.iter().any(|f| f.id == 1));
+    }
+
+    #[test]
+    fn drag_drop_on_tile_retiles_at_focal() {
+        let mut state = make_focal_test_state();
+        state.begin_move_drag(100.0, 100.0);
+        state.update_drag(200.0, 100.0);
+        // After removal of 1, the tree collapses to Leaf{2} covering
+        // the whole workspace. Drop at (1500, 540) hits leaf 2.
+        state.end_drag(1500.0, 540.0);
+        // Window 1 is back in the tree.
+        assert!(state.workspaces.get(0).tree.contains(1));
+        // No longer in floating.
+        assert!(state.workspaces.get(0).floating.is_empty());
+        // Drag state cleared.
+        assert!(!state.is_dragging());
+    }
+
+    #[test]
+    fn drag_drop_off_monitor_keeps_floating() {
+        let mut state = make_focal_test_state();
+        state.begin_move_drag(100.0, 100.0);
+        state.update_drag(200.0, 100.0);
+        // Drop way outside the workspace rect.
+        state.end_drag(-1000.0, -1000.0);
+        // Window 1 stays floating.
+        assert!(state.workspaces.get(0).floating.iter().any(|f| f.id == 1));
+        assert!(!state.workspaces.get(0).tree.contains(1));
+        assert!(!state.is_dragging());
+    }
+
     // --- HX-06 pseudo-tile tests ---
 
     #[test]
