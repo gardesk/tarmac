@@ -24,6 +24,12 @@ pub struct Settings {
     /// When false, adjusts the *shallowest* matching ancestor (pre-HX-02
     /// behavior; boundary closest to the screen edge moves first).
     pub smart_resizing: bool,
+    /// HX-03: when true, `Action::Swap(Direction)` at a workspace edge
+    /// falls through to moving the focused window onto the geographically
+    /// adjacent monitor in that direction. Applies to all four
+    /// directions (pre-HX-03 was Left/Right only). When false the action
+    /// no-ops at the edge.
+    pub window_direction_monitor_fallback: bool,
 }
 
 impl Default for Settings {
@@ -41,6 +47,7 @@ impl Default for Settings {
             border_color_unfocused: "#2d2d2d".to_string(),
             border_radius: 10.0,
             smart_resizing: true,
+            window_direction_monitor_fallback: true,
         }
     }
 }
@@ -101,6 +108,9 @@ impl Settings {
             }
             "smart_resizing" => {
                 self.smart_resizing = value == "true";
+            }
+            "window_direction_monitor_fallback" => {
+                self.window_direction_monitor_fallback = value == "true";
             }
             _ => {
                 tracing::trace!(key, value, "unknown setting (ignored)");

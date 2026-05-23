@@ -69,6 +69,7 @@ fn main() {
     state.gap_inner = config.settings.gap_inner;
     state.gap_outer = config.settings.gap_outer;
     state.smart_resizing = config.settings.smart_resizing;
+    state.window_direction_monitor_fallback = config.settings.window_direction_monitor_fallback;
     state.bar_height = config.settings.bar_height;
     state.rules = config.rules.clone();
     state.special_configs = config.special_configs.clone();
@@ -961,6 +962,8 @@ fn reload_config() {
             state.gap_inner = config.settings.gap_inner;
             state.gap_outer = config.settings.gap_outer;
             state.smart_resizing = config.settings.smart_resizing;
+            state.window_direction_monitor_fallback =
+                config.settings.window_direction_monitor_fallback;
             state.bar_height = config.settings.bar_height;
             state.rules = config.rules.clone();
             state.special_configs = config.special_configs.clone();

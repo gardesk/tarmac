@@ -94,6 +94,10 @@ pub struct WmState {
     /// ancestor split (climb-past-non-matching behavior). When false,
     /// adjusts the shallowest matching ancestor (pre-HX-02 behavior).
     pub smart_resizing: bool,
+    /// HX-03: when true, `Action::Swap(Direction)` at a workspace edge
+    /// crosses to the geographically adjacent monitor in any of the
+    /// four directions. When false it no-ops at the edge.
+    pub window_direction_monitor_fallback: bool,
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
@@ -136,6 +140,7 @@ impl WmState {
             gap_inner: 0.0,
             gap_outer: 0.0,
             smart_resizing: true,
+            window_direction_monitor_fallback: true,
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
@@ -1139,19 +1144,14 @@ impl WmState {
             return;
         }
 
-        // At monitor edge or no adjacent window — move to adjacent monitor
-        if self.monitors.len() <= 1 {
+        // At monitor edge or no adjacent window — move to the
+        // geographically adjacent monitor in `direction`, when the
+        // user has enabled cross-monitor fallback (HX-03; default on).
+        if !self.window_direction_monitor_fallback || self.monitors.len() <= 1 {
             return;
         }
-        let new_mi = match direction {
-            Direction::Right => {
-                super::monitor::next_index_nowrap(&self.monitors, self.focused_monitor)
-            }
-            Direction::Left => {
-                super::monitor::prev_index_nowrap(&self.monitors, self.focused_monitor)
-            }
-            _ => None,
-        };
+        let new_mi =
+            super::monitor::next_in_direction(&self.monitors, self.focused_monitor, direction);
         if let Some(target_mi) = new_mi {
             tracing::debug!(
                 focused,
