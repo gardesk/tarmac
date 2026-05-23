@@ -399,6 +399,22 @@ gar.set("terminal", "open -na WezTerm")
 -- Keybindings
 -- Format: gar.bind("modifiers+key", "action [args]")
 -- "mod" resolves to the configured mod_key
+--
+-- ===========================================================================
+-- HX-04 (Hyprland-like moves campaign): default keymap change
+-- ===========================================================================
+-- `mod+shift+h/j/k/l` (and `mod+shift+arrows`) now bind to
+-- `Action::Move(Direction)`. Previously they bound to `Action::Swap`.
+--
+-- Move REMOVES the focused window from its tile and RE-INSERTS it at a focal
+-- point computed in the requested direction — the layout reshapes around the
+-- move. Swap exchanges two tile positions without restructuring.
+--
+-- If you prefer the old Swap behavior, the `swap` action is still bindable:
+--   gar.bind("mod+shift+h", "swap left")
+--   gar.bind("mod+shift+j", "swap down")
+--   ... etc.
+-- ===========================================================================
 
 gar.bind("mod+return", "spawn_terminal")
 gar.bind("mod+shift+q", "close")
@@ -418,7 +434,16 @@ gar.bind("alt+shift+.", "promote_stack")
 -- Pseudo-tile (HX-06). The window keeps its preferred size, centered within
 -- the assigned tile. Useful for picture-in-picture, video calls, terminals
 -- with fixed dimensions. Toggles off restore stretched behavior.
--- gar.bind("mod+shift+u", "toggle_pseudo")
+-- (mod+shift+u is taken by `unstack` above; using mod+alt+u to avoid collision.)
+-- gar.bind("mod+alt+u", "toggle_pseudo")
+
+-- Preselect (HX-05). Hint the next-opened window's insertion direction
+-- relative to the focused window. Single-use by default; set
+-- `permanent_direction_override = true` to make hints persist.
+-- gar.bind("mod+ctrl+h", "preselect left")
+-- gar.bind("mod+ctrl+j", "preselect down")
+-- gar.bind("mod+ctrl+k", "preselect up")
+-- gar.bind("mod+ctrl+l", "preselect right")
 
 -- User-initiated stacks (HX-07). `add_to_stack <dir>` merges the focused
 -- window into the adjacent leaf as a Stack (focused becomes the active
