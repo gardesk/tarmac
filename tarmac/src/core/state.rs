@@ -122,6 +122,19 @@ pub struct WmState {
     /// preferred size, centered within the assigned tile rect. In-memory
     /// only; restart resets all windows to stretched.
     pseudo_windows: std::collections::HashSet<WindowId>,
+    /// HX-08 minimum pixel delta a Mod+drag must travel before crossing
+    /// the threshold. Mirrors `Settings::drag_threshold`.
+    pub drag_threshold: f64,
+    /// HX-08: while Some(now < deadline), `adopt_external_focus` drops
+    /// incoming focus events. Parallels `workspace_switch_silence_until`.
+    /// Set by `begin_move_drag` on a tiled hit, refreshed by
+    /// `update_drag`, cleared by `end_drag`.
+    drag_suppress_focus_until: Option<std::time::Instant>,
+    /// HX-08: true between `begin_move_drag` (tiled hit) and the moment
+    /// the cursor crosses `drag_threshold`. Below threshold the drag
+    /// stays dormant — no AX writes, no float transition. HX-09 will
+    /// fill in what happens when this flag transitions to false.
+    drag_threshold_active: bool,
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
@@ -173,6 +186,9 @@ impl WmState {
             focal_point_source: "cursor_or_active".to_string(),
             last_cursor: None,
             pseudo_windows: std::collections::HashSet::new(),
+            drag_threshold: 5.0,
+            drag_suppress_focus_until: None,
+            drag_threshold_active: false,
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),

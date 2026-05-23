@@ -76,6 +76,7 @@ fn main() {
     state.preserve_split = config.settings.preserve_split;
     state.permanent_direction_override = config.settings.permanent_direction_override;
     state.focal_point_source = config.settings.focal_point_source.clone();
+    state.drag_threshold = config.settings.drag_threshold;
     state.bar_height = config.settings.bar_height;
     state.rules = config.rules.clone();
     state.special_configs = config.special_configs.clone();
@@ -1073,6 +1074,7 @@ fn reload_config() {
             state.preserve_split = config.settings.preserve_split;
             state.permanent_direction_override = config.settings.permanent_direction_override;
             state.focal_point_source = config.settings.focal_point_source.clone();
+            state.drag_threshold = config.settings.drag_threshold;
             state.bar_height = config.settings.bar_height;
             state.rules = config.rules.clone();
             state.special_configs = config.special_configs.clone();

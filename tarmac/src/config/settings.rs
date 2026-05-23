@@ -56,6 +56,11 @@ pub struct Settings {
     ///   "cursor_or_active" — cursor if inside focused workspace, else
     ///                        active. (Default; matches Hyprland.)
     pub focal_point_source: String,
+    /// HX-08: pixel delta a Mod+drag must travel before it's treated as
+    /// a drag (versus a click). Below the threshold, drag scaffolding
+    /// stays dormant and the gesture is effectively a click. Mirrors
+    /// Hyprland's `binds:drag_threshold`. Default 5.0.
+    pub drag_threshold: f64,
 }
 
 impl Default for Settings {
@@ -80,6 +85,7 @@ impl Default for Settings {
             preserve_split: false,
             permanent_direction_override: false,
             focal_point_source: "cursor_or_active".to_string(),
+            drag_threshold: 5.0,
         }
     }
 }
@@ -184,6 +190,13 @@ impl Settings {
                     );
                 }
             },
+            "drag_threshold" => {
+                if let Ok(v) = value.parse::<f64>()
+                    && v >= 0.0
+                {
+                    self.drag_threshold = v;
+                }
+            }
             _ => {
                 tracing::trace!(key, value, "unknown setting (ignored)");
             }
