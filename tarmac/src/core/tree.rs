@@ -175,8 +175,20 @@ impl Node {
 
     /// Determine split direction based on container aspect ratio.
     /// Wider than tall → vertical (side-by-side). Taller → horizontal (stacked).
+    /// Equivalent to `smart_split_direction_with_multiplier(rect, 1.0)`.
     pub fn smart_split_direction(rect: &Rect) -> SplitDirection {
-        if rect.width > rect.height {
+        Self::smart_split_direction_with_multiplier(rect, 1.0)
+    }
+
+    /// Aspect-driven split with a configurable threshold. The default
+    /// (multiplier=1.0) treats a perfectly square tile as the tipping
+    /// point. Higher multipliers bias toward Horizontal (stacked)
+    /// splits — a 16:9 monitor with multiplier=2.0 still produces
+    /// Horizontal splits because width / height < 2.0. Lower
+    /// multipliers bias the other way. Mirrors Hyprland's
+    /// `dwindle:split_width_multiplier` (HX-05).
+    pub fn smart_split_direction_with_multiplier(rect: &Rect, multiplier: f64) -> SplitDirection {
+        if rect.width > rect.height * multiplier {
             SplitDirection::Vertical
         } else {
             SplitDirection::Horizontal
@@ -1480,6 +1492,43 @@ mod tests {
         assert_eq!(
             Node::smart_split_direction(&Rect::new(0.0, 0.0, 500.0, 500.0)),
             SplitDirection::Horizontal
+        );
+    }
+
+    #[test]
+    fn smart_split_with_multiplier_high_biases_horizontal() {
+        // 16:9-ish rect (1920x1080). With multiplier=2.0 the threshold
+        // becomes width > height * 2 = 2160 — and 1920 < 2160 so we
+        // pick Horizontal (stacked) even though the rect is "wider."
+        assert_eq!(
+            Node::smart_split_direction_with_multiplier(
+                &Rect::new(0.0, 0.0, 1920.0, 1080.0),
+                2.0,
+            ),
+            SplitDirection::Horizontal
+        );
+    }
+
+    #[test]
+    fn smart_split_with_multiplier_low_biases_vertical() {
+        // Tall-ish rect (500x1000). With multiplier=0.4 the threshold
+        // becomes width > height * 0.4 = 400 — and 500 > 400, so we
+        // pick Vertical (side-by-side) even though the rect is taller.
+        assert_eq!(
+            Node::smart_split_direction_with_multiplier(
+                &Rect::new(0.0, 0.0, 500.0, 1000.0),
+                0.4,
+            ),
+            SplitDirection::Vertical
+        );
+    }
+
+    #[test]
+    fn smart_split_with_multiplier_one_matches_default() {
+        let r = Rect::new(0.0, 0.0, 800.0, 600.0);
+        assert_eq!(
+            Node::smart_split_direction_with_multiplier(&r, 1.0),
+            Node::smart_split_direction(&r)
         );
     }
 
