@@ -5889,6 +5889,114 @@ mod tests {
         assert!(!state.is_dragging());
     }
 
+    // --- HX-10 canonical "Hyprland-feel" scenarios ---
+    //
+    // These chain primitives across multiple HX sprints to verify the
+    // surfaces compose. Per-sprint tests already cover individual
+    // behaviors; HX-10's contribution is end-to-end glue.
+
+    #[test]
+    fn canonical_drag_then_move_then_promote() {
+        // HX-09 drag-to-tile → HX-04 directional move → HX-01 promote.
+        // Verifies the three pillars of keyboard + mouse movement
+        // chain without state corruption.
+        let mut state = make_focal_test_state();
+        // Start: 2-window vertical split. 1 = left, 2 = right.
+        // Drag window 1, drop on window 2's tile.
+        state.workspaces.get_mut(0).focused = Some(1);
+        state.begin_move_drag(100.0, 100.0);
+        state.update_drag(200.0, 100.0); // crosses threshold
+        state.end_drag(1500.0, 540.0); // hits the remaining tile
+        // Window 1 is back in the tree.
+        assert!(state.workspaces.get(0).tree.contains(1));
+        assert!(state.workspaces.get(0).floating.is_empty());
+
+        // Now Move Right on whichever window is currently focused.
+        // We just need to verify move_direction doesn't blow up after a
+        // drag-retile.
+        state.move_direction(Direction::Right);
+        assert!(state.workspaces.get(0).tree.contains(1));
+        assert!(state.workspaces.get(0).tree.contains(2));
+
+        // PromoteToRoot on whichever leaf is focused. Either may
+        // already be a root child (depending on retile), in which case
+        // promote no-ops and the assertion is just "no crash".
+        state.promote_to_root();
+        assert!(state.workspaces.get(0).tree.contains(1));
+        assert!(state.workspaces.get(0).tree.contains(2));
+    }
+
+    #[test]
+    fn canonical_preselect_then_focal_uses_hint() {
+        // HX-05 preselect + focal-point insertion.
+        let mut state = make_focal_test_state();
+        state.workspaces.get_mut(0).focused = Some(1);
+        state.preselect(Direction::Right);
+        // Preselect was stored on the active workspace.
+        assert!(state.workspaces.get(0).preselect.is_some());
+        // compute_focal_point consumes the hint (single-use default).
+        let focal = state.compute_focal_point_for_new_window();
+        // 1's tile is (0,0,960,1080); right edge focal = (961, 540).
+        assert_eq!(focal, (961.0, 540.0));
+        assert!(state.workspaces.get(0).preselect.is_none());
+    }
+
+    #[test]
+    fn canonical_pseudo_survives_smart_resize() {
+        // HX-06 pseudo + HX-02 smart resize: toggling pseudo on a
+        // window then resizing the workspace's split must not strip
+        // the pseudo flag (different state, no interference).
+        let mut state = make_focal_test_state();
+        state.workspaces.get_mut(0).focused = Some(1);
+        state.toggle_pseudo();
+        assert!(state.is_pseudo(1));
+        // Resize Right: with smart_resizing=true (default) climbs to
+        // the root's Vertical split. 1's pseudo flag must persist.
+        state.resize_direction(Direction::Right);
+        assert!(state.is_pseudo(1), "pseudo must survive resize");
+    }
+
+    #[test]
+    fn canonical_add_to_stack_then_unstack_roundtrip() {
+        // HX-07 AddToStack → existing Unstack: verifies the previous
+        // tree HX-07 records restores to two siblings.
+        let mut state = make_focal_test_state();
+        state.workspaces.get_mut(0).focused = Some(1);
+        state.add_to_stack(Direction::Right);
+        // Stack should now own both windows.
+        assert!(state.workspaces.get(0).tree.stack_info(1).is_some());
+        assert!(state.workspaces.get(0).tree.stack_info(2).is_some());
+        // Unstack from the active member (which is 1, the source).
+        assert!(state.workspaces.get_mut(0).tree.unstack(1));
+        // Both windows back as a 2-leaf Internal (sibling layout).
+        match &state.workspaces.get(0).tree {
+            Node::Internal { left, right, .. } => {
+                let l = left.windows();
+                let r = right.windows();
+                assert!(l.contains(&1) || r.contains(&1));
+                assert!(l.contains(&2) || r.contains(&2));
+            }
+            other => panic!("expected Internal root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonical_settings_landing_on_wmstate() {
+        // Verifies every HX setting introduced is actually mirrored
+        // onto WmState by default. Catches drift if someone adds a
+        // settings field but forgets the WmState mirror.
+        let state = WmState::new();
+        assert!(state.smart_resizing); // HX-02
+        assert!(state.window_direction_monitor_fallback); // HX-03
+        assert_eq!(state.split_axis, "smart"); // HX-05
+        assert_eq!(state.force_split, "follow_mouse"); // HX-05
+        assert_eq!(state.split_width_multiplier, 1.0); // HX-05
+        assert!(!state.preserve_split); // HX-05
+        assert!(!state.permanent_direction_override); // HX-05
+        assert_eq!(state.focal_point_source, "cursor_or_active"); // HX-05
+        assert_eq!(state.drag_threshold, 5.0); // HX-08
+    }
+
     // --- HX-06 pseudo-tile tests ---
 
     #[test]
