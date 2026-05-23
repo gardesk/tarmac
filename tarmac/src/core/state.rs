@@ -2065,15 +2065,18 @@ impl WmState {
                 return;
             }
             self.drag_threshold_active = false;
-            self.arm_drag_focus_suppression();
             tracing::debug!(
                 id = drag.window_id,
                 delta,
                 threshold = self.drag_threshold,
-                "drag threshold crossed"
+                "drag threshold crossed → floating for relocate"
             );
-            // HX-09 will fill in float_window_for_drag here. For now
-            // the drag stays dormant — no AX writes, no float.
+            // HX-09: float the tiled window, anchor the drag at the
+            // current cursor, switch mode to TiledRelocate. The
+            // helper writes back the mutated DragState below.
+            let mut new_drag = drag;
+            self.float_window_for_drag(&mut new_drag, (x, y));
+            self.drag = Some(new_drag);
             return;
         }
 
