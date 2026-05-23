@@ -649,6 +649,21 @@ impl Node {
     }
 
     /// Resize the split affecting a window in the given direction.
+    ///
+    /// Climbs from the focused leaf up the tree to find the *deepest*
+    /// ancestor split whose direction matches `direction`, and adjusts
+    /// that split's ratio. The pre-HX-02 implementation only triggered
+    /// at the shallowest matching ancestor (the root-most), which made
+    /// resizing "feel global": pressing Left would shift the outermost
+    /// vertical boundary regardless of how deeply the focused window
+    /// was nested. Climbing-up-then-pick-deepest keeps the adjustment
+    /// local — the boundary nearest the focused window moves first.
+    ///
+    /// Returns false when no ancestor split matches the requested
+    /// direction (e.g. all splits in the tree are Horizontal but
+    /// direction is Left/Right). In that case the focused window
+    /// already spans the relevant axis fully and there is nothing to
+    /// resize.
     pub fn resize(&mut self, window: WindowId, direction: Direction, delta: f32) -> bool {
         match self {
             Node::Leaf { .. } | Node::Stack { .. } => false,
@@ -658,13 +673,24 @@ impl Node {
                 left,
                 right,
             } => {
-                let matches = matches!(
+                // Recurse first: a deeper Internal matching the direction
+                // takes precedence over this level. This yields the
+                // deepest matching ancestor when the recursion returns
+                // true.
+                if left.contains(window) && left.resize(window, direction, delta) {
+                    return true;
+                }
+                if right.contains(window) && right.resize(window, direction, delta) {
+                    return true;
+                }
+
+                let axis_matches = matches!(
                     (split, direction),
                     (SplitDirection::Vertical, Direction::Left | Direction::Right)
                         | (SplitDirection::Horizontal, Direction::Up | Direction::Down)
                 );
 
-                if matches && (left.contains(window) || right.contains(window)) {
+                if axis_matches && (left.contains(window) || right.contains(window)) {
                     let in_left = left.contains(window);
                     let adjustment = match direction {
                         Direction::Right | Direction::Down => {
@@ -683,13 +709,7 @@ impl Node {
                         }
                     };
                     *ratio = (*ratio + adjustment).clamp(0.1, 0.9);
-                    return true;
-                }
-
-                if left.contains(window) {
-                    left.resize(window, direction, delta)
-                } else if right.contains(window) {
-                    right.resize(window, direction, delta)
+                    true
                 } else {
                     false
                 }
