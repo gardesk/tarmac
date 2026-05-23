@@ -2250,6 +2250,17 @@ impl WmState {
         }
     }
 
+    /// HX-05: record a directional preselect hint for the active
+    /// workspace. The next window opened in this workspace will use
+    /// the hint to derive its focal point. Hint persistence matches
+    /// `permanent_direction_override` — when true the hint survives
+    /// multiple inserts; when false it clears after one use.
+    pub fn preselect(&mut self, direction: super::tree::Direction) {
+        let persistent = self.permanent_direction_override;
+        self.active_workspace_mut().preselect = Some((direction, persistent));
+        tracing::debug!(?direction, persistent, "preselect set");
+    }
+
     pub fn set_ratio(&mut self, value: f64) {
         let focused = match self.effective_focused() {
             Some(f) => f,

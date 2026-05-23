@@ -856,6 +856,10 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
                 .ok_or("set_ratio requires a numeric ratio (e.g. 0.6)")?;
             Ok(Action::SetRatio(value))
         }
+        "preselect" => {
+            let dir = parse_direction(parts.get(1).copied().unwrap_or(""))?;
+            Ok(Action::Preselect(dir))
+        }
         "workspace_next" => Ok(Action::WorkspaceNext),
         "workspace_prev" => Ok(Action::WorkspacePrev),
         "focus_monitor_next" => Ok(Action::FocusMonitorNext),
@@ -1195,6 +1199,7 @@ pub fn format_action(action: &Action) -> String {
         Action::SwapSplit => "swap_split".to_string(),
         Action::PromoteToRoot => "promote_to_root".to_string(),
         Action::SetRatio(value) => format!("set_ratio {value}"),
+        Action::Preselect(dir) => format!("preselect {}", direction_name(*dir)),
         Action::ToggleSpecial(name) => format!("toggle_special {name}"),
         Action::MoveToSpecial(name) => format!("move_to_special {name}"),
         Action::FocusMonitorNext => "focus_monitor_next".to_string(),

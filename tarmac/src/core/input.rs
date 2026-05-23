@@ -202,6 +202,7 @@ pub enum Action {
     SwapSplit,                        // Swap left/right children of the focused window's parent
     PromoteToRoot,                    // Lift focused window's subtree to a direct child of workspace root
     SetRatio(f64),                    // Set the focused window's parent split ratio to an absolute value
+    Preselect(Direction),             // Hint the next new window's insertion direction
     Reload,                           // Hot reload config
     Exit,                             // Clean exit
 }

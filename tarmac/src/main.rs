@@ -268,6 +268,7 @@ fn handle_action(action: Action) {
                 Action::SwapSplit => state.swap_split(),
                 Action::PromoteToRoot => state.promote_to_root(),
                 Action::SetRatio(value) => state.set_ratio(value),
+                Action::Preselect(dir) => state.preselect(dir),
                 Action::ToggleSpecial(ref name) => state.toggle_special(name),
                 Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
@@ -604,6 +605,14 @@ fn process_ipc_command(
                 }
                 None => Response::err("usage: set_ratio <0.1..0.9>"),
             },
+            "preselect" => {
+                if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
+                    state.preselect(dir);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: preselect left|right|up|down")
+                }
+            }
             "workspace" => {
                 if let Some(target) = request
                     .args
