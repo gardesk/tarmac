@@ -30,6 +30,32 @@ pub struct Settings {
     /// directions (pre-HX-03 was Left/Right only). When false the action
     /// no-ops at the edge.
     pub window_direction_monitor_fallback: bool,
+    /// HX-05: split axis policy for newly-opened windows.
+    ///   "smart"      — aspect ratio decides (default; Hyprland behavior).
+    ///   "horizontal" — always stack top/bottom.
+    ///   "vertical"   — always side-by-side.
+    pub split_axis: String,
+    /// HX-05: child-ordering policy when a new window splits a tile.
+    ///   "follow_mouse" — cursor side wins (default; Hyprland force_split=0).
+    ///   "left"         — new window becomes the first child.
+    ///   "right"        — new window becomes the second child.
+    pub force_split: String,
+    /// HX-05: aspect-ratio threshold for "smart" split axis. Higher
+    /// values bias toward Horizontal (stacked); lower toward Vertical.
+    /// Mirrors Hyprland's `dwindle:split_width_multiplier`.
+    pub split_width_multiplier: f64,
+    /// HX-05: when true, inserting into an existing Internal preserves
+    /// its split direction rather than re-deriving from aspect ratio.
+    pub preserve_split: bool,
+    /// HX-05: when true, `Action::Preselect(Direction)` persists across
+    /// multiple inserts. When false (default) the hint is single-use.
+    pub permanent_direction_override: bool,
+    /// HX-05: where the focal point for new-window insertion comes from.
+    ///   "cursor"           — current cursor location.
+    ///   "active"           — focused window's center.
+    ///   "cursor_or_active" — cursor if inside focused workspace, else
+    ///                        active. (Default; matches Hyprland.)
+    pub focal_point_source: String,
 }
 
 impl Default for Settings {
@@ -48,6 +74,12 @@ impl Default for Settings {
             border_radius: 10.0,
             smart_resizing: true,
             window_direction_monitor_fallback: true,
+            split_axis: "smart".to_string(),
+            force_split: "follow_mouse".to_string(),
+            split_width_multiplier: 1.0,
+            preserve_split: false,
+            permanent_direction_override: false,
+            focal_point_source: "cursor_or_active".to_string(),
         }
     }
 }
@@ -112,6 +144,46 @@ impl Settings {
             "window_direction_monitor_fallback" => {
                 self.window_direction_monitor_fallback = value == "true";
             }
+            "split_axis" => match value {
+                "smart" | "horizontal" | "vertical" => {
+                    self.split_axis = value.to_string();
+                }
+                _ => {
+                    tracing::warn!(value, "unknown split_axis (expected smart|horizontal|vertical)");
+                }
+            },
+            "force_split" => match value {
+                "follow_mouse" | "left" | "right" => {
+                    self.force_split = value.to_string();
+                }
+                _ => {
+                    tracing::warn!(value, "unknown force_split (expected follow_mouse|left|right)");
+                }
+            },
+            "split_width_multiplier" => {
+                if let Ok(v) = value.parse::<f64>() {
+                    if v > 0.0 {
+                        self.split_width_multiplier = v;
+                    }
+                }
+            }
+            "preserve_split" => {
+                self.preserve_split = value == "true";
+            }
+            "permanent_direction_override" => {
+                self.permanent_direction_override = value == "true";
+            }
+            "focal_point_source" => match value {
+                "cursor" | "active" | "cursor_or_active" => {
+                    self.focal_point_source = value.to_string();
+                }
+                _ => {
+                    tracing::warn!(
+                        value,
+                        "unknown focal_point_source (expected cursor|active|cursor_or_active)"
+                    );
+                }
+            },
             _ => {
                 tracing::trace!(key, value, "unknown setting (ignored)");
             }
