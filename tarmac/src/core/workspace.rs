@@ -178,6 +178,13 @@ pub struct Workspace {
     pub last_display_id: Option<u32>,
     /// Whether this workspace is currently visible on some monitor.
     pub visible: bool,
+    /// HX-05 preselect hint: when set, the next window opened in this
+    /// workspace lands in the given direction relative to the focused
+    /// window. The bool is true for persistent hints (cleared only on
+    /// explicit reset) and false for single-use hints (cleared after
+    /// the next insert). Mirrors Hyprland's `preselect <dir>` +
+    /// `dwindle:permanent_direction_override`.
+    pub preselect: Option<(super::tree::Direction, bool)>,
 }
 
 impl Workspace {
@@ -191,7 +198,16 @@ impl Workspace {
             last_monitor: None,
             last_display_id: None,
             visible: false,
+            preselect: None,
         }
+    }
+
+    /// Consume the current preselect hint. Returns the direction and
+    /// whether the hint is persistent; for a persistent hint the
+    /// caller should restore the field after the consumer reads the
+    /// direction (single-use semantics clear; persistent re-stores).
+    pub fn take_preselect(&mut self) -> Option<(super::tree::Direction, bool)> {
+        self.preselect.take()
     }
 
     pub fn is_empty(&self) -> bool {
