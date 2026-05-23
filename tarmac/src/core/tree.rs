@@ -831,6 +831,105 @@ impl Node {
         }
     }
 
+    /// Lift the focused window's leaf-or-stack subtree to be one direct
+    /// child of the workspace root. The rest of the tree becomes the
+    /// other child of a new root Internal that inherits the previous
+    /// root's split direction. The focused subtree is placed on the
+    /// side it currently occupies relative to root (stable mode):
+    /// preserves visual screen-half of the focused window.
+    ///
+    /// Returns false when the focused window is already a direct child
+    /// of root (nothing to promote), when the root is a Leaf or Stack
+    /// rather than Internal (no parent split to manipulate), or when
+    /// the window is not in the tree.
+    ///
+    /// Stacks containing the focused window are promoted as a single
+    /// unit; the Stack node is preserved intact rather than unstacked.
+    pub fn promote_to_root(&mut self, window: WindowId) -> bool {
+        // Must be Internal at root, with the window somewhere inside.
+        if !matches!(self, Node::Internal { .. }) {
+            return false;
+        }
+        if !self.contains(window) {
+            return false;
+        }
+
+        // Capture root's split direction + which side the focused leaf
+        // currently lives in, before any mutation.
+        let (original_split, focused_in_left) = match self {
+            Node::Internal { split, left, .. } => (*split, left.contains(window)),
+            _ => return false,
+        };
+
+        // Trivial case: the focused leaf-or-stack is already a direct
+        // child of root. Nothing to promote.
+        let direct_child_holds_window = match self {
+            Node::Internal { left, right, .. } => {
+                let direct = |n: &Node| match n {
+                    Node::Leaf { window: Some(w) } => *w == window,
+                    Node::Stack { windows, .. } => windows.contains(&window),
+                    _ => false,
+                };
+                direct(left.as_ref()) || direct(right.as_ref())
+            }
+            _ => false,
+        };
+        if direct_child_holds_window {
+            return false;
+        }
+
+        // Extract the leaf-or-stack containing the window. The tree
+        // flattens around the removed slot (parent Internals collapse
+        // when one child becomes Empty), giving us the "remainder."
+        let Some(focused_node) = self.extract_leaf_or_stack(window) else {
+            return false;
+        };
+
+        let remainder = std::mem::replace(self, Node::empty());
+        let (left_child, right_child) = if focused_in_left {
+            (Box::new(focused_node), Box::new(remainder))
+        } else {
+            (Box::new(remainder), Box::new(focused_node))
+        };
+        *self = Node::Internal {
+            split: original_split,
+            ratio: 0.5,
+            left: left_child,
+            right: right_child,
+        };
+        true
+    }
+
+    /// Walk the tree and remove the Leaf-or-Stack that holds `window`,
+    /// returning the extracted node. Parent Internals collapse when one
+    /// child becomes Empty so the remainder stays well-formed.
+    fn extract_leaf_or_stack(&mut self, window: WindowId) -> Option<Node> {
+        match self {
+            Node::Leaf { window: Some(w) } if *w == window => {
+                Some(std::mem::replace(self, Node::empty()))
+            }
+            Node::Stack { windows, .. } if windows.contains(&window) => {
+                Some(std::mem::replace(self, Node::empty()))
+            }
+            Node::Internal { left, right, .. } => {
+                if let Some(extracted) = left.extract_leaf_or_stack(window) {
+                    if left.is_empty() {
+                        *self = std::mem::take(right.as_mut());
+                    }
+                    return Some(extracted);
+                }
+                if let Some(extracted) = right.extract_leaf_or_stack(window) {
+                    if right.is_empty() {
+                        *self = std::mem::take(left.as_mut());
+                    }
+                    return Some(extracted);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     /// Swap the left/right children of the focused window's immediate
     /// Internal ancestor. Effectively moves the focused window's subtree
     /// to the opposite side of its parent split. Returns false if the
