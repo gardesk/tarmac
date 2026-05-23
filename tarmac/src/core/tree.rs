@@ -684,10 +684,7 @@ impl Node {
                         | (SplitDirection::Horizontal, Direction::Up | Direction::Down)
                 );
 
-                let try_self = |ratio: &mut f32,
-                                left: &Box<Node>,
-                                right: &Box<Node>|
-                 -> bool {
+                let try_self = |ratio: &mut f32, left: &Node, right: &Node| -> bool {
                     if axis_matches && (left.contains(window) || right.contains(window)) {
                         let in_left = left.contains(window);
                         let adjustment = match direction {
