@@ -2282,6 +2282,76 @@ impl WmState {
         }
     }
 
+    /// HX-07: merge the focused window into the adjacent leaf in
+    /// `direction`, creating a Stack at the adjacent position. The
+    /// focused window becomes the active stack member. No-op if no
+    /// adjacent window exists in that direction.
+    ///
+    /// If the adjacent slot already holds a Stack, the focused window
+    /// is appended to that stack rather than nesting a new stack.
+    pub fn add_to_stack(&mut self, direction: super::tree::Direction) {
+        let Some(focused) = self.effective_focused() else {
+            return;
+        };
+        let sr = self.focused_rect();
+        let ws_idx = self.active_ws_idx();
+        let geoms = self.workspace_focus_geometries(ws_idx, sr);
+        let Some(adjacent) = Node::find_adjacent(&geoms, focused, direction) else {
+            return;
+        };
+        if !self
+            .workspaces
+            .get_mut(ws_idx)
+            .tree
+            .merge_into_neighbor(focused, adjacent)
+        {
+            return;
+        }
+        tracing::info!(
+            focused,
+            adjacent,
+            ?direction,
+            "add_to_stack: merged focused into adjacent"
+        );
+        self.apply_layout();
+        self.focus_window(focused);
+        self.sync_mouse_after_focus(ws_idx, focused);
+    }
+
+    /// HX-07: pull the focused window out of its containing Stack and
+    /// re-graft it as a side-by-side sibling of the smaller stack.
+    /// Surgical contrast to `Unstack`, which restores the entire
+    /// pre-stack tree. No-op when the focused window is not in a Stack.
+    pub fn split_from_stack(&mut self) {
+        let Some(focused) = self.effective_focused() else {
+            return;
+        };
+        let Some(ws_idx) = self.workspaces.find_window(focused) else {
+            return;
+        };
+        if self
+            .workspaces
+            .get(ws_idx)
+            .tree
+            .stack_info(focused)
+            .is_none()
+        {
+            return;
+        }
+        if !self
+            .workspaces
+            .get_mut(ws_idx)
+            .tree
+            .split_active_from_stack(focused)
+        {
+            return;
+        }
+        tracing::info!(focused, "split_from_stack: pulled out of stack");
+        self.apply_layout();
+        self.focus_window(focused);
+        self.sync_mouse_after_focus(ws_idx, focused);
+    }
+
     /// HX-06: query whether a window is in pseudo-tile mode.
     pub fn is_pseudo(&self, wid: WindowId) -> bool {
         self.pseudo_windows.contains(&wid)

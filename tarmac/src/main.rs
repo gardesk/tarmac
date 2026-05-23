@@ -270,6 +270,8 @@ fn handle_action(action: Action) {
                 Action::SetRatio(value) => state.set_ratio(value),
                 Action::Preselect(dir) => state.preselect(dir),
                 Action::TogglePseudo => state.toggle_pseudo(),
+                Action::AddToStack(dir) => state.add_to_stack(dir),
+                Action::SplitFromStack => state.split_from_stack(),
                 Action::ToggleSpecial(ref name) => state.toggle_special(name),
                 Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
@@ -647,6 +649,18 @@ fn process_ipc_command(
             }
             "toggle_pseudo" => {
                 state.toggle_pseudo();
+                Response::ok_empty()
+            }
+            "add_to_stack" => {
+                if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
+                    state.add_to_stack(dir);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: add_to_stack left|right|up|down")
+                }
+            }
+            "split_from_stack" => {
+                state.split_from_stack();
                 Response::ok_empty()
             }
             "workspace" => {

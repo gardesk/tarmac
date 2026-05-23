@@ -204,6 +204,8 @@ pub enum Action {
     SetRatio(f64),                    // Set the focused window's parent split ratio to an absolute value
     Preselect(Direction),             // Hint the next new window's insertion direction
     TogglePseudo,                     // Toggle pseudo-tile mode on the focused window
+    AddToStack(Direction),            // Merge focused window into the adjacent leaf, forming a Stack
+    SplitFromStack,                   // Pull the active stack member out as a side-by-side sibling
     Reload,                           // Hot reload config
     Exit,                             // Clean exit
 }
