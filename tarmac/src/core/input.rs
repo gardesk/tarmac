@@ -193,6 +193,9 @@ pub enum Action {
     MoveToMonitorPrev,                // Move window to previous monitor
     Unstack,                          // Restore a stacked subtree to its saved BSP shape
     PromoteStack,                     // Move the active stack member to the top/front of the stack
+    ToggleSplit,                      // Flip the focused window's parent split axis
+    SwapSplit,                        // Swap left/right children of the focused window's parent
+    PromoteToRoot,                    // Lift focused window's subtree to a direct child of workspace root
     Reload,                           // Hot reload config
     Exit,                             // Clean exit
 }
