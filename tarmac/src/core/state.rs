@@ -2075,6 +2075,72 @@ impl WmState {
         }
     }
 
+    pub fn toggle_split(&mut self) {
+        let focused = match self.effective_focused() {
+            Some(f) => f,
+            None => return,
+        };
+        let Some(ws_idx) = self.workspaces.find_window(focused) else {
+            return;
+        };
+        if self
+            .workspaces
+            .get_mut(ws_idx)
+            .tree
+            .toggle_parent_split(focused)
+        {
+            self.apply_layout();
+            self.focus_window(focused);
+            tracing::info!(id = focused, "toggled parent split direction");
+        }
+    }
+
+    pub fn swap_split(&mut self) {
+        let focused = match self.effective_focused() {
+            Some(f) => f,
+            None => return,
+        };
+        let Some(ws_idx) = self.workspaces.find_window(focused) else {
+            return;
+        };
+        if self
+            .workspaces
+            .get_mut(ws_idx)
+            .tree
+            .swap_parent_children(focused)
+        {
+            self.apply_layout();
+            self.focus_window(focused);
+            tracing::info!(id = focused, "swapped parent split children");
+        }
+    }
+
+    pub fn promote_to_root(&mut self) {
+        let focused = match self.effective_focused() {
+            Some(f) => f,
+            None => return,
+        };
+        let Some(ws_idx) = self.workspaces.find_window(focused) else {
+            return;
+        };
+        if self
+            .workspaces
+            .get_mut(ws_idx)
+            .tree
+            .promote_to_root(focused)
+        {
+            // Tree shape changed; existing focus_return_memory entries that
+            // referenced the promoted window's old neighborhood are now
+            // stale.
+            self.prune_focus_memory_for_window(focused);
+            self.apply_layout();
+            self.focus_window(focused);
+            let ws_idx = self.active_ws_idx();
+            self.sync_mouse_after_focus(ws_idx, focused);
+            tracing::info!(id = focused, "promoted focused subtree to workspace root");
+        }
+    }
+
     pub fn click_to_focus(&mut self, x: f64, y: f64) {
         let ws = self.active_workspace();
 
