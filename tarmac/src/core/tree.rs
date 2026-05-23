@@ -831,6 +831,39 @@ impl Node {
         }
     }
 
+    /// Locate the leaf whose computed sub-rect contains the given point,
+    /// returning the window in that leaf. Recurses through Internal splits
+    /// using the same geometry math as `calculate_geometries` (no gaps).
+    /// For a Stack tile, returns the active member's wid so callers can
+    /// treat the stack as a single occupied leaf.
+    ///
+    /// Returns None when the point falls outside `rect`, into an empty
+    /// leaf, or into a stack with no active member.
+    pub fn find_leaf_at_point(&self, rect: Rect, x: f64, y: f64) -> Option<WindowId> {
+        if !rect.contains_point(x, y) {
+            return None;
+        }
+        match self {
+            Node::Leaf { window } => *window,
+            Node::Stack {
+                windows, active, ..
+            } => windows.get(*active).copied(),
+            Node::Internal {
+                split,
+                ratio,
+                left,
+                right,
+            } => {
+                let (left_rect, right_rect) = rect.split(*split, *ratio);
+                if left_rect.contains_point(x, y) {
+                    left.find_leaf_at_point(left_rect, x, y)
+                } else {
+                    right.find_leaf_at_point(right_rect, x, y)
+                }
+            }
+        }
+    }
+
     pub fn make_stack_for_window(&mut self, window: WindowId) -> bool {
         self.make_stack_for_window_impl(window)
     }
