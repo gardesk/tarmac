@@ -136,6 +136,12 @@ pub enum SettingsAction {
     MouseFollowsFocus(bool),
     SmartResizing(bool),
     WindowDirectionMonitorFallback(bool),
+    SplitAxis(String),
+    ForceSplit(String),
+    SplitWidthMultiplier(f64),
+    PreserveSplit(bool),
+    PermanentDirectionOverride(bool),
+    FocalPointSource(String),
     ModKey(String),
     SelectKeybind(String),
     AddKeybind,
@@ -174,6 +180,12 @@ pub struct SettingsSnapshot {
     pub mouse_follows_focus: bool,
     pub smart_resizing: bool,
     pub window_direction_monitor_fallback: bool,
+    pub split_axis: String,
+    pub force_split: String,
+    pub split_width_multiplier: f64,
+    pub preserve_split: bool,
+    pub permanent_direction_override: bool,
+    pub focal_point_source: String,
     pub mod_key: String,
     pub keybinds: Vec<KeybindRow>,
     pub selected_keybind_id: Option<String>,
@@ -868,6 +880,70 @@ define_class!(
             }
         }
 
+        #[unsafe(method(onSplitAxisChanged:))]
+        fn on_split_axis_changed(&self, sender: Option<&NSPopUpButton>) {
+            if let Some(sender) = sender {
+                let value = match sender.indexOfSelectedItem() {
+                    1 => "horizontal",
+                    2 => "vertical",
+                    _ => "smart",
+                };
+                self.emit(SettingsAction::SplitAxis(value.to_string()));
+            }
+        }
+
+        #[unsafe(method(onForceSplitChanged:))]
+        fn on_force_split_changed(&self, sender: Option<&NSPopUpButton>) {
+            if let Some(sender) = sender {
+                let value = match sender.indexOfSelectedItem() {
+                    1 => "left",
+                    2 => "right",
+                    _ => "follow_mouse",
+                };
+                self.emit(SettingsAction::ForceSplit(value.to_string()));
+            }
+        }
+
+        #[unsafe(method(onFocalPointSourceChanged:))]
+        fn on_focal_point_source_changed(&self, sender: Option<&NSPopUpButton>) {
+            if let Some(sender) = sender {
+                let value = match sender.indexOfSelectedItem() {
+                    1 => "cursor",
+                    2 => "active",
+                    _ => "cursor_or_active",
+                };
+                self.emit(SettingsAction::FocalPointSource(value.to_string()));
+            }
+        }
+
+        #[unsafe(method(onSplitWidthMultiplierChanged:))]
+        fn on_split_width_multiplier_changed(&self, sender: Option<&NSTextField>) {
+            if let Some(sender) = sender {
+                let s = sender.stringValue().to_string();
+                if let Ok(v) = s.parse::<f64>()
+                    && v > 0.0
+                {
+                    self.emit(SettingsAction::SplitWidthMultiplier(v));
+                }
+            }
+        }
+
+        #[unsafe(method(onPreserveSplitChanged:))]
+        fn on_preserve_split_changed(&self, sender: Option<&NSButton>) {
+            if let Some(sender) = sender {
+                self.emit(SettingsAction::PreserveSplit(sender.state() == 1));
+            }
+        }
+
+        #[unsafe(method(onPermanentDirectionOverrideChanged:))]
+        fn on_permanent_direction_override_changed(&self, sender: Option<&NSButton>) {
+            if let Some(sender) = sender {
+                self.emit(SettingsAction::PermanentDirectionOverride(
+                    sender.state() == 1,
+                ));
+            }
+        }
+
         #[unsafe(method(onModKeyChanged:))]
         fn on_mod_key_changed(&self, sender: Option<&NSPopUpButton>) {
             if let Some(sender) = sender {
@@ -1278,6 +1354,12 @@ pub struct SettingsWindow {
     mff_checkbox: Retained<NSButton>,
     smart_resizing_checkbox: Retained<NSButton>,
     window_direction_monitor_fallback_checkbox: Retained<NSButton>,
+    preserve_split_checkbox: Retained<NSButton>,
+    permanent_direction_override_checkbox: Retained<NSButton>,
+    split_axis_popup: Retained<NSPopUpButton>,
+    force_split_popup: Retained<NSPopUpButton>,
+    focal_point_source_popup: Retained<NSPopUpButton>,
+    split_width_multiplier_field: Retained<NSTextField>,
     mod_key_popup: Retained<NSPopUpButton>,
     gap_inner_label: Retained<NSTextField>,
     gap_outer_label: Retained<NSTextField>,
@@ -1371,6 +1453,13 @@ impl SettingsWindow {
             smart_resizing_checkbox: general.smart_resizing_checkbox,
             window_direction_monitor_fallback_checkbox: general
                 .window_direction_monitor_fallback_checkbox,
+            preserve_split_checkbox: general.preserve_split_checkbox,
+            permanent_direction_override_checkbox: general
+                .permanent_direction_override_checkbox,
+            split_axis_popup: general.split_axis_popup,
+            force_split_popup: general.force_split_popup,
+            focal_point_source_popup: general.focal_point_source_popup,
+            split_width_multiplier_field: general.split_width_multiplier_field,
             mod_key_popup: general.mod_key_popup,
             gap_inner_label: general.gap_inner_label,
             gap_outer_label: general.gap_outer_label,
@@ -1417,6 +1506,36 @@ impl SettingsWindow {
             } else {
                 0
             });
+        self.preserve_split_checkbox
+            .setState(if snapshot.preserve_split { 1 } else { 0 });
+        self.permanent_direction_override_checkbox
+            .setState(if snapshot.permanent_direction_override {
+                1
+            } else {
+                0
+            });
+        self.split_axis_popup
+            .selectItemAtIndex(match snapshot.split_axis.as_str() {
+                "horizontal" => 1,
+                "vertical" => 2,
+                _ => 0, // "smart"
+            });
+        self.force_split_popup
+            .selectItemAtIndex(match snapshot.force_split.as_str() {
+                "left" => 1,
+                "right" => 2,
+                _ => 0, // "follow_mouse"
+            });
+        self.focal_point_source_popup
+            .selectItemAtIndex(match snapshot.focal_point_source.as_str() {
+                "cursor" => 1,
+                "active" => 2,
+                _ => 0, // "cursor_or_active"
+            });
+        self.split_width_multiplier_field
+            .setStringValue(&NSString::from_str(
+                &format!("{:.2}", snapshot.split_width_multiplier),
+            ));
         self.mod_key_popup
             .selectItemAtIndex(match snapshot.mod_key.as_str() {
                 "option" => 1,
@@ -1472,6 +1591,12 @@ struct GeneralTab {
     mff_checkbox: Retained<NSButton>,
     smart_resizing_checkbox: Retained<NSButton>,
     window_direction_monitor_fallback_checkbox: Retained<NSButton>,
+    preserve_split_checkbox: Retained<NSButton>,
+    permanent_direction_override_checkbox: Retained<NSButton>,
+    split_axis_popup: Retained<NSPopUpButton>,
+    force_split_popup: Retained<NSPopUpButton>,
+    focal_point_source_popup: Retained<NSPopUpButton>,
+    split_width_multiplier_field: Retained<NSTextField>,
     mod_key_popup: Retained<NSPopUpButton>,
     gap_inner_label: Retained<NSTextField>,
     gap_outer_label: Retained<NSTextField>,
@@ -1679,6 +1804,77 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
     );
     y -= row + 18.0;
 
+    add_section_label(mtm, &view, "New-Window Insertion (HX-05)", lx, y);
+    y -= row;
+    add_label(mtm, &view, "Split axis", lx, y);
+    let split_axis_popup = add_popup(
+        mtm,
+        &view,
+        handler,
+        cx,
+        y,
+        220.0,
+        &["Smart (aspect-driven)", "Horizontal (stacked)", "Vertical (side-by-side)"],
+        sel!(onSplitAxisChanged:),
+    );
+    y -= row;
+    add_label(mtm, &view, "Force split", lx, y);
+    let force_split_popup = add_popup(
+        mtm,
+        &view,
+        handler,
+        cx,
+        y,
+        220.0,
+        &["Follow mouse (default)", "Left / first child", "Right / second child"],
+        sel!(onForceSplitChanged:),
+    );
+    y -= row;
+    add_label(mtm, &view, "Focal point source", lx, y);
+    let focal_point_source_popup = add_popup(
+        mtm,
+        &view,
+        handler,
+        cx,
+        y,
+        220.0,
+        &["Cursor or active (default)", "Cursor only", "Active window only"],
+        sel!(onFocalPointSourceChanged:),
+    );
+    y -= row;
+    add_label(mtm, &view, "Split width multiplier", lx, y);
+    let split_width_multiplier_field = add_input_field(
+        mtm,
+        &view,
+        handler,
+        cx,
+        y,
+        80.0,
+        "1.0",
+        sel!(onSplitWidthMultiplierChanged:),
+    );
+    y -= row;
+    let preserve_split_checkbox = add_checkbox(
+        mtm,
+        &view,
+        handler,
+        "Preserve split direction on re-insert (reserved)",
+        lx,
+        y,
+        sel!(onPreserveSplitChanged:),
+    );
+    y -= row;
+    let permanent_direction_override_checkbox = add_checkbox(
+        mtm,
+        &view,
+        handler,
+        "Persistent preselect hints (don't clear after one use)",
+        lx,
+        y,
+        sel!(onPermanentDirectionOverrideChanged:),
+    );
+    y -= row + 18.0;
+
     add_section_label(mtm, &view, "Modifier Key", lx, y);
     y -= row;
     let mod_key_popup = add_popup(
@@ -1705,6 +1901,12 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         mff_checkbox,
         smart_resizing_checkbox,
         window_direction_monitor_fallback_checkbox,
+        preserve_split_checkbox,
+        permanent_direction_override_checkbox,
+        split_axis_popup,
+        force_split_popup,
+        focal_point_source_popup,
+        split_width_multiplier_field,
         mod_key_popup,
         gap_inner_label,
         gap_outer_label,

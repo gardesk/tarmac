@@ -3550,9 +3550,9 @@ impl WmState {
     ///      `permanent_direction_override` is true the hint is
     ///      re-stored after consumption so it survives multiple opens.
     ///   2. Otherwise route by `focal_point_source`:
-    ///        "cursor"           — last_cursor if available, else active.
-    ///        "active"           — focused window's center.
-    ///        "cursor_or_active" — cursor if inside workspace, else active.
+    ///      - "cursor"           — last_cursor if available, else active.
+    ///      - "active"           — focused window's center.
+    ///      - "cursor_or_active" — cursor if inside workspace, else active.
     ///   3. Final fallback when there is no focused window: workspace
     ///      rect center.
     fn compute_focal_point_for_new_window(&mut self) -> super::tree::FocalPoint {

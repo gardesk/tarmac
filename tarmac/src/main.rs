@@ -1208,6 +1208,12 @@ fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
         mouse_follows_focus: doc.managed.settings.mouse_follows_focus,
         smart_resizing: doc.managed.settings.smart_resizing,
         window_direction_monitor_fallback: doc.managed.settings.window_direction_monitor_fallback,
+        split_axis: doc.managed.settings.split_axis.clone(),
+        force_split: doc.managed.settings.force_split.clone(),
+        split_width_multiplier: doc.managed.settings.split_width_multiplier,
+        preserve_split: doc.managed.settings.preserve_split,
+        permanent_direction_override: doc.managed.settings.permanent_direction_override,
+        focal_point_source: doc.managed.settings.focal_point_source.clone(),
         mod_key: match doc.managed.settings.mod_key {
             mods if mods == tarmac::core::input::Modifiers::OPTION => "option".to_string(),
             mods if mods == tarmac::core::input::Modifiers::CONTROL => "control".to_string(),
@@ -1713,6 +1719,32 @@ fn poll_settings_actions() {
                 }
                 SettingsAction::WindowDirectionMonitorFallback(value) => {
                     doc.managed.settings.window_direction_monitor_fallback = value;
+                    should_write = true;
+                }
+                SettingsAction::SplitAxis(value) => {
+                    doc.managed.settings.split_axis = value;
+                    should_write = true;
+                }
+                SettingsAction::ForceSplit(value) => {
+                    doc.managed.settings.force_split = value;
+                    should_write = true;
+                }
+                SettingsAction::SplitWidthMultiplier(value) => {
+                    if value > 0.0 {
+                        doc.managed.settings.split_width_multiplier = value;
+                        should_write = true;
+                    }
+                }
+                SettingsAction::PreserveSplit(value) => {
+                    doc.managed.settings.preserve_split = value;
+                    should_write = true;
+                }
+                SettingsAction::PermanentDirectionOverride(value) => {
+                    doc.managed.settings.permanent_direction_override = value;
+                    should_write = true;
+                }
+                SettingsAction::FocalPointSource(value) => {
+                    doc.managed.settings.focal_point_source = value;
                     should_write = true;
                 }
                 SettingsAction::ModKey(value) => {

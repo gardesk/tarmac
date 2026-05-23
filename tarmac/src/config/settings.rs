@@ -161,10 +161,10 @@ impl Settings {
                 }
             },
             "split_width_multiplier" => {
-                if let Ok(v) = value.parse::<f64>() {
-                    if v > 0.0 {
-                        self.split_width_multiplier = v;
-                    }
+                if let Ok(v) = value.parse::<f64>()
+                    && v > 0.0
+                {
+                    self.split_width_multiplier = v;
                 }
             }
             "preserve_split" => {
