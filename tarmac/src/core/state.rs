@@ -1904,22 +1904,50 @@ impl WmState {
 
     /// Start a move drag on a floating window (Cmd+LeftClick).
     pub fn begin_move_drag(&mut self, x: f64, y: f64) {
-        // Find which floating window is under the cursor
-        let hit = self
+        // Floating-window drag (existing behavior): cursor hits a
+        // floating tile → start an immediate-AX drag.
+        let floating_hit = self
             .active_workspace()
             .floating
             .iter()
             .rev()
             .find(|fw| fw.geometry.contains_point(x, y))
             .map(|fw| (fw.id, fw.geometry));
-        if let Some((id, geometry)) = hit {
+        if let Some((id, geometry)) = floating_hit {
             self.drag = Some(DragState {
                 window_id: id,
                 mode: DragMode::Move,
                 start_mouse: (x, y),
                 start_geometry: geometry,
             });
-            tracing::debug!(id, "move drag started");
+            self.drag_threshold_active = false;
+            tracing::debug!(id, "move drag started (floating)");
+            return;
+        }
+        // HX-08: tiled-window drag scaffolding. Check the tiled
+        // geometries at the cursor; if found, stage drag state with
+        // `drag_threshold_active = true` and arm focus suppression.
+        // No AX writes, no float transition yet — those land in HX-09.
+        let sr = self.focused_rect();
+        let ws_idx = self.active_ws_idx();
+        let geoms = self.workspace_focus_geometries(ws_idx, sr);
+        let tiled_hit = geoms
+            .into_iter()
+            .find(|(_, rect)| rect.contains_point(x, y));
+        if let Some((id, geometry)) = tiled_hit {
+            self.drag = Some(DragState {
+                window_id: id,
+                mode: DragMode::Move,
+                start_mouse: (x, y),
+                start_geometry: geometry,
+            });
+            self.drag_threshold_active = true;
+            self.arm_drag_focus_suppression();
+            tracing::debug!(
+                id,
+                threshold = self.drag_threshold,
+                "move drag staged (tiled pending threshold)"
+            );
         }
     }
 
@@ -1949,6 +1977,37 @@ impl WmState {
 
         let dx = x - drag.start_mouse.0;
         let dy = y - drag.start_mouse.1;
+
+        // HX-08: tiled-pending drag — dormant until the cursor crosses
+        // `drag_threshold`. Below threshold = no AX writes, no float.
+        // Above = clear the flag and (in HX-09) call the float-on-drag
+        // transition. For HX-08 we just log so the infrastructure is
+        // verifiable in tracing.
+        if self.drag_threshold_active {
+            let delta = (dx * dx + dy * dy).sqrt();
+            if delta < self.drag_threshold {
+                self.arm_drag_focus_suppression();
+                return;
+            }
+            self.drag_threshold_active = false;
+            self.arm_drag_focus_suppression();
+            tracing::debug!(
+                id = drag.window_id,
+                delta,
+                threshold = self.drag_threshold,
+                "drag threshold crossed"
+            );
+            // HX-09 will fill in float_window_for_drag here. For now
+            // the drag stays dormant — no AX writes, no float.
+            return;
+        }
+
+        // Refresh focus suppression while a tiled drag remains active
+        // (HX-09 will trigger this branch once the threshold transition
+        // is wired). For a floating drag this is harmless.
+        if self.drag_suppress_focus_until.is_some() {
+            self.arm_drag_focus_suppression();
+        }
 
         match drag.mode {
             DragMode::Move => {
@@ -1997,6 +2056,10 @@ impl WmState {
         if let Some(drag) = self.drag.take() {
             tracing::debug!(id = drag.window_id, ?drag.mode, "drag ended");
         }
+        // HX-08: clear the threshold flag and focus suppression on
+        // release whether or not the threshold was ever crossed.
+        self.drag_threshold_active = false;
+        self.drag_suppress_focus_until = None;
     }
 
     /// Check if a drag is currently active.
