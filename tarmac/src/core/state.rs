@@ -627,6 +627,22 @@ impl WmState {
             return;
         };
 
+        // HX-06 pseudo-tile: position the window centered in `rect` at
+        // its own preferred (current AX) size. No size writes, no EUI
+        // twiddle — preserving the natural app dimensions is the whole
+        // point. The window still occupies a slot in the tree; only
+        // the visible footprint differs from a normal tile.
+        if self.pseudo_windows.contains(&wid) {
+            let (aw, ah) = ax_get_size(ax_ref).unwrap_or((rect.width, rect.height));
+            let px = rect.x + ((rect.width - aw) / 2.0).max(0.0);
+            let py = rect.y + ((rect.height - ah) / 2.0).max(0.0);
+            let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 1.0);
+            let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
+            let _ = ax_set_position(ax_ref, px, py);
+            let _ = crate::platform::skylight::move_window(wid, px, py);
+            return;
+        }
+
         let eui_key = objc2_core_foundation::CFString::from_static_str("AXEnhancedUserInterface");
         let app_ref = self
             .registry
