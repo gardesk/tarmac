@@ -885,7 +885,7 @@ impl Node {
             return false;
         };
 
-        let remainder = std::mem::replace(self, Node::empty());
+        let remainder = std::mem::take(self);
         let (left_child, right_child) = if focused_in_left {
             (Box::new(focused_node), Box::new(remainder))
         } else {
@@ -905,11 +905,9 @@ impl Node {
     /// child becomes Empty so the remainder stays well-formed.
     fn extract_leaf_or_stack(&mut self, window: WindowId) -> Option<Node> {
         match self {
-            Node::Leaf { window: Some(w) } if *w == window => {
-                Some(std::mem::replace(self, Node::empty()))
-            }
+            Node::Leaf { window: Some(w) } if *w == window => Some(std::mem::take(self)),
             Node::Stack { windows, .. } if windows.contains(&window) => {
-                Some(std::mem::replace(self, Node::empty()))
+                Some(std::mem::take(self))
             }
             Node::Internal { left, right, .. } => {
                 if let Some(extracted) = left.extract_leaf_or_stack(window) {
