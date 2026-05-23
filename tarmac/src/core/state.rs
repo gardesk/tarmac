@@ -568,6 +568,9 @@ impl WmState {
     /// Uses the yabai/AeroSpace pattern: disable AXEnhancedUserInterface,
     /// then size → position → size per window.
     pub fn apply_layout(&self) {
+        // HX-08: catch up any AX writes the per-window rate limiter
+        // deferred from earlier frames before issuing fresh ones.
+        self.drain_pending_show_window();
         for (mi, monitor) in self.monitors.iter().enumerate() {
             let ws_idx = monitor.active_workspace;
             let ws = self.workspaces.get(ws_idx);
@@ -655,6 +658,16 @@ impl WmState {
         let Some(ax_ref) = self.ax_refs.get(&wid) else {
             return;
         };
+
+        // HX-08: throttle per-window to ~60 Hz. Rapid back-to-back
+        // writes (drag cursor-follow, resize oscillation) get deferred
+        // to the next apply_layout, which fires often enough that
+        // throttled writes catch up within ~16-50ms.
+        if self.should_throttle_ax_write(wid) {
+            self.pending_show_window.borrow_mut().insert(wid, rect);
+            tracing::trace!(wid, "ax write throttled — deferred");
+            return;
+        }
 
         // HX-06 pseudo-tile: position the window centered in `rect` at
         // its own preferred (current AX) size. No size writes, no EUI
