@@ -818,6 +818,10 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
             let dir = parse_direction(parts.get(1).copied().unwrap_or(""))?;
             Ok(Action::Swap(dir))
         }
+        "move" => {
+            let dir = parse_direction(parts.get(1).copied().unwrap_or(""))?;
+            Ok(Action::Move(dir))
+        }
         "resize" => {
             let dir = parse_direction(parts.get(1).copied().unwrap_or(""))?;
             Ok(Action::Resize(dir))
@@ -1177,6 +1181,7 @@ pub fn format_action(action: &Action) -> String {
         Action::CloseWindow => "close".to_string(),
         Action::Focus(dir) => format!("focus {}", direction_name(*dir)),
         Action::Swap(dir) => format!("swap {}", direction_name(*dir)),
+        Action::Move(dir) => format!("move {}", direction_name(*dir)),
         Action::Resize(dir) => format!("resize {}", direction_name(*dir)),
         Action::Equalize => "equalize".to_string(),
         Action::Workspace(target) => format!("workspace {target}"),

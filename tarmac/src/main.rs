@@ -221,6 +221,7 @@ fn handle_action(action: Action) {
                     }
                 }
                 Action::Swap(dir) => state.swap_direction(dir),
+                Action::Move(dir) => state.move_direction(dir),
                 Action::Resize(dir) => state.resize_direction(dir),
                 Action::Equalize => state.equalize(),
                 Action::Workspace(ref target) => {
@@ -536,6 +537,14 @@ fn process_ipc_command(
                     Response::ok_empty()
                 } else {
                     Response::err("usage: swap left|right|up|down")
+                }
+            }
+            "move" => {
+                if let Some(dir) = request.args.first().and_then(|a| parse_dir(a)) {
+                    state.move_direction(dir);
+                    Response::ok_empty()
+                } else {
+                    Response::err("usage: move left|right|up|down")
                 }
             }
             "resize" => {

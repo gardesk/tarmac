@@ -1094,6 +1094,78 @@ impl WmState {
         }
     }
 
+    /// HX-04: remove the focused window from its current tile and
+    /// re-insert it at a focal point computed one pixel past the
+    /// focused tile's edge in `direction`. Unlike `swap_direction`,
+    /// this *relocates* the window — the layout reshapes around the
+    /// move rather than trading two positions.
+    ///
+    /// When the focal point lands outside the workspace rect (focused
+    /// window already touches the edge in `direction`), falls through
+    /// to `move_window_to_monitor` if `window_direction_monitor_fallback`
+    /// is enabled. Otherwise no-ops.
+    ///
+    /// No-op when the focal point lands inside the focused window's
+    /// own tile — happens when the workspace has only one window or
+    /// when the focused tile fills the workspace in the relevant axis.
+    pub fn move_direction(&mut self, direction: super::tree::Direction) {
+        let ws = self.active_workspace();
+        let Some(focused) = ws.focused else {
+            return;
+        };
+        let sr = self.focused_rect();
+        let ws_idx = self.active_ws_idx();
+        let geoms = self.workspace_focus_geometries(ws_idx, sr);
+        let Some(src_rect) = geoms
+            .iter()
+            .find(|(w, _)| *w == focused)
+            .map(|(_, r)| *r)
+        else {
+            return;
+        };
+        let focal = src_rect.focal_point_for_direction(direction);
+
+        if !sr.contains_point(focal.0, focal.1) {
+            // Focal landed off the workspace rect — focused window is
+            // at the workspace edge in `direction`. Cross to the
+            // adjacent monitor when fallback is enabled.
+            if !self.window_direction_monitor_fallback || self.monitors.len() <= 1 {
+                return;
+            }
+            if let Some(target_mi) =
+                super::monitor::next_in_direction(&self.monitors, self.focused_monitor, direction)
+            {
+                tracing::debug!(
+                    focused,
+                    monitor = target_mi,
+                    ?direction,
+                    "move: relocating to adjacent monitor"
+                );
+                self.move_window_to_monitor(target_mi);
+            }
+            return;
+        }
+
+        // Focal landed inside the workspace — find the target leaf and
+        // relocate via remove+reinsert.
+        let target = self
+            .active_workspace()
+            .tree
+            .find_leaf_at_point(sr, focal.0, focal.1);
+        if target == Some(focused) {
+            return;
+        }
+        tracing::debug!(focused, ?target, ?direction, "move: relocating in workspace");
+        self.active_workspace_mut().tree.remove(focused);
+        self.active_workspace_mut()
+            .tree
+            .insert_with_rect(focused, target, sr);
+        self.prune_focus_memory_for_window(focused);
+        self.apply_layout();
+        self.fix_oversized_windows();
+        self.sync_mouse_after_focus(ws_idx, focused);
+    }
+
     pub fn swap_direction(&mut self, direction: super::tree::Direction) {
         use super::tree::Direction;
 

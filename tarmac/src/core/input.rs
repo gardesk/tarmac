@@ -182,6 +182,7 @@ pub enum Action {
     CloseWindow,
     Focus(Direction),
     Swap(Direction),
+    Move(Direction),
     Resize(Direction),
     Equalize,
     Workspace(WorkspaceTarget),       // Switch to a regular workspace
