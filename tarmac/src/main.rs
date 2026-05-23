@@ -269,6 +269,7 @@ fn handle_action(action: Action) {
                 Action::PromoteToRoot => state.promote_to_root(),
                 Action::SetRatio(value) => state.set_ratio(value),
                 Action::Preselect(dir) => state.preselect(dir),
+                Action::TogglePseudo => state.toggle_pseudo(),
                 Action::ToggleSpecial(ref name) => state.toggle_special(name),
                 Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
@@ -638,6 +639,10 @@ fn process_ipc_command(
                 } else {
                     Response::err("usage: preselect left|right|up|down")
                 }
+            }
+            "toggle_pseudo" => {
+                state.toggle_pseudo();
+                Response::ok_empty()
             }
             "workspace" => {
                 if let Some(target) = request

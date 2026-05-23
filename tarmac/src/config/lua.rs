@@ -860,6 +860,7 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
             let dir = parse_direction(parts.get(1).copied().unwrap_or(""))?;
             Ok(Action::Preselect(dir))
         }
+        "toggle_pseudo" => Ok(Action::TogglePseudo),
         "workspace_next" => Ok(Action::WorkspaceNext),
         "workspace_prev" => Ok(Action::WorkspacePrev),
         "focus_monitor_next" => Ok(Action::FocusMonitorNext),
@@ -1200,6 +1201,7 @@ pub fn format_action(action: &Action) -> String {
         Action::PromoteToRoot => "promote_to_root".to_string(),
         Action::SetRatio(value) => format!("set_ratio {value}"),
         Action::Preselect(dir) => format!("preselect {}", direction_name(*dir)),
+        Action::TogglePseudo => "toggle_pseudo".to_string(),
         Action::ToggleSpecial(name) => format!("toggle_special {name}"),
         Action::MoveToSpecial(name) => format!("move_to_special {name}"),
         Action::FocusMonitorNext => "focus_monitor_next".to_string(),
