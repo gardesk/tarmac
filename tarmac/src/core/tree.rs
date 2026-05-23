@@ -1,5 +1,11 @@
 use crate::core::window::WindowId;
 
+/// Screen-space coordinate fed to insertion / hit-test helpers to
+/// express user intent ("open new windows around here"). Sourced from
+/// cursor position, focused-window center, or an explicit offset of
+/// the focused tile's edge (e.g. by `Rect::focal_point_for_direction`).
+pub type FocalPoint = (f64, f64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitDirection {
     Horizontal, // Top/Bottom
@@ -180,6 +186,20 @@ impl Node {
     /// Insert a window next to `target` using smart split.
     pub fn insert(&mut self, new_window: WindowId, target: Option<WindowId>) {
         self.insert_with_rect(new_window, target, Rect::new(0.0, 0.0, 1920.0, 1080.0));
+    }
+
+    /// Insert a window at a focal point — picks the target leaf via
+    /// `find_leaf_at_point` and delegates to `insert_with_rect`. When
+    /// the focal point falls outside `rect` (or into an empty leaf)
+    /// the insertion falls back to the right-subtree default that
+    /// `insert_with_rect` uses when `target` is None.
+    ///
+    /// Sibling to `insert_with_rect`; introduced for HX-05 so callers
+    /// can express insertion intent via cursor / focused-window-center
+    /// coordinates without changing `insert_with_rect`'s call sites.
+    pub fn insert_at_focal_point(&mut self, new_window: WindowId, focal: FocalPoint, rect: Rect) {
+        let target = self.find_leaf_at_point(rect, focal.0, focal.1);
+        self.insert_with_rect(new_window, target, rect);
     }
 
     /// Insert with known container rect for smart split calculation.
@@ -2347,5 +2367,50 @@ mod tests {
         // Top half is y in [0, 500), bottom in [500, 1000).
         assert_eq!(tree.find_leaf_at_point(tall, 250.0, 100.0), Some(1));
         assert_eq!(tree.find_leaf_at_point(tall, 250.0, 800.0), Some(2));
+    }
+
+    // --- HX-05 insert_at_focal_point tests ---
+
+    #[test]
+    fn insert_at_focal_point_lands_in_cursor_tile() {
+        // 2-window tree on SCREEN → Vertical split, 1 on left, 2 on
+        // right. Inserting 3 at a focal point in the right half should
+        // split *that* tile (3 becomes a sibling of 2) rather than
+        // landing in the right-subtree default.
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        // Focal in window 2's tile (right half).
+        tree.insert_at_focal_point(3, (1500.0, 540.0), SCREEN);
+        let geoms = tree.calculate_geometries(SCREEN);
+        let rect_2 = geoms.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let rect_3 = geoms.iter().find(|(w, _)| *w == 3).unwrap().1;
+        // 2 and 3 share the right half — neither overlaps window 1's
+        // tile on the left half.
+        assert!(rect_2.x >= 960.0, "2 should stay on the right");
+        assert!(rect_3.x >= 960.0, "3 should land on the right (cursor side)");
+    }
+
+    #[test]
+    fn insert_at_focal_point_fallback_when_outside() {
+        // Focal outside the workspace rect → find_leaf_at_point returns
+        // None → insert_at_focal_point falls back to insert_with_rect's
+        // right-subtree default. Result must still contain the new wid.
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        // Focal way off-screen.
+        tree.insert_at_focal_point(3, (-9999.0, -9999.0), SCREEN);
+        assert!(tree.contains(3));
+        assert_eq!(tree.windows().len(), 3);
+    }
+
+    #[test]
+    fn insert_at_focal_point_into_empty_tree() {
+        // Empty leaf → focal is irrelevant, new window just becomes
+        // the single root leaf.
+        let mut tree = Node::empty();
+        tree.insert_at_focal_point(7, (100.0, 100.0), SCREEN);
+        assert!(matches!(tree, Node::Leaf { window: Some(7) }));
     }
 }
