@@ -3664,6 +3664,8 @@ impl WmState {
         self.registry.remove(id);
         self.ax_refs.remove(&id);
         self.pseudo_windows.remove(&id);
+        self.ax_write_last.borrow_mut().remove(&id);
+        self.pending_show_window.borrow_mut().remove(&id);
         self.prune_focus_memory_for_window(id);
 
         // Find the workspace containing this window and remove from it
@@ -3734,6 +3736,8 @@ impl WmState {
         for w in &removed {
             self.ax_refs.remove(&w.id);
             self.pseudo_windows.remove(&w.id);
+            self.ax_write_last.borrow_mut().remove(&w.id);
+            self.pending_show_window.borrow_mut().remove(&w.id);
             self.prune_focus_memory_for_window(w.id);
             // Find the workspace containing this window and remove from it
             if let Some(ws_idx) = self.workspaces.find_window(w.id) {
