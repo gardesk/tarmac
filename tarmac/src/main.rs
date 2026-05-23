@@ -334,6 +334,11 @@ gar.set("mouse_follows_focus", "true")
 -- ancestor split — boundary nearest the focused window moves first.
 -- When false, adjusts the shallowest matching ancestor (pre-HX-02 global feel).
 gar.set("smart_resizing", "true")
+-- HX-03: when true (default), Mod+Shift+hjkl at a workspace edge falls through
+-- to moving the focused window onto the geographically adjacent monitor in
+-- any of the four directions (pre-HX-03 was Left/Right only). Set to "false"
+-- to make the action no-op at the edge instead.
+gar.set("window_direction_monitor_fallback", "true")
 -- `tarmacctl set_ratio <0.1..0.9>` sets the focused window's parent split
 -- to an absolute ratio. Useful from Lua: gar.bind("mod+ctrl+5", function()
 --   gar.action("set_ratio", 0.5)
