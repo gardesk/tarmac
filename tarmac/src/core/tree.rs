@@ -210,12 +210,43 @@ impl Node {
     /// can express insertion intent via cursor / focused-window-center
     /// coordinates without changing `insert_with_rect`'s call sites.
     pub fn insert_at_focal_point(&mut self, new_window: WindowId, focal: FocalPoint, rect: Rect) {
+        self.insert_at_focal_point_options(new_window, focal, rect, None, 1.0)
+    }
+
+    /// Focal-point insertion with HX-05 split-axis controls.
+    /// `split_override` forces the new Internal's direction when a Leaf
+    /// gets split (None ⇒ aspect-driven). `multiplier` is the threshold
+    /// passed to `smart_split_direction_with_multiplier` when override
+    /// is None.
+    pub fn insert_at_focal_point_options(
+        &mut self,
+        new_window: WindowId,
+        focal: FocalPoint,
+        rect: Rect,
+        split_override: Option<SplitDirection>,
+        multiplier: f64,
+    ) {
         let target = self.find_leaf_at_point(rect, focal.0, focal.1);
-        self.insert_with_rect(new_window, target, rect);
+        self.insert_with_rect_options(new_window, target, rect, split_override, multiplier);
     }
 
     /// Insert with known container rect for smart split calculation.
     pub fn insert_with_rect(&mut self, new_window: WindowId, target: Option<WindowId>, rect: Rect) {
+        self.insert_with_rect_options(new_window, target, rect, None, 1.0)
+    }
+
+    /// Insert variant with HX-05 split-axis controls. `split_override`
+    /// forces the new Internal's `split` when a Leaf gets converted to
+    /// an Internal; `multiplier` is the threshold for aspect-driven
+    /// fallback when `split_override` is None.
+    pub fn insert_with_rect_options(
+        &mut self,
+        new_window: WindowId,
+        target: Option<WindowId>,
+        rect: Rect,
+        split_override: Option<SplitDirection>,
+        multiplier: f64,
+    ) {
         match self {
             Node::Leaf { window: None } => {
                 *self = Node::Leaf {
@@ -225,7 +256,8 @@ impl Node {
             Node::Leaf {
                 window: Some(existing),
             } => {
-                let direction = Self::smart_split_direction(&rect);
+                let direction = split_override
+                    .unwrap_or_else(|| Self::smart_split_direction_with_multiplier(&rect, multiplier));
                 let existing_window = *existing;
                 *self = Node::Internal {
                     split: direction,
@@ -248,14 +280,38 @@ impl Node {
 
                 if let Some(target) = target {
                     if left.contains(target) {
-                        left.insert_with_rect(new_window, Some(target), left_rect);
+                        left.insert_with_rect_options(
+                            new_window,
+                            Some(target),
+                            left_rect,
+                            split_override,
+                            multiplier,
+                        );
                     } else if right.contains(target) {
-                        right.insert_with_rect(new_window, Some(target), right_rect);
+                        right.insert_with_rect_options(
+                            new_window,
+                            Some(target),
+                            right_rect,
+                            split_override,
+                            multiplier,
+                        );
                     } else {
-                        right.insert_with_rect(new_window, None, right_rect);
+                        right.insert_with_rect_options(
+                            new_window,
+                            None,
+                            right_rect,
+                            split_override,
+                            multiplier,
+                        );
                     }
                 } else {
-                    right.insert_with_rect(new_window, None, right_rect);
+                    right.insert_with_rect_options(
+                        new_window,
+                        None,
+                        right_rect,
+                        split_override,
+                        multiplier,
+                    );
                 }
             }
             Node::Stack {
@@ -269,7 +325,13 @@ impl Node {
                     .unwrap_or_else(|| (*active + 1).min(windows.len()));
                 windows.insert(insert_at, new_window);
                 *active = insert_at;
-                previous.insert_with_rect(new_window, target, rect);
+                previous.insert_with_rect_options(
+                    new_window,
+                    target,
+                    rect,
+                    split_override,
+                    multiplier,
+                );
             }
         }
     }
