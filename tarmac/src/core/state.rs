@@ -1530,6 +1530,28 @@ impl WmState {
         true
     }
 
+    /// HX-08: 500ms rolling window past the last drag event, during
+    /// which `adopt_external_focus` drops incoming focus events. Set
+    /// by `begin_move_drag` on a tiled hit, refreshed by `update_drag`,
+    /// cleared by `end_drag`.
+    const DRAG_FOCUS_SUPPRESSION: std::time::Duration = std::time::Duration::from_millis(500);
+
+    fn arm_drag_focus_suppression(&mut self) {
+        self.drag_suppress_focus_until =
+            Some(std::time::Instant::now() + Self::DRAG_FOCUS_SUPPRESSION);
+    }
+
+    fn is_in_drag_focus_suppression(&mut self) -> bool {
+        let Some(until) = self.drag_suppress_focus_until else {
+            return false;
+        };
+        if std::time::Instant::now() >= until {
+            self.drag_suppress_focus_until = None;
+            return false;
+        }
+        true
+    }
+
     fn should_ignore_external_focus(&mut self, pid: i32, requested: Option<WindowId>) -> bool {
         self.prune_recent_internal_focus();
         if self.recent_internal_focus.is_empty() {
@@ -1635,6 +1657,9 @@ impl WmState {
     }
 
     fn adopt_external_focus(&mut self, id: WindowId) {
+        if self.is_in_drag_focus_suppression() {
+            return;
+        }
         if self.rate_limit_external_focus(id) {
             return;
         }
