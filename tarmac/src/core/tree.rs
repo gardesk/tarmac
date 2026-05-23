@@ -717,6 +717,34 @@ impl Node {
         }
     }
 
+    /// Set the focused window's immediate parent split ratio to an
+    /// absolute value, clamped to `[0.1, 0.9]`. Returns false when the
+    /// window is at the root (no parent Internal) or not in the tree.
+    /// Locates the deepest Internal containing the window — the
+    /// immediate parent in BSP terms — matching the convention of
+    /// `toggle_parent_split`.
+    pub fn set_parent_ratio(&mut self, window: WindowId, value: f32) -> bool {
+        match self {
+            Node::Internal {
+                ratio, left, right, ..
+            } => {
+                if matches!(left.as_ref(), Node::Internal { .. }) && left.contains(window) {
+                    return left.set_parent_ratio(window, value);
+                }
+                if matches!(right.as_ref(), Node::Internal { .. }) && right.contains(window) {
+                    return right.set_parent_ratio(window, value);
+                }
+                if left.contains(window) || right.contains(window) {
+                    *ratio = value.clamp(0.1, 0.9);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     pub fn set_stack_active(&mut self, window: WindowId) -> bool {
         match self {
             Node::Stack {
