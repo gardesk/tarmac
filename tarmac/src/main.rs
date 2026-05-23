@@ -1164,6 +1164,7 @@ fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
         focus_follows_mouse: doc.managed.settings.focus_follows_mouse,
         mouse_follows_focus: doc.managed.settings.mouse_follows_focus,
         smart_resizing: doc.managed.settings.smart_resizing,
+        window_direction_monitor_fallback: doc.managed.settings.window_direction_monitor_fallback,
         mod_key: match doc.managed.settings.mod_key {
             mods if mods == tarmac::core::input::Modifiers::OPTION => "option".to_string(),
             mods if mods == tarmac::core::input::Modifiers::CONTROL => "control".to_string(),
@@ -1665,6 +1666,10 @@ fn poll_settings_actions() {
                 }
                 SettingsAction::SmartResizing(value) => {
                     doc.managed.settings.smart_resizing = value;
+                    should_write = true;
+                }
+                SettingsAction::WindowDirectionMonitorFallback(value) => {
+                    doc.managed.settings.window_direction_monitor_fallback = value;
                     should_write = true;
                 }
                 SettingsAction::ModKey(value) => {

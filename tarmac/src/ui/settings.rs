@@ -135,6 +135,7 @@ pub enum SettingsAction {
     FocusFollowsMouse(bool),
     MouseFollowsFocus(bool),
     SmartResizing(bool),
+    WindowDirectionMonitorFallback(bool),
     ModKey(String),
     SelectKeybind(String),
     AddKeybind,
@@ -172,6 +173,7 @@ pub struct SettingsSnapshot {
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
     pub smart_resizing: bool,
+    pub window_direction_monitor_fallback: bool,
     pub mod_key: String,
     pub keybinds: Vec<KeybindRow>,
     pub selected_keybind_id: Option<String>,
@@ -857,6 +859,15 @@ define_class!(
             }
         }
 
+        #[unsafe(method(onWindowDirectionMonitorFallbackChanged:))]
+        fn on_window_direction_monitor_fallback(&self, sender: Option<&NSButton>) {
+            if let Some(sender) = sender {
+                self.emit(SettingsAction::WindowDirectionMonitorFallback(
+                    sender.state() == 1,
+                ));
+            }
+        }
+
         #[unsafe(method(onModKeyChanged:))]
         fn on_mod_key_changed(&self, sender: Option<&NSPopUpButton>) {
             if let Some(sender) = sender {
@@ -1266,6 +1277,7 @@ pub struct SettingsWindow {
     ffm_checkbox: Retained<NSButton>,
     mff_checkbox: Retained<NSButton>,
     smart_resizing_checkbox: Retained<NSButton>,
+    window_direction_monitor_fallback_checkbox: Retained<NSButton>,
     mod_key_popup: Retained<NSPopUpButton>,
     gap_inner_label: Retained<NSTextField>,
     gap_outer_label: Retained<NSTextField>,
@@ -1357,6 +1369,8 @@ impl SettingsWindow {
             ffm_checkbox: general.ffm_checkbox,
             mff_checkbox: general.mff_checkbox,
             smart_resizing_checkbox: general.smart_resizing_checkbox,
+            window_direction_monitor_fallback_checkbox: general
+                .window_direction_monitor_fallback_checkbox,
             mod_key_popup: general.mod_key_popup,
             gap_inner_label: general.gap_inner_label,
             gap_outer_label: general.gap_outer_label,
@@ -1397,6 +1411,12 @@ impl SettingsWindow {
             .setState(if snapshot.mouse_follows_focus { 1 } else { 0 });
         self.smart_resizing_checkbox
             .setState(if snapshot.smart_resizing { 1 } else { 0 });
+        self.window_direction_monitor_fallback_checkbox
+            .setState(if snapshot.window_direction_monitor_fallback {
+                1
+            } else {
+                0
+            });
         self.mod_key_popup
             .selectItemAtIndex(match snapshot.mod_key.as_str() {
                 "option" => 1,
@@ -1451,6 +1471,7 @@ struct GeneralTab {
     ffm_checkbox: Retained<NSButton>,
     mff_checkbox: Retained<NSButton>,
     smart_resizing_checkbox: Retained<NSButton>,
+    window_direction_monitor_fallback_checkbox: Retained<NSButton>,
     mod_key_popup: Retained<NSPopUpButton>,
     gap_inner_label: Retained<NSTextField>,
     gap_outer_label: Retained<NSTextField>,
@@ -1646,6 +1667,16 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         y,
         sel!(onSmartResizingChanged:),
     );
+    y -= row;
+    let window_direction_monitor_fallback_checkbox = add_checkbox(
+        mtm,
+        &view,
+        handler,
+        "Cross-monitor swap at workspace edge (any direction)",
+        lx,
+        y,
+        sel!(onWindowDirectionMonitorFallbackChanged:),
+    );
     y -= row + 18.0;
 
     add_section_label(mtm, &view, "Modifier Key", lx, y);
@@ -1673,6 +1704,7 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         ffm_checkbox,
         mff_checkbox,
         smart_resizing_checkbox,
+        window_direction_monitor_fallback_checkbox,
         mod_key_popup,
         gap_inner_label,
         gap_outer_label,
