@@ -849,6 +849,11 @@ impl WmState {
                         if settled.contains(wid) || no_swap.contains(wid) {
                             return None;
                         }
+                        // HX-06: pseudo windows render at their preferred
+                        // size intentionally; their "overflow" is by design.
+                        if self.pseudo_windows.contains(wid) {
+                            return None;
+                        }
                         let ax_ref = self.ax_refs.get(wid)?;
                         let (aw, ah) = ax_get_size(ax_ref).ok()?;
                         if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
@@ -921,6 +926,11 @@ impl WmState {
                 }
 
                 let oversized = geometries.iter().find_map(|(wid, rect)| {
+                    // HX-06: pseudo windows are intentionally smaller
+                    // than their tile rect; don't treat them as oversized.
+                    if self.pseudo_windows.contains(wid) {
+                        return None;
+                    }
                     let ax_ref = self.ax_refs.get(wid)?;
                     let (aw, ah) = ax_get_size(ax_ref).ok()?;
                     if aw > rect.width + 1.0 || ah > rect.height + 1.0 {
