@@ -1163,10 +1163,14 @@ impl WmState {
             Some(f) => f,
             None => return,
         };
+        // HX-02: pass smart_resizing flag from settings; step 9 of HX-02
+        // wires the actual setting. For now the field doesn't exist yet
+        // so we default to true (the new climb-to-deepest behavior).
+        let smart = true;
         if self
             .active_workspace_mut()
             .tree
-            .resize(focused, direction, 0.05)
+            .resize(focused, direction, 0.05, smart)
         {
             self.apply_layout();
         }

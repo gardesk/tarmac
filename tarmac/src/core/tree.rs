@@ -650,21 +650,26 @@ impl Node {
 
     /// Resize the split affecting a window in the given direction.
     ///
-    /// Climbs from the focused leaf up the tree to find the *deepest*
-    /// ancestor split whose direction matches `direction`, and adjusts
-    /// that split's ratio. The pre-HX-02 implementation only triggered
-    /// at the shallowest matching ancestor (the root-most), which made
-    /// resizing "feel global": pressing Left would shift the outermost
-    /// vertical boundary regardless of how deeply the focused window
-    /// was nested. Climbing-up-then-pick-deepest keeps the adjustment
-    /// local — the boundary nearest the focused window moves first.
+    /// When `smart` is true (Hyprland-style smart_resizing, tarmac's
+    /// default), the adjustment lands on the *deepest* matching
+    /// ancestor split that contains the focused window — the boundary
+    /// nearest the focused window moves first, keeping the visual
+    /// effect local. When `smart` is false, the adjustment lands on
+    /// the *shallowest* matching ancestor — the boundary closest to
+    /// the screen edge moves first, matching tarmac's pre-HX-02
+    /// behavior.
     ///
     /// Returns false when no ancestor split matches the requested
-    /// direction (e.g. all splits in the tree are Horizontal but
-    /// direction is Left/Right). In that case the focused window
-    /// already spans the relevant axis fully and there is nothing to
-    /// resize.
-    pub fn resize(&mut self, window: WindowId, direction: Direction, delta: f32) -> bool {
+    /// direction (e.g. all splits are Horizontal but direction is
+    /// Left/Right). In that case the focused window already spans the
+    /// relevant axis fully and there is nothing to resize.
+    pub fn resize(
+        &mut self,
+        window: WindowId,
+        direction: Direction,
+        delta: f32,
+        smart: bool,
+    ) -> bool {
         match self {
             Node::Leaf { .. } | Node::Stack { .. } => false,
             Node::Internal {
@@ -673,44 +678,65 @@ impl Node {
                 left,
                 right,
             } => {
-                // Recurse first: a deeper Internal matching the direction
-                // takes precedence over this level. This yields the
-                // deepest matching ancestor when the recursion returns
-                // true.
-                if left.contains(window) && left.resize(window, direction, delta) {
-                    return true;
-                }
-                if right.contains(window) && right.resize(window, direction, delta) {
-                    return true;
-                }
-
                 let axis_matches = matches!(
                     (split, direction),
                     (SplitDirection::Vertical, Direction::Left | Direction::Right)
                         | (SplitDirection::Horizontal, Direction::Up | Direction::Down)
                 );
 
-                if axis_matches && (left.contains(window) || right.contains(window)) {
-                    let in_left = left.contains(window);
-                    let adjustment = match direction {
-                        Direction::Right | Direction::Down => {
-                            if in_left {
-                                delta
-                            } else {
-                                -delta
+                let try_self = |ratio: &mut f32,
+                                left: &Box<Node>,
+                                right: &Box<Node>|
+                 -> bool {
+                    if axis_matches && (left.contains(window) || right.contains(window)) {
+                        let in_left = left.contains(window);
+                        let adjustment = match direction {
+                            Direction::Right | Direction::Down => {
+                                if in_left {
+                                    delta
+                                } else {
+                                    -delta
+                                }
                             }
-                        }
-                        Direction::Left | Direction::Up => {
-                            if in_left {
-                                -delta
-                            } else {
-                                delta
+                            Direction::Left | Direction::Up => {
+                                if in_left {
+                                    -delta
+                                } else {
+                                    delta
+                                }
                             }
-                        }
-                    };
-                    *ratio = (*ratio + adjustment).clamp(0.1, 0.9);
-                    true
+                        };
+                        *ratio = (*ratio + adjustment).clamp(0.1, 0.9);
+                        true
+                    } else {
+                        false
+                    }
+                };
+
+                if smart {
+                    // Deepest matching ancestor wins: recurse into the
+                    // containing child first; only adjust this level if
+                    // no deeper level handled it.
+                    if left.contains(window) && left.resize(window, direction, delta, smart) {
+                        return true;
+                    }
+                    if right.contains(window) && right.resize(window, direction, delta, smart) {
+                        return true;
+                    }
+                    try_self(ratio, left, right)
                 } else {
+                    // Shallowest matching ancestor wins: adjust this
+                    // level first if it matches; only recurse if it
+                    // doesn't.
+                    if try_self(ratio, left, right) {
+                        return true;
+                    }
+                    if left.contains(window) && left.resize(window, direction, delta, smart) {
+                        return true;
+                    }
+                    if right.contains(window) && right.resize(window, direction, delta, smart) {
+                        return true;
+                    }
                     false
                 }
             }
@@ -1464,7 +1490,7 @@ mod tests {
         let mut tree = Node::empty();
         tree.insert(1, None);
         tree.insert(2, Some(1));
-        assert!(tree.resize(1, Direction::Right, 0.1));
+        assert!(tree.resize(1, Direction::Right, 0.1, true));
 
         let geoms = tree.calculate_geometries(SCREEN);
         let g1 = geoms.iter().find(|(w, _)| *w == 1).unwrap();
@@ -1479,7 +1505,7 @@ mod tests {
         tree.insert(2, Some(1));
         // Try to resize way past the limit
         for _ in 0..20 {
-            tree.resize(1, Direction::Right, 0.1);
+            tree.resize(1, Direction::Right, 0.1, true);
         }
         let geoms = tree.calculate_geometries(SCREEN);
         let g1 = geoms.iter().find(|(w, _)| *w == 1).unwrap();
@@ -1551,7 +1577,7 @@ mod tests {
     fn resize_single_window_noop() {
         let mut tree = Node::empty();
         tree.insert(1, None);
-        assert!(!tree.resize(1, Direction::Right, 0.1));
+        assert!(!tree.resize(1, Direction::Right, 0.1, true));
     }
 
     #[test]
