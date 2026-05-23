@@ -1,4 +1,4 @@
-use super::tree::Rect;
+use super::tree::{Direction, Node, Rect};
 
 pub type MonitorId = u32; // CGDirectDisplayID
 
@@ -63,6 +63,56 @@ pub fn prev_index_nowrap(monitors: &[Monitor], from: usize) -> Option<usize> {
 /// Find which monitor index contains a screen point.
 pub fn index_at_point(monitors: &[Monitor], x: f64, y: f64) -> Option<usize> {
     monitors.iter().position(|m| m.frame.contains_point(x, y))
+}
+
+/// Find the nearest monitor in a geographic direction from `from`.
+/// Returns None when no monitor lies in that direction.
+///
+/// Left/Right are equivalent to `prev_index_nowrap`/`next_index_nowrap`
+/// for typical horizontal layouts, but using true geographic adjacency
+/// (rather than pure x-sort) means a vertical monitor stack works: Up
+/// from a laptop yields the monitor above it instead of None.
+///
+/// Reuses `Node::adjacent_distance` for the scoring so monitor-level
+/// adjacency picks the same way window-level focus does (rect overlap
+/// is preferred over center-to-center distance, vertical/horizontal gap
+/// is the secondary key).
+pub fn next_in_direction(
+    monitors: &[Monitor],
+    from: usize,
+    direction: Direction,
+) -> Option<usize> {
+    // Strict edge test rather than center comparison: a candidate
+    // counts as "in direction X" only when its leading edge in X has
+    // passed `from`'s trailing edge in X (modulo a small tolerance for
+    // floating-point alignment between adjacent display rects).
+    // Center comparison fails for side-by-side monitors with different
+    // heights — the rightmost's center y can be below the leftmost's
+    // center y purely from height difference, giving a false "Down" hit.
+    const TOL: f64 = 1.0;
+    let from_rect = monitors.get(from)?.frame;
+
+    monitors
+        .iter()
+        .enumerate()
+        .filter(|(i, m)| {
+            if *i == from {
+                return false;
+            }
+            let r = &m.frame;
+            match direction {
+                Direction::Left => r.x + r.width <= from_rect.x + TOL,
+                Direction::Right => r.x >= from_rect.x + from_rect.width - TOL,
+                Direction::Up => r.y + r.height <= from_rect.y + TOL,
+                Direction::Down => r.y >= from_rect.y + from_rect.height - TOL,
+            }
+        })
+        .min_by(|(_, a), (_, b)| {
+            let da = Node::adjacent_distance(&from_rect, &a.frame, direction);
+            let db = Node::adjacent_distance(&from_rect, &b.frame, direction);
+            da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
 }
 
 #[cfg(test)]
@@ -131,6 +181,69 @@ mod tests {
         }];
         assert_eq!(next_index_nowrap(&monitors, 0), None);
         assert_eq!(prev_index_nowrap(&monitors, 0), None);
+    }
+
+    #[test]
+    fn next_in_direction_horizontal() {
+        let monitors = make_monitors();
+        assert_eq!(
+            next_in_direction(&monitors, 0, Direction::Right),
+            Some(1)
+        );
+        assert_eq!(next_in_direction(&monitors, 1, Direction::Left), Some(0));
+        // No monitor to the left of the leftmost.
+        assert_eq!(next_in_direction(&monitors, 0, Direction::Left), None);
+        // No monitor to the right of the rightmost.
+        assert_eq!(next_in_direction(&monitors, 1, Direction::Right), None);
+        // No monitor above or below either in a horizontal stack.
+        assert_eq!(next_in_direction(&monitors, 0, Direction::Up), None);
+        assert_eq!(next_in_direction(&monitors, 0, Direction::Down), None);
+    }
+
+    #[test]
+    fn next_in_direction_vertical_stack() {
+        // Laptop monitor below, external monitor above.
+        let monitors = vec![
+            Monitor {
+                id: 1,
+                frame: Rect::new(0.0, 1080.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(0.0, 1105.0, 1920.0, 1055.0),
+                is_primary: true,
+                active_workspace: 0,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(0.0, 25.0, 1920.0, 1055.0),
+                is_primary: false,
+                active_workspace: 1,
+            },
+        ];
+        assert_eq!(next_in_direction(&monitors, 0, Direction::Up), Some(1));
+        assert_eq!(next_in_direction(&monitors, 1, Direction::Down), Some(0));
+        assert_eq!(next_in_direction(&monitors, 0, Direction::Down), None);
+        assert_eq!(next_in_direction(&monitors, 1, Direction::Up), None);
+        // No monitor left/right of either in a pure vertical stack.
+        assert_eq!(next_in_direction(&monitors, 0, Direction::Left), None);
+    }
+
+    #[test]
+    fn next_in_direction_single_monitor_all_none() {
+        let monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 2048.0, 1326.0),
+            usable_frame: Rect::new(0.0, 40.0, 2048.0, 1286.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        for dir in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            assert_eq!(next_in_direction(&monitors, 0, dir), None);
+        }
     }
 
     #[test]
