@@ -347,6 +347,32 @@ gar.set("smart_resizing", "true")
 -- any of the four directions (pre-HX-03 was Left/Right only). Set to "false"
 -- to make the action no-op at the edge instead.
 gar.set("window_direction_monitor_fallback", "true")
+
+-- HX-05: new-window insertion controls.
+-- `focal_point_source` picks where the focal point for new windows comes from:
+--   "cursor"           — last cursor location (falls back to active when off-screen).
+--   "active"           — focused window's center.
+--   "cursor_or_active" — cursor if inside the workspace, else active (default).
+gar.set("focal_point_source", "cursor_or_active")
+-- `split_axis` overrides the per-tile split direction:
+--   "smart"      — aspect-driven (default; uses split_width_multiplier).
+--   "horizontal" — always stack top/bottom.
+--   "vertical"   — always side-by-side.
+gar.set("split_axis", "smart")
+-- Aspect threshold for "smart" split. >1 biases Horizontal, <1 biases Vertical.
+gar.set("split_width_multiplier", "1.0")
+-- `force_split` decides whether the new window becomes the first or second child
+-- of the new Internal node. Default `follow_mouse` keeps Hyprland-style behavior
+-- (currently a no-op alias for `right` — cursor-side semantics is deferred polish).
+--   "follow_mouse" — default (new goes right/bottom).
+--   "left"         — new goes left/top.
+--   "right"        — new goes right/bottom.
+gar.set("force_split", "follow_mouse")
+-- When true, `gar.bind(..., "preselect right")` and other preselect hints
+-- persist across multiple window opens instead of clearing after one use.
+gar.set("permanent_direction_override", "false")
+-- Reserved for future polish: preserve parent split direction on re-insert.
+gar.set("preserve_split", "false")
 -- `tarmacctl set_ratio <0.1..0.9>` sets the focused window's parent split
 -- to an absolute ratio. Useful from Lua: gar.bind("mod+ctrl+5", function()
 --   gar.action("set_ratio", 0.5)
