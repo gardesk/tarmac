@@ -377,6 +377,13 @@ gar.set("force_split", "follow_mouse")
 gar.set("permanent_direction_override", "false")
 -- Reserved for future polish: preserve parent split direction on re-insert.
 gar.set("preserve_split", "false")
+
+-- HX-08: drag scaffolding. `drag_threshold` is the minimum pixel delta
+-- a Mod+drag must travel before it's treated as a drag (vs a click).
+-- Below the threshold the drag stays dormant; no AX writes fire and
+-- the gesture is effectively a click. HX-09 will use the post-threshold
+-- transition to float the tiled window and follow the cursor. Default 5.0.
+gar.set("drag_threshold", "5.0")
 -- `tarmacctl set_ratio <0.1..0.9>` sets the focused window's parent split
 -- to an absolute ratio. Useful from Lua: gar.bind("mod+ctrl+5", function()
 --   gar.action("set_ratio", 0.5)
@@ -1282,6 +1289,7 @@ fn build_settings_snapshot() -> Option<tarmac::ui::settings::SettingsSnapshot> {
         preserve_split: doc.managed.settings.preserve_split,
         permanent_direction_override: doc.managed.settings.permanent_direction_override,
         focal_point_source: doc.managed.settings.focal_point_source.clone(),
+        drag_threshold: doc.managed.settings.drag_threshold,
         mod_key: match doc.managed.settings.mod_key {
             mods if mods == tarmac::core::input::Modifiers::OPTION => "option".to_string(),
             mods if mods == tarmac::core::input::Modifiers::CONTROL => "control".to_string(),
@@ -1814,6 +1822,12 @@ fn poll_settings_actions() {
                 SettingsAction::FocalPointSource(value) => {
                     doc.managed.settings.focal_point_source = value;
                     should_write = true;
+                }
+                SettingsAction::DragThreshold(value) => {
+                    if value >= 0.0 {
+                        doc.managed.settings.drag_threshold = value;
+                        should_write = true;
+                    }
                 }
                 SettingsAction::ModKey(value) => {
                     doc.managed.settings.mod_key = match value.as_str() {

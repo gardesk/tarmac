@@ -142,6 +142,7 @@ pub enum SettingsAction {
     PreserveSplit(bool),
     PermanentDirectionOverride(bool),
     FocalPointSource(String),
+    DragThreshold(f64),
     ModKey(String),
     SelectKeybind(String),
     AddKeybind,
@@ -186,6 +187,7 @@ pub struct SettingsSnapshot {
     pub preserve_split: bool,
     pub permanent_direction_override: bool,
     pub focal_point_source: String,
+    pub drag_threshold: f64,
     pub mod_key: String,
     pub keybinds: Vec<KeybindRow>,
     pub selected_keybind_id: Option<String>,
@@ -944,6 +946,18 @@ define_class!(
             }
         }
 
+        #[unsafe(method(onDragThresholdChanged:))]
+        fn on_drag_threshold_changed(&self, sender: Option<&NSTextField>) {
+            if let Some(sender) = sender {
+                let s = sender.stringValue().to_string();
+                if let Ok(v) = s.parse::<f64>()
+                    && v >= 0.0
+                {
+                    self.emit(SettingsAction::DragThreshold(v));
+                }
+            }
+        }
+
         #[unsafe(method(onModKeyChanged:))]
         fn on_mod_key_changed(&self, sender: Option<&NSPopUpButton>) {
             if let Some(sender) = sender {
@@ -1360,6 +1374,7 @@ pub struct SettingsWindow {
     force_split_popup: Retained<NSPopUpButton>,
     focal_point_source_popup: Retained<NSPopUpButton>,
     split_width_multiplier_field: Retained<NSTextField>,
+    drag_threshold_field: Retained<NSTextField>,
     mod_key_popup: Retained<NSPopUpButton>,
     gap_inner_label: Retained<NSTextField>,
     gap_outer_label: Retained<NSTextField>,
@@ -1460,6 +1475,7 @@ impl SettingsWindow {
             force_split_popup: general.force_split_popup,
             focal_point_source_popup: general.focal_point_source_popup,
             split_width_multiplier_field: general.split_width_multiplier_field,
+            drag_threshold_field: general.drag_threshold_field,
             mod_key_popup: general.mod_key_popup,
             gap_inner_label: general.gap_inner_label,
             gap_outer_label: general.gap_outer_label,
@@ -1536,6 +1552,11 @@ impl SettingsWindow {
             .setStringValue(&NSString::from_str(
                 &format!("{:.2}", snapshot.split_width_multiplier),
             ));
+        self.drag_threshold_field
+            .setStringValue(&NSString::from_str(&format!(
+                "{:.1}",
+                snapshot.drag_threshold
+            )));
         self.mod_key_popup
             .selectItemAtIndex(match snapshot.mod_key.as_str() {
                 "option" => 1,
@@ -1597,6 +1618,7 @@ struct GeneralTab {
     force_split_popup: Retained<NSPopUpButton>,
     focal_point_source_popup: Retained<NSPopUpButton>,
     split_width_multiplier_field: Retained<NSTextField>,
+    drag_threshold_field: Retained<NSTextField>,
     mod_key_popup: Retained<NSPopUpButton>,
     gap_inner_label: Retained<NSTextField>,
     gap_outer_label: Retained<NSTextField>,
@@ -1875,6 +1897,21 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
     );
     y -= row + 18.0;
 
+    add_section_label(mtm, &view, "Drag (HX-08)", lx, y);
+    y -= row;
+    add_label(mtm, &view, "Drag threshold (px)", lx, y);
+    let drag_threshold_field = add_input_field(
+        mtm,
+        &view,
+        handler,
+        cx,
+        y,
+        80.0,
+        "5.0",
+        sel!(onDragThresholdChanged:),
+    );
+    y -= row + 18.0;
+
     add_section_label(mtm, &view, "Modifier Key", lx, y);
     y -= row;
     let mod_key_popup = add_popup(
@@ -1907,6 +1944,7 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         force_split_popup,
         focal_point_source_popup,
         split_width_multiplier_field,
+        drag_threshold_field,
         mod_key_popup,
         gap_inner_label,
         gap_outer_label,
