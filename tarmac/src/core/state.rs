@@ -2136,15 +2136,128 @@ impl WmState {
         }
     }
 
-    /// End an active drag operation.
-    pub fn end_drag(&mut self) {
-        if let Some(drag) = self.drag.take() {
-            tracing::debug!(id = drag.window_id, ?drag.mode, "drag ended");
-        }
+    /// End an active drag operation. `x`/`y` is the cursor at release —
+    /// used by HX-09's TiledRelocate disposition to choose between
+    /// retile, keep-floating, and cross-monitor relocate.
+    pub fn end_drag(&mut self, x: f64, y: f64) {
+        let Some(drag) = self.drag.take() else { return };
+
         // HX-08: clear the threshold flag and focus suppression on
         // release whether or not the threshold was ever crossed.
         self.drag_threshold_active = false;
         self.drag_suppress_focus_until = None;
+
+        if drag.mode != DragMode::TiledRelocate {
+            tracing::debug!(id = drag.window_id, ?drag.mode, "drag ended");
+            return;
+        }
+
+        // HX-09 disposition cascade. The dragged window currently lives
+        // in `original_workspace.floating`. Find the topmost visible
+        // tile under the drop coordinate (excluding the dragged window
+        // itself) and retile there. Otherwise keep it floating.
+        let drop = (x, y);
+        let mut target: Option<(usize, super::tree::Rect)> = None;
+        for mi in 0..self.monitors.len() {
+            let ws_idx = self.monitors[mi].active_workspace;
+            let sr = self.monitor_rect(mi);
+            if !sr.contains_point(drop.0, drop.1) {
+                continue;
+            }
+            let geoms = self.workspace_focus_geometries(ws_idx, sr);
+            let hit = geoms
+                .into_iter()
+                .find(|(wid, rect)| *wid != drag.window_id && rect.contains_point(drop.0, drop.1));
+            if hit.is_some() {
+                target = Some((ws_idx, sr));
+                break;
+            }
+            // Drop was over the monitor but no tile (e.g. menubar gap or
+            // workspace background). Don't break — let other monitors
+            // also get a hit-test; but if no other matches, we'll fall
+            // through to keep-floating.
+            if target.is_none() {
+                target = Some((ws_idx, sr));
+            }
+        }
+
+        let wid = drag.window_id;
+        let source_ws = drag.original_workspace;
+
+        // Pull from the source floating list. Drop disposition decides
+        // what happens next.
+        let removed = {
+            let ws = self.workspaces.get_mut(source_ws);
+            let idx = ws.floating.iter().position(|f| f.id == wid);
+            idx.map(|i| ws.floating.remove(i))
+        };
+        if removed.is_none() {
+            tracing::warn!(
+                wid,
+                source_ws,
+                "drag end: floated window missing from source floating list"
+            );
+            return;
+        }
+
+        match target {
+            Some((target_ws, target_rect))
+                if self
+                    .workspace_focus_geometries(target_ws, target_rect)
+                    .iter()
+                    .any(|(other, rect)| *other != wid && rect.contains_point(drop.0, drop.1)) =>
+            {
+                // Tile hit — retile at the drop focal point.
+                let split_override = self.split_axis_override();
+                let multiplier = self.split_width_multiplier;
+                let force_split_left = self.force_split == "left";
+                let ws = self.workspaces.get_mut(target_ws);
+                ws.tree.insert_at_focal_point_options(
+                    wid,
+                    drop,
+                    target_rect,
+                    split_override,
+                    multiplier,
+                );
+                if force_split_left {
+                    ws.tree.swap_parent_children(wid);
+                }
+                ws.record_focus(wid);
+                self.prune_focus_memory_for_window(wid);
+                self.apply_layout();
+                self.fix_oversized_windows();
+                self.focus_window(wid);
+                self.sync_mouse_after_focus(target_ws, wid);
+                tracing::info!(
+                    wid,
+                    target_ws,
+                    drop_x = drop.0,
+                    drop_y = drop.1,
+                    "drag drop: retiled at focal point"
+                );
+            }
+            _ => {
+                // Keep floating: put it back on the source workspace's
+                // floating list at its drop position.
+                let fw = removed.unwrap();
+                let kept = super::workspace::FloatingWindow {
+                    id: wid,
+                    geometry: super::tree::Rect::new(
+                        fw.geometry.x,
+                        fw.geometry.y,
+                        fw.geometry.width,
+                        fw.geometry.height,
+                    ),
+                };
+                self.workspaces.get_mut(source_ws).floating.push(kept);
+                tracing::info!(
+                    wid,
+                    drop_x = drop.0,
+                    drop_y = drop.1,
+                    "drag drop: no tile under cursor, keeping floating"
+                );
+            }
+        }
     }
 
     /// Check if a drag is currently active.
@@ -5714,7 +5827,9 @@ mod tests {
         state.begin_move_drag(100.0, 100.0);
         assert!(state.drag_threshold_active);
         assert!(state.drag_suppress_focus_until.is_some());
-        state.end_drag();
+        // Drop coord doesn't matter for the below-threshold drag — the
+        // window never floated. End just clears the gates.
+        state.end_drag(100.0, 100.0);
         assert!(!state.drag_threshold_active);
         assert!(state.drag_suppress_focus_until.is_none());
         assert!(!state.is_dragging());

@@ -120,7 +120,7 @@ fn main() {
                     MouseEvent::LeftDragged { x, y } if state.is_dragging() => {
                         state.update_drag(x, y);
                     }
-                    MouseEvent::LeftUp { .. } => state.end_drag(),
+                    MouseEvent::LeftUp { x, y } => state.end_drag(x, y),
                     MouseEvent::RightDown {
                         x,
                         y,
@@ -129,7 +129,7 @@ fn main() {
                     MouseEvent::RightDragged { x, y } if state.is_dragging() => {
                         state.update_drag(x, y);
                     }
-                    MouseEvent::RightUp { .. } => state.end_drag(),
+                    MouseEvent::RightUp { x, y } => state.end_drag(x, y),
                     _ => {}
                 }
             }
