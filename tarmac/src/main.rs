@@ -378,11 +378,15 @@ gar.set("permanent_direction_override", "false")
 -- Reserved for future polish: preserve parent split direction on re-insert.
 gar.set("preserve_split", "false")
 
--- HX-08: drag scaffolding. `drag_threshold` is the minimum pixel delta
--- a Mod+drag must travel before it's treated as a drag (vs a click).
--- Below the threshold the drag stays dormant; no AX writes fire and
--- the gesture is effectively a click. HX-09 will use the post-threshold
--- transition to float the tiled window and follow the cursor. Default 5.0.
+-- HX-08/HX-09 drag-to-tile: Mod+LeftDrag on a tiled window.
+-- Below `drag_threshold` (px) the gesture is treated as a click. Past
+-- the threshold the window auto-floats at ~85% of its tile size,
+-- centered on the cursor, and follows the cursor until release. On
+-- release, the drop position is hit-tested against tiled geometries
+-- across all visible workspaces: a tile hit re-inserts the window at
+-- the drop's focal point (using HX-05's focal-point insertion);
+-- otherwise the window stays floating at the drop position. Cross-
+-- monitor drops are supported. Default 5.0 px threshold.
 gar.set("drag_threshold", "5.0")
 -- `tarmacctl set_ratio <0.1..0.9>` sets the focused window's parent split
 -- to an absolute ratio. Useful from Lua: gar.bind("mod+ctrl+5", function()
