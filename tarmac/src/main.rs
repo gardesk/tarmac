@@ -377,15 +377,23 @@ gar.bind("mod+down", "focus down")
 gar.bind("mod+up", "focus up")
 gar.bind("mod+right", "focus right")
 
--- Swap
-gar.bind("mod+shift+h", "swap left")
-gar.bind("mod+shift+j", "swap down")
-gar.bind("mod+shift+k", "swap up")
-gar.bind("mod+shift+l", "swap right")
-gar.bind("mod+shift+left", "swap left")
-gar.bind("mod+shift+down", "swap down")
-gar.bind("mod+shift+up", "swap up")
-gar.bind("mod+shift+right", "swap right")
+-- Move (HX-04: replaces the older `swap` default for Mod+Shift+hjkl).
+-- Move REMOVES the focused window from its tile and RE-INSERTS it at
+-- a focal point one pixel past its edge in the requested direction —
+-- the layout reshapes around the move. Compare to Swap, which only
+-- exchanges two tile positions without restructuring.
+--
+-- If you prefer the old swap behavior, swap is still bindable:
+--   gar.bind("$mod+shift+alt+h", "swap left")
+--   gar.bind("$mod+shift+alt+j", "swap down")  -- ... etc.
+gar.bind("mod+shift+h", "move left")
+gar.bind("mod+shift+j", "move down")
+gar.bind("mod+shift+k", "move up")
+gar.bind("mod+shift+l", "move right")
+gar.bind("mod+shift+left", "move left")
+gar.bind("mod+shift+down", "move down")
+gar.bind("mod+shift+up", "move up")
+gar.bind("mod+shift+right", "move right")
 
 -- Resize
 gar.bind("mod+ctrl+h", "resize left")
