@@ -5297,6 +5297,44 @@ mod tests {
         assert_eq!(focal2, (480.0, 1081.0));
     }
 
+    // --- HX-06 pseudo-tile tests ---
+
+    #[test]
+    fn toggle_pseudo_inserts_then_removes() {
+        let mut state = make_focal_test_state();
+        state.workspaces.get_mut(0).focused = Some(1);
+        assert!(!state.is_pseudo(1));
+        state.toggle_pseudo();
+        assert!(state.is_pseudo(1));
+        state.toggle_pseudo();
+        assert!(!state.is_pseudo(1));
+    }
+
+    #[test]
+    fn toggle_pseudo_no_op_for_stack_member() {
+        let mut state = make_focal_test_state();
+        let screen = state.monitors[0].usable_frame;
+        // Collapse the 2-window tree to a Stack so window 1 lives inside it.
+        let ws = state.workspaces.get_mut(0);
+        assert!(ws.tree.collapse_to_root_stack(1));
+        ws.focused = Some(1);
+        let _ = screen;
+        state.toggle_pseudo();
+        // Stack members must not be added to the pseudo set in v1.
+        assert!(!state.is_pseudo(1));
+    }
+
+    #[test]
+    fn pseudo_pruned_on_window_close() {
+        let mut state = make_focal_test_state();
+        state.workspaces.get_mut(0).focused = Some(1);
+        state.toggle_pseudo();
+        assert!(state.is_pseudo(1));
+        let reaped = state.on_window_closed(1);
+        assert!(reaped, "window-close should reap a tracked window");
+        assert!(!state.is_pseudo(1), "pseudo entry must be cleaned up");
+    }
+
     /// Shared HX-04 fixture: single 1920x1080 monitor with 3 windows in a
     /// Vertical-then-nested-Horizontal layout. Tree shape:
     ///   Internal{V, Leaf{1}, Internal{H, Leaf{2}, Leaf{3}}}

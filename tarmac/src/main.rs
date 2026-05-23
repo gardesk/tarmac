@@ -401,6 +401,11 @@ gar.bind("alt+shift+.", "promote_stack")
 -- gar.bind("mod+shift+x", "swap_split")
 -- gar.bind("mod+shift+r", "promote_to_root")
 
+-- Pseudo-tile (HX-06). The window keeps its preferred size, centered within
+-- the assigned tile. Useful for picture-in-picture, video calls, terminals
+-- with fixed dimensions. Toggles off restore stretched behavior.
+-- gar.bind("mod+shift+u", "toggle_pseudo")
+
 -- Focus
 gar.bind("mod+h", "focus left")
 gar.bind("mod+j", "focus down")
