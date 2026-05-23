@@ -1198,6 +1198,148 @@ impl Node {
         }
     }
 
+    /// HX-07: merge `source` into the leaf-or-stack that holds
+    /// `target_leaf`, producing a Stack at that position.
+    ///
+    /// Behaviors:
+    /// - If `target_leaf` is in an existing Stack: append `source` to
+    ///   that stack's `windows` and make it the active member. The
+    ///   stack's `previous` tree is extended so a later `unstack` still
+    ///   restores all current members as siblings.
+    /// - If `target_leaf` is a plain `Leaf`: replace that leaf with a
+    ///   fresh `Stack { windows: [target_leaf, source], active: 1,
+    ///   previous: Internal{Leaf{target_leaf}, Leaf{source}} }`. The
+    ///   "previous = two siblings" choice matches the design decision
+    ///   in `.docs/sprints/HX-07-user-initiated-stacks.md` (cleaner
+    ///   unstack mental model — back to two side-by-side leaves rather
+    ///   than the pre-AddToStack workspace shape).
+    ///
+    /// Returns false when `source == target_leaf`, when either wid is
+    /// not in the tree, or when no leaf/stack is found that holds
+    /// `target_leaf` after `source`'s removal.
+    pub fn merge_into_neighbor(&mut self, source: WindowId, target_leaf: WindowId) -> bool {
+        if source == target_leaf {
+            return false;
+        }
+        if !self.contains(source) || !self.contains(target_leaf) {
+            return false;
+        }
+        // Pull source out first; the tree may compact (parent Internals
+        // collapse if source was a sibling of target_leaf).
+        self.remove(source);
+        self.merge_into_neighbor_impl(source, target_leaf)
+    }
+
+    fn merge_into_neighbor_impl(&mut self, source: WindowId, target_leaf: WindowId) -> bool {
+        match self {
+            Node::Leaf {
+                window: Some(target),
+            } if *target == target_leaf => {
+                let previous = Node::Internal {
+                    split: SplitDirection::Vertical,
+                    ratio: 0.5,
+                    left: Box::new(Node::Leaf {
+                        window: Some(target_leaf),
+                    }),
+                    right: Box::new(Node::Leaf {
+                        window: Some(source),
+                    }),
+                };
+                *self = Node::Stack {
+                    windows: vec![target_leaf, source],
+                    active: 1,
+                    previous: Box::new(previous),
+                };
+                true
+            }
+            Node::Stack {
+                windows,
+                active,
+                previous,
+            } if windows.contains(&target_leaf) => {
+                windows.push(source);
+                *active = windows.len() - 1;
+                // Extend previous so unstack restores all current
+                // members as siblings (not just the original two).
+                let old_previous = std::mem::take(previous.as_mut());
+                *previous = Box::new(Node::Internal {
+                    split: SplitDirection::Vertical,
+                    ratio: 0.5,
+                    left: Box::new(old_previous),
+                    right: Box::new(Node::Leaf {
+                        window: Some(source),
+                    }),
+                });
+                true
+            }
+            Node::Internal { left, right, .. } => {
+                left.merge_into_neighbor_impl(source, target_leaf)
+                    || right.merge_into_neighbor_impl(source, target_leaf)
+            }
+            _ => false,
+        }
+    }
+
+    /// HX-07: pull `window` out of the Stack it lives in, leaving the
+    /// rest of the stack intact and re-grafting `window` as a Vertical
+    /// (side-by-side) sibling.
+    ///
+    /// 2-member stack: the stack collapses to a fresh 2-leaf Internal
+    /// with `window` on the right and the other member on the left.
+    /// 3+ member stack: the stack shrinks by one (preserving active
+    /// pointer with the usual fixup); the parent slot becomes
+    /// `Internal { Vertical, left = remaining stack, right = Leaf{window} }`.
+    ///
+    /// Returns false when `window` is not in a Stack node in the tree.
+    pub fn split_active_from_stack(&mut self, window: WindowId) -> bool {
+        match self {
+            Node::Stack {
+                windows,
+                active,
+                previous: _,
+            } if windows.contains(&window) => {
+                let Some(idx) = windows.iter().position(|w| *w == window) else {
+                    return false;
+                };
+                if windows.len() == 2 {
+                    let remaining_idx = if idx == 0 { 1 } else { 0 };
+                    let remaining = windows[remaining_idx];
+                    *self = Node::Internal {
+                        split: SplitDirection::Vertical,
+                        ratio: 0.5,
+                        left: Box::new(Node::Leaf {
+                            window: Some(remaining),
+                        }),
+                        right: Box::new(Node::Leaf {
+                            window: Some(window),
+                        }),
+                    };
+                    return true;
+                }
+                windows.remove(idx);
+                if *active >= windows.len() {
+                    *active = windows.len() - 1;
+                } else if idx < *active {
+                    *active -= 1;
+                }
+                let smaller_stack = std::mem::take(self);
+                *self = Node::Internal {
+                    split: SplitDirection::Vertical,
+                    ratio: 0.5,
+                    left: Box::new(smaller_stack),
+                    right: Box::new(Node::Leaf {
+                        window: Some(window),
+                    }),
+                };
+                true
+            }
+            Node::Internal { left, right, .. } => {
+                left.split_active_from_stack(window) || right.split_active_from_stack(window)
+            }
+            _ => false,
+        }
+    }
+
     pub fn make_stack_for_window(&mut self, window: WindowId) -> bool {
         self.make_stack_for_window_impl(window)
     }
@@ -2055,6 +2197,151 @@ mod tests {
         assert!(tree.remove(2));
 
         assert!(matches!(tree, Node::Leaf { window: Some(1) }));
+    }
+
+    // --- HX-07 merge_into_neighbor / split_active_from_stack tests ---
+
+    #[test]
+    fn merge_into_neighbor_creates_stack_from_two_leaves() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        // Merge 1 into 2's leaf.
+        assert!(tree.merge_into_neighbor(1, 2));
+        // Result: root is a Stack containing both.
+        match &tree {
+            Node::Stack {
+                windows, active, ..
+            } => {
+                assert_eq!(windows, &vec![2, 1]);
+                assert_eq!(*active, 1, "source should become active member");
+            }
+            other => panic!("expected Stack root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_into_neighbor_appends_to_existing_stack() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        // Make windows 2 and 3 into a stack first.
+        assert!(tree.merge_into_neighbor(2, 3));
+        // Now merge 1 into 3 — should append 1 to the existing stack.
+        assert!(tree.merge_into_neighbor(1, 3));
+        // Locate the stack and verify membership.
+        fn find_stack(node: &Node) -> Option<&Node> {
+            match node {
+                Node::Stack { .. } => Some(node),
+                Node::Internal { left, right, .. } => {
+                    find_stack(left).or_else(|| find_stack(right))
+                }
+                _ => None,
+            }
+        }
+        let stack = find_stack(&tree).expect("stack should exist");
+        if let Node::Stack {
+            windows, active, ..
+        } = stack
+        {
+            assert_eq!(windows.len(), 3);
+            assert!(windows.contains(&1));
+            assert!(windows.contains(&2));
+            assert!(windows.contains(&3));
+            // Most-recently-appended source becomes active.
+            assert_eq!(windows[*active], 1);
+        }
+    }
+
+    #[test]
+    fn merge_into_neighbor_returns_false_for_same_wid() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        assert!(!tree.merge_into_neighbor(1, 1));
+    }
+
+    #[test]
+    fn merge_into_neighbor_returns_false_when_target_missing() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(!tree.merge_into_neighbor(1, 99));
+    }
+
+    #[test]
+    fn merge_then_unstack_restores_two_siblings() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(tree.merge_into_neighbor(1, 2));
+        // Active member of the new stack is window 1 (the source). Unstack from there.
+        assert!(tree.unstack(1));
+        // Result: Internal with two leaves as siblings (in either order).
+        match &tree {
+            Node::Internal { left, right, .. } => {
+                let l = left.windows();
+                let r = right.windows();
+                assert!(l.contains(&1) || r.contains(&1));
+                assert!(l.contains(&2) || r.contains(&2));
+            }
+            other => panic!("expected Internal root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_active_from_2_member_stack_yields_two_siblings() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(tree.merge_into_neighbor(1, 2));
+        // Active is 1; split it back out.
+        assert!(tree.split_active_from_stack(1));
+        match &tree {
+            Node::Internal { left, right, .. } => {
+                // 2 on the left, 1 on the right (right is the split-out).
+                assert!(matches!(left.as_ref(), Node::Leaf { window: Some(2) }));
+                assert!(matches!(right.as_ref(), Node::Leaf { window: Some(1) }));
+            }
+            other => panic!("expected Internal root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_active_from_3_member_stack_keeps_smaller_stack() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        assert!(tree.merge_into_neighbor(2, 3));
+        assert!(tree.merge_into_neighbor(1, 3));
+        // Stack has [3, 2, 1] (per merge order) with 1 active.
+        assert!(tree.split_active_from_stack(1));
+        // Result: an Internal with the smaller stack on the left and
+        // Leaf{1} on the right.
+        match &tree {
+            Node::Internal { left, right, .. } => {
+                assert!(matches!(right.as_ref(), Node::Leaf { window: Some(1) }));
+                match left.as_ref() {
+                    Node::Stack { windows, .. } => {
+                        assert_eq!(windows.len(), 2);
+                        assert!(windows.contains(&2));
+                        assert!(windows.contains(&3));
+                    }
+                    other => panic!("expected Stack on left, got {other:?}"),
+                }
+            }
+            other => panic!("expected Internal root, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn split_active_from_stack_returns_false_when_not_in_stack() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        // Window 1 is not in any stack.
+        assert!(!tree.split_active_from_stack(1));
     }
 
     // --- HX-02 resize / set_parent_ratio tests ---
