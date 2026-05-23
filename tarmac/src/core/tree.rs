@@ -831,6 +831,30 @@ impl Node {
         }
     }
 
+    /// Swap the left/right children of the focused window's immediate
+    /// Internal ancestor. Effectively moves the focused window's subtree
+    /// to the opposite side of its parent split. Returns false if the
+    /// window is at the root (no parent) or not in the tree.
+    pub fn swap_parent_children(&mut self, window: WindowId) -> bool {
+        match self {
+            Node::Internal { left, right, .. } => {
+                if matches!(left.as_ref(), Node::Internal { .. }) && left.contains(window) {
+                    return left.swap_parent_children(window);
+                }
+                if matches!(right.as_ref(), Node::Internal { .. }) && right.contains(window) {
+                    return right.swap_parent_children(window);
+                }
+                if left.contains(window) || right.contains(window) {
+                    std::mem::swap(left, right);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Flip the split direction of the focused window's immediate Internal
     /// ancestor (the deepest Internal containing the window). Returns
     /// false if the window is at the root (no parent) or not in the tree.
