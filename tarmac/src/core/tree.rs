@@ -1771,4 +1771,70 @@ mod tests {
 
         assert!(matches!(tree, Node::Leaf { window: Some(1) }));
     }
+
+    // --- find_leaf_at_point tests ---
+
+    #[test]
+    fn find_leaf_at_point_returns_window_when_inside() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        assert_eq!(tree.find_leaf_at_point(SCREEN, 100.0, 100.0), Some(1));
+    }
+
+    #[test]
+    fn find_leaf_at_point_returns_none_when_outside() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        assert_eq!(tree.find_leaf_at_point(SCREEN, 2000.0, 100.0), None);
+        assert_eq!(tree.find_leaf_at_point(SCREEN, 100.0, 2000.0), None);
+        assert_eq!(tree.find_leaf_at_point(SCREEN, -1.0, 100.0), None);
+    }
+
+    #[test]
+    fn find_leaf_at_point_returns_none_for_empty_leaf() {
+        let tree = Node::empty();
+        assert_eq!(tree.find_leaf_at_point(SCREEN, 100.0, 100.0), None);
+    }
+
+    #[test]
+    fn find_leaf_at_point_handles_stack_returns_active() {
+        let stack = Node::Stack {
+            windows: vec![1, 2, 3],
+            active: 1, // window 2 is active
+            previous: Box::new(Node::empty()),
+        };
+        assert_eq!(stack.find_leaf_at_point(SCREEN, 100.0, 100.0), Some(2));
+    }
+
+    #[test]
+    fn find_leaf_at_point_descends_vertical_split_left() {
+        // SCREEN is wider than tall → smart split = Vertical.
+        // Two windows: 1 ends up left, 2 ends up right.
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        // Left half is x in [0, 960).
+        assert_eq!(tree.find_leaf_at_point(SCREEN, 100.0, 500.0), Some(1));
+    }
+
+    #[test]
+    fn find_leaf_at_point_descends_vertical_split_right() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        // Right half is x in [960, 1920).
+        assert_eq!(tree.find_leaf_at_point(SCREEN, 1500.0, 500.0), Some(2));
+    }
+
+    #[test]
+    fn find_leaf_at_point_descends_horizontal_split() {
+        // Tall rect → smart split = Horizontal.
+        let tall = Rect::new(0.0, 0.0, 500.0, 1000.0);
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, tall);
+        tree.insert_with_rect(2, Some(1), tall);
+        // Top half is y in [0, 500), bottom in [500, 1000).
+        assert_eq!(tree.find_leaf_at_point(tall, 250.0, 100.0), Some(1));
+        assert_eq!(tree.find_leaf_at_point(tall, 250.0, 800.0), Some(2));
+    }
 }
