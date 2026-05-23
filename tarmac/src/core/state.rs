@@ -5137,6 +5137,88 @@ mod tests {
         assert!(!state.registry.contains(7777));
     }
 
+    /// Shared HX-05 fixture: single 1920x1080 monitor with 2 windows
+    /// (Vertical split, 1 on left, 2 on right) and focus on 1.
+    fn make_focal_test_state() -> WmState {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.mouse_follows_focus = false;
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+        for wid in 1u32..=2 {
+            state.registry.add(tracked_window(wid, 100, "Ghost"));
+        }
+        let ws = state.workspaces.get_mut(0);
+        ws.tree.insert_with_rect(1, None, screen);
+        ws.tree.insert_with_rect(2, Some(1), screen);
+        ws.focused = Some(1);
+        state
+    }
+
+    #[test]
+    fn compute_focal_point_cursor_inside_uses_cursor() {
+        let mut state = make_focal_test_state();
+        state.focal_point_source = "cursor".to_string();
+        state.last_cursor = Some((1500.0, 540.0));
+        let focal = state.compute_focal_point_for_new_window();
+        assert_eq!(focal, (1500.0, 540.0));
+    }
+
+    #[test]
+    fn compute_focal_point_cursor_outside_workspace_falls_back_to_active() {
+        let mut state = make_focal_test_state();
+        state.focal_point_source = "cursor_or_active".to_string();
+        // Cursor on a phantom second monitor.
+        state.last_cursor = Some((9999.0, 9999.0));
+        let focal = state.compute_focal_point_for_new_window();
+        // Active focused = 1; its rect is (0,0,960,1080) → center (480, 540).
+        assert_eq!(focal, (480.0, 540.0));
+    }
+
+    #[test]
+    fn compute_focal_point_active_mode_ignores_cursor() {
+        let mut state = make_focal_test_state();
+        state.focal_point_source = "active".to_string();
+        state.last_cursor = Some((1500.0, 540.0)); // would be used by cursor mode
+        let focal = state.compute_focal_point_for_new_window();
+        // "active" must use focused window's center (480, 540), not cursor.
+        assert_eq!(focal, (480.0, 540.0));
+    }
+
+    #[test]
+    fn compute_focal_point_consumes_preselect_when_set() {
+        let mut state = make_focal_test_state();
+        state.permanent_direction_override = false;
+        // Preselect Right: focal should be 1px past the right edge of 1's tile.
+        state.workspaces.get_mut(0).preselect = Some((Direction::Right, false));
+        let focal = state.compute_focal_point_for_new_window();
+        // 1's rect is (0,0,960,1080); right edge focal = (961, 540).
+        assert_eq!(focal, (961.0, 540.0));
+        // Single-use preselect is cleared after consumption.
+        assert!(state.workspaces.get(0).preselect.is_none());
+    }
+
+    #[test]
+    fn compute_focal_point_persistent_preselect_is_restored() {
+        let mut state = make_focal_test_state();
+        state.workspaces.get_mut(0).preselect = Some((Direction::Down, true));
+        let _ = state.compute_focal_point_for_new_window();
+        assert_eq!(
+            state.workspaces.get(0).preselect,
+            Some((Direction::Down, true))
+        );
+        // And calling again still applies it.
+        let focal2 = state.compute_focal_point_for_new_window();
+        // 1's rect is (0,0,960,1080); down edge focal = (480, 1081).
+        assert_eq!(focal2, (480.0, 1081.0));
+    }
+
     /// Shared HX-04 fixture: single 1920x1080 monitor with 3 windows in a
     /// Vertical-then-nested-Horizontal layout. Tree shape:
     ///   Internal{V, Leaf{1}, Internal{H, Leaf{2}, Leaf{3}}}
