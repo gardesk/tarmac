@@ -135,6 +135,17 @@ pub struct WmState {
     /// stays dormant — no AX writes, no float transition. HX-09 will
     /// fill in what happens when this flag transitions to false.
     drag_threshold_active: bool,
+    /// HX-08: per-window timestamp of the last AX position/size write.
+    /// `show_window` consults this to throttle rapid resize loops and
+    /// drag-cursor-follow writes to ~60 Hz per window. Interior
+    /// mutability so the existing `&self`-only call sites (apply_layout,
+    /// show_window) can update it without rippling `&mut self` through
+    /// dozens of paths.
+    ax_write_last: std::cell::RefCell<HashMap<WindowId, std::time::Instant>>,
+    /// HX-08: writes throttled by `should_throttle_ax_write` go here
+    /// and are retried at the top of the next `apply_layout`. Same
+    /// interior-mutability rationale as `ax_write_last`.
+    pending_show_window: std::cell::RefCell<HashMap<WindowId, Rect>>,
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
@@ -189,6 +200,8 @@ impl WmState {
             drag_threshold: 5.0,
             drag_suppress_focus_until: None,
             drag_threshold_active: false,
+            ax_write_last: std::cell::RefCell::new(HashMap::new()),
+            pending_show_window: std::cell::RefCell::new(HashMap::new()),
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
@@ -2366,6 +2379,44 @@ impl WmState {
         self.apply_layout();
         self.focus_window(focused);
         self.sync_mouse_after_focus(ws_idx, focused);
+    }
+
+    /// HX-08 AX write rate limiter. Returns true if the call site
+    /// should *throttle* (skip the AX write) because this window was
+    /// written to within the last 16ms (~60 Hz). When it returns false
+    /// the timestamp is updated, so a subsequent rapid call within the
+    /// same 16ms window throttles. Uses interior mutability so
+    /// `show_window` can call this with `&self`.
+    ///
+    /// Per-window granularity (not per-app): the bug pattern is rapid
+    /// updates to a single window (drag cursor-follow, resize loop).
+    /// Multi-window operations (e.g., a workspace switch firing writes
+    /// to N distinct windows) sail through because each window has its
+    /// own bucket.
+    fn should_throttle_ax_write(&self, wid: WindowId) -> bool {
+        const MIN_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+        let now = std::time::Instant::now();
+        let mut last = self.ax_write_last.borrow_mut();
+        if let Some(&t) = last.get(&wid)
+            && now.duration_since(t) < MIN_INTERVAL
+        {
+            return true;
+        }
+        last.insert(wid, now);
+        false
+    }
+
+    /// HX-08: drain writes that were throttled in earlier frames. Run
+    /// at the top of `apply_layout` so deferred writes catch up before
+    /// the main layout pass issues fresh ones. A still-throttled retry
+    /// just re-defers itself — eventual consistency, bounded by the
+    /// per-window 16ms timer.
+    fn drain_pending_show_window(&self) {
+        let pending: Vec<(WindowId, Rect)> =
+            self.pending_show_window.borrow_mut().drain().collect();
+        for (wid, rect) in pending {
+            self.show_window(wid, rect);
+        }
     }
 
     /// HX-06: query whether a window is in pseudo-tile mode.
