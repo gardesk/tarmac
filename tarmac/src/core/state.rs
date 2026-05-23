@@ -3543,6 +3543,62 @@ impl WmState {
         }
     }
 
+    /// HX-05: derive a focal point for inserting a new window into the
+    /// active workspace. Order of precedence:
+    ///   1. Consume an active-workspace preselect hint if set (using
+    ///      the focused window's edge in the hint direction). When
+    ///      `permanent_direction_override` is true the hint is
+    ///      re-stored after consumption so it survives multiple opens.
+    ///   2. Otherwise route by `focal_point_source`:
+    ///        "cursor"           — last_cursor if available, else active.
+    ///        "active"           — focused window's center.
+    ///        "cursor_or_active" — cursor if inside workspace, else active.
+    ///   3. Final fallback when there is no focused window: workspace
+    ///      rect center.
+    fn compute_focal_point_for_new_window(&mut self) -> super::tree::FocalPoint {
+        let sr = self.focused_rect();
+        let ws_idx = self.active_ws_idx();
+        let focused_wid = self.active_workspace().focused;
+        let focused_rect = focused_wid.and_then(|w| {
+            self.workspace_focus_geometries(ws_idx, sr)
+                .into_iter()
+                .find(|(wid, _)| *wid == w)
+                .map(|(_, r)| r)
+        });
+
+        // Preselect short-circuits everything else.
+        if let Some((dir, persistent)) = self.active_workspace_mut().take_preselect() {
+            let base = focused_rect.unwrap_or(sr);
+            let focal = base.focal_point_for_direction(dir);
+            if persistent {
+                self.active_workspace_mut().preselect = Some((dir, true));
+            }
+            return focal;
+        }
+
+        let cursor_in_workspace = self.last_cursor.filter(|&(x, y)| sr.contains_point(x, y));
+        match self.focal_point_source.as_str() {
+            "cursor" => self
+                .last_cursor
+                .or_else(|| focused_rect.map(|r| r.center()))
+                .unwrap_or_else(|| sr.center()),
+            "active" => focused_rect.map(|r| r.center()).unwrap_or_else(|| sr.center()),
+            _ => cursor_in_workspace
+                .or_else(|| focused_rect.map(|r| r.center()))
+                .unwrap_or_else(|| sr.center()),
+        }
+    }
+
+    /// Map `Settings::split_axis` string onto a tree-level split
+    /// override. "smart" → None (aspect-driven via multiplier).
+    fn split_axis_override(&self) -> Option<super::tree::SplitDirection> {
+        match self.split_axis.as_str() {
+            "horizontal" => Some(super::tree::SplitDirection::Horizontal),
+            "vertical" => Some(super::tree::SplitDirection::Vertical),
+            _ => None,
+        }
+    }
+
     /// Check if a window is on an inactive workspace (intentionally hidden).
     pub fn is_window_hidden(&self, wid: u32) -> bool {
         let id = wid as WindowId;
@@ -3683,20 +3739,43 @@ impl WmState {
             }
         } else {
             let sr = self.focused_rect();
-            let ws = self.active_workspace_mut();
             if should_float {
                 let geom = rule_geometry
                     .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
                     .unwrap_or_else(|| Rect::new(x, y, width, height));
+                let ws = self.active_workspace_mut();
                 ws.floating.push(super::workspace::FloatingWindow {
                     id: *id,
                     geometry: geom,
                 });
                 tracing::info!(id, subrole, "auto-floated window");
+                ws.record_focus(*id);
             } else {
-                ws.tree.insert_with_rect(*id, ws.focused, sr);
+                // HX-05 focal-point insertion. Compute focal *before* the
+                // mutable workspace borrow because the focal helper itself
+                // mutates (consumes preselect).
+                let focal = self.compute_focal_point_for_new_window();
+                let split_override = self.split_axis_override();
+                let multiplier = self.split_width_multiplier;
+                let force_split_left = self.force_split == "left";
+                let new_id = *id;
+                let ws = self.active_workspace_mut();
+                ws.tree.insert_at_focal_point_options(
+                    new_id,
+                    focal,
+                    sr,
+                    split_override,
+                    multiplier,
+                );
+                if force_split_left {
+                    // The default Leaf→Internal conversion puts the new
+                    // window on the right (second child). force_split=left
+                    // inverts that by swapping the freshly-created
+                    // parent's children.
+                    ws.tree.swap_parent_children(new_id);
+                }
+                ws.record_focus(new_id);
             }
-            ws.record_focus(*id);
         }
     }
 
