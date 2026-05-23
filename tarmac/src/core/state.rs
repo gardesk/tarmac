@@ -98,6 +98,25 @@ pub struct WmState {
     /// crosses to the geographically adjacent monitor in any of the
     /// four directions. When false it no-ops at the edge.
     pub window_direction_monitor_fallback: bool,
+    /// HX-05 split-axis policy. See `Settings::split_axis`.
+    pub split_axis: String,
+    /// HX-05 child-ordering policy. See `Settings::force_split`.
+    pub force_split: String,
+    /// HX-05 aspect threshold used when `split_axis = "smart"`.
+    pub split_width_multiplier: f64,
+    /// HX-05: preserve parent split direction on existing-Internal
+    /// inserts (reserved for future use; current insert path doesn't
+    /// re-derive direction on existing Internals).
+    pub preserve_split: bool,
+    /// HX-05: when true, `Action::Preselect` hints persist across
+    /// multiple window opens rather than clearing after one use.
+    pub permanent_direction_override: bool,
+    /// HX-05 focal-point source policy. See `Settings::focal_point_source`.
+    pub focal_point_source: String,
+    /// HX-05 cursor cache, updated on every `mouse_moved` so AX-driven
+    /// new-window callbacks (which fire without a corresponding mouse
+    /// event) can still read the last-known cursor location.
+    pub last_cursor: Option<(f64, f64)>,
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
@@ -141,6 +160,13 @@ impl WmState {
             gap_outer: 0.0,
             smart_resizing: true,
             window_direction_monitor_fallback: true,
+            split_axis: "smart".to_string(),
+            force_split: "follow_mouse".to_string(),
+            split_width_multiplier: 1.0,
+            preserve_split: false,
+            permanent_direction_override: false,
+            focal_point_source: "cursor_or_active".to_string(),
+            last_cursor: None,
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
@@ -1921,6 +1947,11 @@ impl WmState {
     /// Focus-follows-mouse: focus the window under the cursor.
     /// Checks floating windows first (they're visually on top).
     pub fn mouse_moved(&mut self, x: f64, y: f64) {
+        // HX-05: cache last cursor for new-window focal-point insertion,
+        // unconditionally — the focal-point machinery uses this even
+        // when FFM is disabled.
+        self.last_cursor = Some((x, y));
+
         if !self.focus_follows_mouse {
             return;
         }

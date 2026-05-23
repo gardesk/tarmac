@@ -70,6 +70,12 @@ fn main() {
     state.gap_outer = config.settings.gap_outer;
     state.smart_resizing = config.settings.smart_resizing;
     state.window_direction_monitor_fallback = config.settings.window_direction_monitor_fallback;
+    state.split_axis = config.settings.split_axis.clone();
+    state.force_split = config.settings.force_split.clone();
+    state.split_width_multiplier = config.settings.split_width_multiplier;
+    state.preserve_split = config.settings.preserve_split;
+    state.permanent_direction_override = config.settings.permanent_direction_override;
+    state.focal_point_source = config.settings.focal_point_source.clone();
     state.bar_height = config.settings.bar_height;
     state.rules = config.rules.clone();
     state.special_configs = config.special_configs.clone();
@@ -986,6 +992,12 @@ fn reload_config() {
             state.smart_resizing = config.settings.smart_resizing;
             state.window_direction_monitor_fallback =
                 config.settings.window_direction_monitor_fallback;
+            state.split_axis = config.settings.split_axis.clone();
+            state.force_split = config.settings.force_split.clone();
+            state.split_width_multiplier = config.settings.split_width_multiplier;
+            state.preserve_split = config.settings.preserve_split;
+            state.permanent_direction_override = config.settings.permanent_direction_override;
+            state.focal_point_source = config.settings.focal_point_source.clone();
             state.bar_height = config.settings.bar_height;
             state.rules = config.rules.clone();
             state.special_configs = config.special_configs.clone();
