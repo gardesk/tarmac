@@ -831,6 +831,36 @@ impl Node {
         }
     }
 
+    /// Flip the split direction of the focused window's immediate Internal
+    /// ancestor (the deepest Internal containing the window). Returns
+    /// false if the window is at the root (no parent) or not in the tree.
+    /// A window inside a Stack treats the Stack's parent Internal as the
+    /// target.
+    pub fn toggle_parent_split(&mut self, window: WindowId) -> bool {
+        match self {
+            Node::Internal {
+                split, left, right, ..
+            } => {
+                if matches!(left.as_ref(), Node::Internal { .. }) && left.contains(window) {
+                    return left.toggle_parent_split(window);
+                }
+                if matches!(right.as_ref(), Node::Internal { .. }) && right.contains(window) {
+                    return right.toggle_parent_split(window);
+                }
+                if left.contains(window) || right.contains(window) {
+                    *split = match split {
+                        SplitDirection::Vertical => SplitDirection::Horizontal,
+                        SplitDirection::Horizontal => SplitDirection::Vertical,
+                    };
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Locate the leaf whose computed sub-rect contains the given point,
     /// returning the window in that leaf. Recurses through Internal splits
     /// using the same geometry math as `calculate_geometries` (no gaps).
