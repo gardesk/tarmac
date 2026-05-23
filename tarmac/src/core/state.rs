@@ -117,6 +117,11 @@ pub struct WmState {
     /// new-window callbacks (which fire without a corresponding mouse
     /// event) can still read the last-known cursor location.
     pub last_cursor: Option<(f64, f64)>,
+    /// HX-06 pseudo-tile set. Members occupy a slot in the BSP tree but
+    /// `show_window` skips the AX size write — they render at their
+    /// preferred size, centered within the assigned tile rect. In-memory
+    /// only; restart resets all windows to stretched.
+    pseudo_windows: std::collections::HashSet<WindowId>,
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
@@ -167,6 +172,7 @@ impl WmState {
             permanent_direction_override: false,
             focal_point_source: "cursor_or_active".to_string(),
             last_cursor: None,
+            pseudo_windows: std::collections::HashSet::new(),
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
@@ -2248,6 +2254,50 @@ impl WmState {
             self.sync_mouse_after_focus(ws_idx, focused);
             tracing::info!(id = focused, "promoted focused subtree to workspace root");
         }
+    }
+
+    /// HX-06: query whether a window is in pseudo-tile mode.
+    pub fn is_pseudo(&self, wid: WindowId) -> bool {
+        self.pseudo_windows.contains(&wid)
+    }
+
+    /// HX-06: toggle pseudo-tile mode on the focused window. Pseudo
+    /// windows occupy a slot in the BSP tree but `show_window` skips
+    /// the AX size write, leaving them at their preferred size centered
+    /// in the assigned tile rect.
+    ///
+    /// v1 limitation: toggling pseudo on a stack member logs a warning
+    /// and no-ops. Combined pseudo + stack rendering is deferred.
+    pub fn toggle_pseudo(&mut self) {
+        let Some(focused) = self.effective_focused() else {
+            return;
+        };
+        // If focused is in a stack, warn and skip — stack rendering is
+        // a separate code path and combined pseudo + stack semantics
+        // aren't defined in v1.
+        if let Some(ws_idx) = self.workspaces.find_window(focused)
+            && self
+                .workspaces
+                .get(ws_idx)
+                .tree
+                .stack_info(focused)
+                .is_some()
+        {
+            tracing::warn!(
+                id = focused,
+                "toggle_pseudo no-op for stack member (v1 limitation)"
+            );
+            return;
+        }
+        let now_pseudo = if self.pseudo_windows.contains(&focused) {
+            self.pseudo_windows.remove(&focused);
+            false
+        } else {
+            self.pseudo_windows.insert(focused);
+            true
+        };
+        tracing::info!(id = focused, pseudo = now_pseudo, "toggle_pseudo");
+        self.apply_layout();
     }
 
     /// HX-05: record a directional preselect hint for the active
