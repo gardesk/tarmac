@@ -1992,6 +1992,60 @@ impl WmState {
         }
     }
 
+    /// HX-09: convert a tiled window into a floating one for the drag
+    /// follow-through. The window leaves the source workspace's BSP
+    /// tree, gets added to the same workspace's floating list at a
+    /// cursor-centered position scaled to 84.89% of its source tile
+    /// (Hyprland's magic number), and `apply_layout` re-stretches the
+    /// siblings that took over the freed tile.
+    ///
+    /// Called from `update_drag` the moment the cursor crosses
+    /// `drag_threshold`. Refreshes `drag_suppress_focus_until` so any
+    /// AX focus storms from the source app during the float don't
+    /// interrupt the drag.
+    fn float_window_for_drag(&mut self, drag: &mut DragState, cursor: (f64, f64)) {
+        let wid = drag.window_id;
+        let original_w = drag.original_tile_rect.width;
+        let original_h = drag.original_tile_rect.height;
+        // 0.8489 mirrors Hyprland's `position().size() * 0.8489` — small
+        // enough to indicate "now floating," large enough to remain
+        // usable. Clamped to a minimum so tiny tiles don't shrink past
+        // usability.
+        let new_w = (original_w * 0.8489).max(200.0);
+        let new_h = (original_h * 0.8489).max(150.0);
+        let new_x = cursor.0 - new_w / 2.0;
+        let new_y = cursor.1 - new_h / 2.0;
+        let new_geom = super::tree::Rect::new(new_x, new_y, new_w, new_h);
+
+        // Pull the window out of the source workspace's tree and add
+        // to its floating list.
+        let source_ws = drag.original_workspace;
+        let ws = self.workspaces.get_mut(source_ws);
+        ws.tree.remove(wid);
+        ws.floating.push(super::workspace::FloatingWindow {
+            id: wid,
+            geometry: new_geom,
+        });
+
+        // The DragState's geometry is referenced by update_drag to
+        // derive new positions from cursor deltas. Anchor it to the
+        // new float position so subsequent updates compute against
+        // post-float coordinates.
+        drag.start_mouse = cursor;
+        drag.start_geometry = new_geom;
+        drag.mode = DragMode::TiledRelocate;
+
+        self.arm_drag_focus_suppression();
+        self.apply_layout();
+        tracing::info!(
+            wid,
+            source_ws,
+            new_w,
+            new_h,
+            "drag: floated tiled window for relocate"
+        );
+    }
+
     /// Update an active drag operation.
     pub fn update_drag(&mut self, x: f64, y: f64) {
         let Some(drag) = self.drag else { return };
