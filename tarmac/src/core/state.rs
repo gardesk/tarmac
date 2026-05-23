@@ -5539,6 +5539,102 @@ mod tests {
         assert_eq!(focal2, (480.0, 1081.0));
     }
 
+    // --- HX-08 rate-limiter + drag-prep tests ---
+
+    #[test]
+    fn ax_write_rate_limiter_throttles_within_budget() {
+        let state = WmState::new();
+        // First call wins (no prior timestamp); records "now".
+        assert!(!state.should_throttle_ax_write(42));
+        // Immediate second call is within the 16ms budget → throttle.
+        assert!(state.should_throttle_ax_write(42));
+    }
+
+    #[test]
+    fn ax_write_rate_limiter_allows_after_budget() {
+        let state = WmState::new();
+        // Plant a stale timestamp >16ms in the past.
+        state.ax_write_last.borrow_mut().insert(
+            42,
+            std::time::Instant::now() - std::time::Duration::from_millis(50),
+        );
+        // Budget has elapsed → call passes through.
+        assert!(!state.should_throttle_ax_write(42));
+    }
+
+    #[test]
+    fn ax_write_rate_limiter_is_per_window() {
+        let state = WmState::new();
+        // Window 42 burns its slot.
+        assert!(!state.should_throttle_ax_write(42));
+        assert!(state.should_throttle_ax_write(42));
+        // Window 7 has its own slot — independent.
+        assert!(!state.should_throttle_ax_write(7));
+    }
+
+    #[test]
+    fn drag_focus_suppression_active_blocks_then_clears() {
+        let mut state = WmState::new();
+        assert!(!state.is_in_drag_focus_suppression());
+        state.arm_drag_focus_suppression();
+        assert!(state.is_in_drag_focus_suppression());
+        // Force the deadline into the past — next call clears it.
+        state.drag_suppress_focus_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        assert!(!state.is_in_drag_focus_suppression());
+        assert!(state.drag_suppress_focus_until.is_none());
+    }
+
+    #[test]
+    fn begin_move_drag_on_tiled_hit_sets_threshold_active() {
+        let mut state = make_focal_test_state();
+        // Window 1 lives in the left half (x=0..960). Hit it at (100, 100).
+        state.begin_move_drag(100.0, 100.0);
+        assert!(
+            state.is_dragging(),
+            "begin_move_drag on tiled hit must stage a DragState"
+        );
+        assert!(state.drag_threshold_active);
+        assert!(state.drag_suppress_focus_until.is_some());
+    }
+
+    #[test]
+    fn update_drag_below_threshold_is_dormant() {
+        let mut state = make_focal_test_state();
+        state.begin_move_drag(100.0, 100.0);
+        assert!(state.drag_threshold_active);
+        // Move 3 px — below the default 5 px threshold.
+        state.update_drag(103.0, 100.0);
+        assert!(
+            state.drag_threshold_active,
+            "below-threshold delta must keep the gate active"
+        );
+    }
+
+    #[test]
+    fn update_drag_above_threshold_clears_active() {
+        let mut state = make_focal_test_state();
+        state.begin_move_drag(100.0, 100.0);
+        // Move 10 px — past the default 5 px threshold.
+        state.update_drag(110.0, 100.0);
+        assert!(
+            !state.drag_threshold_active,
+            "above-threshold delta must clear the gate"
+        );
+    }
+
+    #[test]
+    fn end_drag_clears_threshold_and_suppression() {
+        let mut state = make_focal_test_state();
+        state.begin_move_drag(100.0, 100.0);
+        assert!(state.drag_threshold_active);
+        assert!(state.drag_suppress_focus_until.is_some());
+        state.end_drag();
+        assert!(!state.drag_threshold_active);
+        assert!(state.drag_suppress_focus_until.is_none());
+        assert!(!state.is_dragging());
+    }
+
     // --- HX-06 pseudo-tile tests ---
 
     #[test]
