@@ -26,10 +26,15 @@ struct QueuedEvent {
 }
 
 /// Active drag operation on a floating window.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum DragMode {
     Move,
     Resize,
+    /// HX-09: drag started on a tiled window; the window was floated
+    /// when the cursor crossed `drag_threshold` and now follows the
+    /// cursor. On release, `end_drag` runs the drop-disposition
+    /// cascade to retile at the drop point (or stay floating).
+    TiledRelocate,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +43,13 @@ struct DragState {
     mode: DragMode,
     start_mouse: (f64, f64),
     start_geometry: Rect,
+    /// HX-09: source workspace at drag start, used by end_drag to
+    /// remove the floated window from the right floating list before
+    /// retiling.
+    original_workspace: usize,
+    /// HX-09: the tile rect the window occupied at drag start. Used to
+    /// pick the float-on-drag size (a scaled-down copy).
+    original_tile_rect: Rect,
 }
 
 /// Sliding-window size for AX focus storm detection.
@@ -1914,11 +1926,14 @@ impl WmState {
             .find(|fw| fw.geometry.contains_point(x, y))
             .map(|fw| (fw.id, fw.geometry));
         if let Some((id, geometry)) = floating_hit {
+            let ws_idx = self.active_ws_idx();
             self.drag = Some(DragState {
                 window_id: id,
                 mode: DragMode::Move,
                 start_mouse: (x, y),
                 start_geometry: geometry,
+                original_workspace: ws_idx,
+                original_tile_rect: geometry,
             });
             self.drag_threshold_active = false;
             tracing::debug!(id, "move drag started (floating)");
@@ -1927,7 +1942,8 @@ impl WmState {
         // HX-08: tiled-window drag scaffolding. Check the tiled
         // geometries at the cursor; if found, stage drag state with
         // `drag_threshold_active = true` and arm focus suppression.
-        // No AX writes, no float transition yet — those land in HX-09.
+        // HX-09 wires the threshold-cross transition to float and the
+        // drop disposition on end_drag.
         let sr = self.focused_rect();
         let ws_idx = self.active_ws_idx();
         let geoms = self.workspace_focus_geometries(ws_idx, sr);
@@ -1940,6 +1956,8 @@ impl WmState {
                 mode: DragMode::Move,
                 start_mouse: (x, y),
                 start_geometry: geometry,
+                original_workspace: ws_idx,
+                original_tile_rect: geometry,
             });
             self.drag_threshold_active = true;
             self.arm_drag_focus_suppression();
@@ -1961,11 +1979,14 @@ impl WmState {
             .find(|fw| fw.geometry.contains_point(x, y))
             .map(|fw| (fw.id, fw.geometry));
         if let Some((id, geometry)) = hit {
+            let ws_idx = self.active_ws_idx();
             self.drag = Some(DragState {
                 window_id: id,
                 mode: DragMode::Resize,
                 start_mouse: (x, y),
                 start_geometry: geometry,
+                original_workspace: ws_idx,
+                original_tile_rect: geometry,
             });
             tracing::debug!(id, "resize drag started");
         }
@@ -2010,19 +2031,26 @@ impl WmState {
         }
 
         match drag.mode {
-            DragMode::Move => {
+            // HX-09 TiledRelocate shares the move loop with regular
+            // floating-window drag: the window was floated by
+            // float_window_for_drag when the threshold crossed and now
+            // lives in `floating`, so the position-update logic is the
+            // same. end_drag is where the disposition diverges.
+            DragMode::Move | DragMode::TiledRelocate => {
                 let new_x = drag.start_geometry.x + dx;
                 let new_y = drag.start_geometry.y + dy;
 
-                // Update floating geometry
-                if let Some(fw) = self
-                    .active_workspace_mut()
-                    .floating
-                    .iter_mut()
-                    .find(|f| f.id == drag.window_id)
-                {
-                    fw.geometry.x = new_x;
-                    fw.geometry.y = new_y;
+                // Update floating geometry across all workspaces — for
+                // TiledRelocate the window might be on a workspace
+                // that's not the active one if the user dragged it
+                // across monitors.
+                let ws_count = self.workspaces.count();
+                for idx in 0..ws_count {
+                    let ws = self.workspaces.get_mut(idx);
+                    if let Some(fw) = ws.floating.iter_mut().find(|f| f.id == drag.window_id) {
+                        fw.geometry.x = new_x;
+                        fw.geometry.y = new_y;
+                    }
                 }
 
                 // Apply via AX
