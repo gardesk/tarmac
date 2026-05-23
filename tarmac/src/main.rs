@@ -538,6 +538,18 @@ fn process_ipc_command(
                 state.promote_stack_focused();
                 Response::ok_empty()
             }
+            "toggle_split" => {
+                state.toggle_split();
+                Response::ok_empty()
+            }
+            "swap_split" => {
+                state.swap_split();
+                Response::ok_empty()
+            }
+            "promote_to_root" => {
+                state.promote_to_root();
+                Response::ok_empty()
+            }
             "workspace" => {
                 if let Some(target) = request
                     .args
