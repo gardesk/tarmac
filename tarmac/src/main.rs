@@ -342,6 +342,14 @@ gar.bind("mod+shift+space", "toggle_float")
 gar.bind("mod+shift+u", "unstack")
 gar.bind("alt+shift+.", "promote_stack")
 
+-- Split manipulation (HX-01: tree primitives). Uncomment to enable.
+-- toggle_split flips the focused window's parent split axis (Vertical <-> Horizontal).
+-- swap_split swaps the left/right children of that parent split.
+-- promote_to_root lifts the focused window's subtree to be a direct child of the workspace root.
+-- gar.bind("mod+shift+s", "toggle_split")
+-- gar.bind("mod+shift+x", "swap_split")
+-- gar.bind("mod+shift+r", "promote_to_root")
+
 -- Focus
 gar.bind("mod+h", "focus left")
 gar.bind("mod+j", "focus down")
