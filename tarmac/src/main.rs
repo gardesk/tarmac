@@ -408,6 +408,22 @@ gar.bind("alt+shift+.", "promote_stack")
 -- with fixed dimensions. Toggles off restore stretched behavior.
 -- gar.bind("mod+shift+u", "toggle_pseudo")
 
+-- User-initiated stacks (HX-07). `add_to_stack <dir>` merges the focused
+-- window into the adjacent leaf as a Stack (focused becomes the active
+-- member). `split_from_stack` pulls the active stack member out as a
+-- side-by-side sibling — surgical contrast to `unstack`, which explodes
+-- the whole stack back to its pre-stack tree shape.
+--
+-- v1 UX caveat: no visible tab strip yet (deferred to HX-99 / ers overlay
+-- project). Stack membership is invisible — only the active member is
+-- visible; navigate stack members with the existing stack-cycle bindings
+-- (mod+h / mod+l on a stacked window cycles members).
+-- gar.bind("mod+ctrl+shift+h", "add_to_stack left")
+-- gar.bind("mod+ctrl+shift+j", "add_to_stack down")
+-- gar.bind("mod+ctrl+shift+k", "add_to_stack up")
+-- gar.bind("mod+ctrl+shift+l", "add_to_stack right")
+-- gar.bind("mod+ctrl+shift+u", "split_from_stack")
+
 -- Focus
 gar.bind("mod+h", "focus left")
 gar.bind("mod+j", "focus down")

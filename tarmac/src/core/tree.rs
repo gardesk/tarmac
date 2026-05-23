@@ -1262,14 +1262,14 @@ impl Node {
                 // Extend previous so unstack restores all current
                 // members as siblings (not just the original two).
                 let old_previous = std::mem::take(previous.as_mut());
-                *previous = Box::new(Node::Internal {
+                **previous = Node::Internal {
                     split: SplitDirection::Vertical,
                     ratio: 0.5,
                     left: Box::new(old_previous),
                     right: Box::new(Node::Leaf {
                         window: Some(source),
                     }),
-                });
+                };
                 true
             }
             Node::Internal { left, right, .. } => {
