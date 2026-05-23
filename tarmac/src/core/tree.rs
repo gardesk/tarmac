@@ -1826,6 +1826,197 @@ mod tests {
         assert_eq!(tree.find_leaf_at_point(SCREEN, 1500.0, 500.0), Some(2));
     }
 
+    // --- toggle_parent_split tests ---
+
+    #[test]
+    fn toggle_parent_split_flips_vertical_to_horizontal() {
+        // SCREEN insertion produces Internal { Vertical, Leaf{1}, Leaf{2} }.
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(matches!(
+            tree,
+            Node::Internal {
+                split: SplitDirection::Vertical,
+                ..
+            }
+        ));
+        assert!(tree.toggle_parent_split(1));
+        assert!(matches!(
+            tree,
+            Node::Internal {
+                split: SplitDirection::Horizontal,
+                ..
+            }
+        ));
+        // Idempotent toggle returns to original.
+        assert!(tree.toggle_parent_split(1));
+        assert!(matches!(
+            tree,
+            Node::Internal {
+                split: SplitDirection::Vertical,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn toggle_parent_split_returns_false_for_root_window() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        // Single-window tree: window 1 is a Leaf at root with no parent split.
+        assert!(!tree.toggle_parent_split(1));
+    }
+
+    #[test]
+    fn toggle_parent_split_returns_false_for_missing_window() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(!tree.toggle_parent_split(99));
+    }
+
+    // --- swap_parent_children tests ---
+
+    #[test]
+    fn swap_parent_children_swaps_two_window_tree() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        // Pre-swap: 1 on the left half, 2 on the right.
+        let pre = tree.calculate_geometries(SCREEN);
+        let pre_left = pre.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let pre_right = pre.iter().find(|(w, _)| *w == 2).unwrap().1;
+        assert!(pre_left.x < pre_right.x);
+
+        assert!(tree.swap_parent_children(1));
+        // Post-swap: 1 on the right, 2 on the left.
+        let post = tree.calculate_geometries(SCREEN);
+        let post_one = post.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let post_two = post.iter().find(|(w, _)| *w == 2).unwrap().1;
+        assert!(post_one.x > post_two.x);
+    }
+
+    #[test]
+    fn swap_parent_children_preserves_subtree_shapes() {
+        // Tree: Internal { Vertical, Leaf{1}, Internal { Horizontal, Leaf{2}, Leaf{3} } }
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+
+        let pre = tree.calculate_geometries(SCREEN);
+        let pre_two = pre.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let pre_three = pre.iter().find(|(w, _)| *w == 3).unwrap().1;
+        // Pre-swap: 2 and 3 share a Horizontal split on the right half.
+        assert!(approx_eq(pre_two.x, pre_three.x));
+        assert!(pre_two.y < pre_three.y);
+
+        // Swap at the outer split via window 1.
+        assert!(tree.swap_parent_children(1));
+
+        let post = tree.calculate_geometries(SCREEN);
+        let post_one = post.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let post_two = post.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let post_three = post.iter().find(|(w, _)| *w == 3).unwrap().1;
+        // 1 moved to the right; 2-3 subtree to the left but its Horizontal
+        // split is still intact (same x, 2 above 3).
+        assert!(post_one.x > post_two.x);
+        assert!(approx_eq(post_two.x, post_three.x));
+        assert!(post_two.y < post_three.y);
+    }
+
+    #[test]
+    fn swap_parent_children_returns_false_for_root() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        assert!(!tree.swap_parent_children(1));
+    }
+
+    // --- promote_to_root tests ---
+
+    #[test]
+    fn promote_to_root_lifts_deeply_nested_window() {
+        // Build: Internal{V, Leaf{1}, Internal{H, Leaf{2}, Internal{V, Leaf{3}, Leaf{4}}}}.
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+
+        assert!(tree.promote_to_root(4));
+        // After promote: root Internal with Leaf{4} as one direct child.
+        match &tree {
+            Node::Internal { left, right, .. } => {
+                let leaf4_is_direct = matches!(left.as_ref(), Node::Leaf { window: Some(4) })
+                    || matches!(right.as_ref(), Node::Leaf { window: Some(4) });
+                assert!(leaf4_is_direct, "window 4 should be a direct root child");
+            }
+            other => panic!("expected Internal root, got {other:?}"),
+        }
+        // Remainder still contains 1, 2, 3 somewhere in the tree.
+        assert!(tree.contains(1));
+        assert!(tree.contains(2));
+        assert!(tree.contains(3));
+        assert!(tree.contains(4));
+    }
+
+    #[test]
+    fn promote_to_root_stable_preserves_visual_side_right() {
+        // Window 4 lives deep in root.right's subtree → visually on right.
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+
+        let pre = tree.calculate_geometries(SCREEN);
+        let pre_four = pre.iter().find(|(w, _)| *w == 4).unwrap().1;
+        let (pre_four_cx, _) = pre_four.center();
+        assert!(pre_four_cx > SCREEN.center().0, "test setup: 4 must start on right");
+
+        assert!(tree.promote_to_root(4));
+        let post = tree.calculate_geometries(SCREEN);
+        let post_four = post.iter().find(|(w, _)| *w == 4).unwrap().1;
+        let (post_four_cx, _) = post_four.center();
+        assert!(post_four_cx > SCREEN.center().0, "4 should remain visually on the right");
+    }
+
+    #[test]
+    fn promote_to_root_stable_preserves_visual_side_left() {
+        // Build a tree where window 4 lives deep in root.left's subtree.
+        // Insert sequence: 1, then 2 with target 1 (creates first split),
+        // then 3 with target 1 (recurses into left to extend the left
+        // subtree), then 4 with target 3 (extends the left subtree
+        // further).
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(1), SCREEN);
+        tree.insert_with_rect(4, Some(3), SCREEN);
+
+        let pre = tree.calculate_geometries(SCREEN);
+        let pre_four = pre.iter().find(|(w, _)| *w == 4).unwrap().1;
+        let (pre_four_cx, _) = pre_four.center();
+        assert!(pre_four_cx < SCREEN.center().0, "test setup: 4 must start on left");
+
+        assert!(tree.promote_to_root(4));
+        let post = tree.calculate_geometries(SCREEN);
+        let post_four = post.iter().find(|(w, _)| *w == 4).unwrap().1;
+        let (post_four_cx, _) = post_four.center();
+        assert!(post_four_cx < SCREEN.center().0, "4 should remain visually on the left");
+    }
+
+    #[test]
+    fn promote_to_root_returns_false_if_already_root() {
+        // 2-window tree: both are direct children of root Internal.
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        assert!(!tree.promote_to_root(1));
+        assert!(!tree.promote_to_root(2));
+    }
+
     #[test]
     fn find_leaf_at_point_descends_horizontal_split() {
         // Tall rect → smart split = Horizontal.
