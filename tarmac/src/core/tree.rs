@@ -59,6 +59,24 @@ impl Rect {
     pub fn contains_point(&self, px: f64, py: f64) -> bool {
         px >= self.x && px < self.x + self.width && py >= self.y && py < self.y + self.height
     }
+
+    /// Compute a focal point one pixel past this rect's edge in
+    /// `direction`. Used by `Action::Move(Direction)` (HX-04) and the
+    /// drag-to-tile drop disposition (HX-09) to find the neighboring
+    /// tile via `Node::find_leaf_at_point`. The 1-px offset ensures the
+    /// returned point lands outside this rect — if it landed inside,
+    /// find_leaf_at_point would return the source tile and the move
+    /// would no-op against itself.
+    pub fn focal_point_for_direction(&self, direction: Direction) -> (f64, f64) {
+        let cx = self.x + self.width / 2.0;
+        let cy = self.y + self.height / 2.0;
+        match direction {
+            Direction::Left => (self.x - 1.0, cy),
+            Direction::Right => (self.x + self.width + 1.0, cy),
+            Direction::Up => (cx, self.y - 1.0),
+            Direction::Down => (cx, self.y + self.height + 1.0),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
