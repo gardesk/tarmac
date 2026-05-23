@@ -2145,6 +2145,25 @@ impl WmState {
         }
     }
 
+    pub fn set_ratio(&mut self, value: f64) {
+        let focused = match self.effective_focused() {
+            Some(f) => f,
+            None => return,
+        };
+        let Some(ws_idx) = self.workspaces.find_window(focused) else {
+            return;
+        };
+        if self
+            .workspaces
+            .get_mut(ws_idx)
+            .tree
+            .set_parent_ratio(focused, value as f32)
+        {
+            self.apply_layout();
+            tracing::info!(id = focused, ratio = value, "set parent split ratio");
+        }
+    }
+
     pub fn click_to_focus(&mut self, x: f64, y: f64) {
         let ws = self.active_workspace();
 

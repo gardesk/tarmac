@@ -37,7 +37,7 @@ impl ConfigSource {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KeybindRow {
     pub id: String,
     pub shortcut: String,

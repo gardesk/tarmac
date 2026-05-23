@@ -172,7 +172,11 @@ pub fn keycode_to_key(keycode: u16) -> Option<Key> {
 use crate::core::tree::Direction;
 
 /// An action bound to a key combination.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+// Eq/Hash dropped (was: derive Eq, Hash) so variants can carry f64 payloads
+// (e.g. Action::SetRatio). The only HashMap holding Action used it as a value,
+// not a key, so Hash isn't needed; verified by grep for HashMap<Action,_> and
+// HashSet<Action> across tarmac and tarmacctl.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     SpawnTerminal,
     CloseWindow,
@@ -196,6 +200,7 @@ pub enum Action {
     ToggleSplit,                      // Flip the focused window's parent split axis
     SwapSplit,                        // Swap left/right children of the focused window's parent
     PromoteToRoot,                    // Lift focused window's subtree to a direct child of workspace root
+    SetRatio(f64),                    // Set the focused window's parent split ratio to an absolute value
     Reload,                           // Hot reload config
     Exit,                             // Clean exit
 }

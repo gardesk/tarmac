@@ -258,6 +258,7 @@ fn handle_action(action: Action) {
                 Action::ToggleSplit => state.toggle_split(),
                 Action::SwapSplit => state.swap_split(),
                 Action::PromoteToRoot => state.promote_to_root(),
+                Action::SetRatio(value) => state.set_ratio(value),
                 Action::ToggleSpecial(ref name) => state.toggle_special(name),
                 Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
@@ -558,6 +559,13 @@ fn process_ipc_command(
                 state.promote_to_root();
                 Response::ok_empty()
             }
+            "set_ratio" => match request.args.first().and_then(|s| s.parse::<f64>().ok()) {
+                Some(value) => {
+                    state.set_ratio(value);
+                    Response::ok_empty()
+                }
+                None => Response::err("usage: set_ratio <0.1..0.9>"),
+            },
             "workspace" => {
                 if let Some(target) = request
                     .args
