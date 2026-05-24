@@ -772,6 +772,38 @@ fn process_ipc_command(
                 state.split_from_stack();
                 Response::ok_empty()
             }
+            "cancel_drag" => {
+                state.cancel_drag();
+                Response::ok_empty()
+            }
+            "spawn_terminal" => {
+                spawn_terminal();
+                Response::ok_empty()
+            }
+            "workspace_next" => {
+                state.workspace_next();
+                Response::ok_empty()
+            }
+            "workspace_prev" => {
+                state.workspace_prev();
+                Response::ok_empty()
+            }
+            "focus_monitor_next" => {
+                state.focus_monitor_next();
+                Response::ok_empty()
+            }
+            "focus_monitor_prev" => {
+                state.focus_monitor_prev();
+                Response::ok_empty()
+            }
+            "move_to_monitor_next" => {
+                state.move_to_monitor_next();
+                Response::ok_empty()
+            }
+            "move_to_monitor_prev" => {
+                state.move_to_monitor_prev();
+                Response::ok_empty()
+            }
             "workspace" => {
                 if let Some(target) = request
                     .args
