@@ -852,6 +852,71 @@ impl Node {
         }
     }
 
+    /// HX-99-B: find the rect of the ancestor split that `resize` would
+    /// adjust for `window` in `direction`. Mirrors `resize`'s deepest-
+    /// vs-shallowest-matching logic but is read-only; returns the rect
+    /// of the node containing that matching split (i.e. the union of
+    /// both children's areas).
+    ///
+    /// Used by `WmState::resize_direction` to convert a desired *pixel*
+    /// resize delta into a ratio delta scaled to the matching ancestor's
+    /// extent — so the focused window's edge moves by ~the same number
+    /// of pixels regardless of tree depth (Hyprland's smart_resizing).
+    pub fn find_resize_target_rect(
+        &self,
+        window: WindowId,
+        direction: Direction,
+        current_rect: Rect,
+        smart: bool,
+    ) -> Option<Rect> {
+        match self {
+            Node::Leaf { .. } | Node::Stack { .. } => None,
+            Node::Internal {
+                split,
+                ratio,
+                left,
+                right,
+            } => {
+                let axis_matches = matches!(
+                    (split, direction),
+                    (SplitDirection::Vertical, Direction::Left | Direction::Right)
+                        | (SplitDirection::Horizontal, Direction::Up | Direction::Down)
+                );
+                let (left_rect, right_rect) = current_rect.split(*split, *ratio);
+                let descend = |child: &Node, child_rect: Rect| -> Option<Rect> {
+                    if child.contains(window) {
+                        child.find_resize_target_rect(window, direction, child_rect, smart)
+                    } else {
+                        None
+                    }
+                };
+                if smart {
+                    // Deepest matching ancestor wins.
+                    if let Some(r) = descend(left, left_rect) {
+                        return Some(r);
+                    }
+                    if let Some(r) = descend(right, right_rect) {
+                        return Some(r);
+                    }
+                    if axis_matches && (left.contains(window) || right.contains(window)) {
+                        Some(current_rect)
+                    } else {
+                        None
+                    }
+                } else {
+                    // Shallowest matching ancestor wins.
+                    if axis_matches && (left.contains(window) || right.contains(window)) {
+                        return Some(current_rect);
+                    }
+                    if let Some(r) = descend(left, left_rect) {
+                        return Some(r);
+                    }
+                    descend(right, right_rect)
+                }
+            }
+        }
+    }
+
     /// Set the focused window's immediate parent split ratio to an
     /// absolute value, clamped to `[0.1, 0.9]`. Returns false when the
     /// window is at the root (no parent Internal) or not in the tree.
@@ -2444,6 +2509,50 @@ mod tests {
         assert!(!tree.resize(1, Direction::Left, 0.05, true));
         assert!(!tree.resize(1, Direction::Right, 0.05, true));
         assert!(!tree.resize(1, Direction::Left, 0.05, false));
+    }
+
+    #[test]
+    fn find_resize_target_rect_smart_returns_deepest_matching() {
+        // build_mixed_split_tree:
+        //   A = root Vertical(0.5): left=B, right=2
+        //   B = Horizontal(0.5):    left=1, right=C
+        //   C = Vertical(0.5):      left=3, right=4
+        // Window 4, Direction::Left → deepest matching ancestor is C
+        // (Vertical, contains 4). C's rect = left half of B = left half of
+        // top-left quadrant. Expect target rect.width ≈ SCREEN.width/4.
+        let tree = build_mixed_split_tree();
+        let r = tree
+            .find_resize_target_rect(4, Direction::Left, SCREEN, true)
+            .expect("deepest match exists");
+        assert!(approx_eq(r.width, SCREEN.width / 2.0));
+    }
+
+    #[test]
+    fn find_resize_target_rect_not_smart_returns_shallowest_matching() {
+        // Same tree, window 4, Left → shallowest match is A (root),
+        // covering full SCREEN.
+        let tree = build_mixed_split_tree();
+        let r = tree
+            .find_resize_target_rect(4, Direction::Left, SCREEN, false)
+            .expect("shallowest match exists");
+        assert!(approx_eq(r.width, SCREEN.width));
+        assert!(approx_eq(r.height, SCREEN.height));
+    }
+
+    #[test]
+    fn find_resize_target_rect_no_match_returns_none() {
+        // Tall rect → Horizontal-only splits. No Vertical ancestor for
+        // Left/Right resize.
+        let tall = Rect::new(0.0, 0.0, 500.0, 1000.0);
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, tall);
+        tree.insert_with_rect(2, Some(1), tall);
+        assert!(tree
+            .find_resize_target_rect(1, Direction::Left, tall, true)
+            .is_none());
+        assert!(tree
+            .find_resize_target_rect(1, Direction::Right, tall, false)
+            .is_none());
     }
 
     #[test]
