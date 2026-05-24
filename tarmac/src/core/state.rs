@@ -2311,6 +2311,98 @@ impl WmState {
         }
     }
 
+    /// HX-99-C: abort the active drag and restore pre-drag state. For
+    /// floating Move/Resize, snaps geometry back to `start_geometry`.
+    /// For TiledRelocate, pulls the floated window out of the floating
+    /// list and re-tiles it at the center of its original tile rect.
+    /// No-op when no drag is in flight.
+    pub fn cancel_drag(&mut self) {
+        let Some(drag) = self.drag.take() else { return };
+        self.drag_threshold_active = false;
+        self.drag_suppress_focus_until = None;
+
+        let wid = drag.window_id;
+        let source_ws = drag.original_workspace;
+
+        match drag.mode {
+            DragMode::Move | DragMode::Resize => {
+                // Floating window: restore geometry to drag-start values.
+                if let Some(ws_idx) = self.workspaces.find_window(wid) {
+                    let ws = self.workspaces.get_mut(ws_idx);
+                    if let Some(f) = ws.floating.iter_mut().find(|f| f.id == wid) {
+                        f.geometry = drag.start_geometry;
+                    }
+                }
+                self.apply_layout();
+                tracing::info!(wid, ?drag.mode, "drag cancelled (floating restored)");
+            }
+            DragMode::TiledRelocate => {
+                // Re-tile at the center of the original tile rect so the
+                // window lands roughly where the user grabbed it.
+                let ws = self.workspaces.get_mut(source_ws);
+                let idx = ws.floating.iter().position(|f| f.id == wid);
+                if idx.is_none() {
+                    tracing::warn!(
+                        wid,
+                        source_ws,
+                        "cancel_drag: floated window missing from source list"
+                    );
+                    return;
+                }
+                ws.floating.remove(idx.unwrap());
+
+                let focal = (
+                    drag.original_tile_rect.x + drag.original_tile_rect.width / 2.0,
+                    drag.original_tile_rect.y + drag.original_tile_rect.height / 2.0,
+                );
+                let sr_for_source = self
+                    .monitor_showing_workspace(source_ws)
+                    .map(|mi| self.monitor_rect(mi))
+                    .unwrap_or(drag.original_tile_rect);
+                let split_override = self.split_axis_override();
+                let multiplier = self.split_width_multiplier;
+                let target_leaf_rect = self
+                    .workspaces
+                    .get(source_ws)
+                    .tree
+                    .find_leaf_at_point(sr_for_source, focal.0, focal.1)
+                    .and_then(|target_wid| {
+                        self.workspaces
+                            .get(source_ws)
+                            .tree
+                            .calculate_geometries(sr_for_source)
+                            .into_iter()
+                            .find(|(w, _)| *w == target_wid)
+                            .map(|(_, r)| r)
+                    });
+                let should_swap = self.should_swap_for_force_split(
+                    focal,
+                    target_leaf_rect,
+                    split_override,
+                    multiplier,
+                );
+                let ws = self.workspaces.get_mut(source_ws);
+                ws.tree.insert_at_focal_point_options(
+                    wid,
+                    focal,
+                    sr_for_source,
+                    split_override,
+                    multiplier,
+                );
+                if should_swap {
+                    ws.tree.swap_parent_children(wid);
+                }
+                ws.record_focus(wid);
+                self.prune_focus_memory_for_window(wid);
+                self.apply_layout();
+                self.fix_oversized_windows();
+                self.focus_window(wid);
+                self.sync_mouse_after_focus(source_ws, wid);
+                tracing::info!(wid, source_ws, "drag cancelled (re-tiled at origin)");
+            }
+        }
+    }
+
     /// Check if a drag is currently active.
     pub fn is_dragging(&self) -> bool {
         self.drag.is_some()
@@ -6007,6 +6099,51 @@ mod tests {
         assert!(state.workspaces.get(0).floating.iter().any(|f| f.id == 1));
         assert!(!state.workspaces.get(0).tree.contains(1));
         assert!(!state.is_dragging());
+    }
+
+    // --- HX-99-C cancel_drag tests ---
+
+    #[test]
+    fn cancel_drag_no_op_when_no_drag() {
+        let mut state = make_focal_test_state();
+        assert!(!state.is_dragging());
+        state.cancel_drag(); // should not panic, should not change anything
+        assert!(!state.is_dragging());
+    }
+
+    #[test]
+    fn cancel_drag_returns_tiled_window_to_tree() {
+        let mut state = make_focal_test_state();
+        // Float window 1 via a threshold-crossing drag.
+        state.begin_move_drag(100.0, 100.0);
+        state.update_drag(200.0, 100.0);
+        assert_eq!(state.drag.map(|d| d.mode), Some(DragMode::TiledRelocate));
+        assert!(!state.workspaces.get(0).tree.contains(1));
+        assert!(state.workspaces.get(0).floating.iter().any(|f| f.id == 1));
+
+        // Cancel — window 1 should return to the tree, floating list empty,
+        // drag state cleared.
+        state.cancel_drag();
+        assert!(!state.is_dragging());
+        assert!(state.workspaces.get(0).tree.contains(1));
+        assert!(state.workspaces.get(0).floating.is_empty());
+        assert!(!state.drag_threshold_active);
+        assert!(state.drag_suppress_focus_until.is_none());
+    }
+
+    #[test]
+    fn cancel_drag_below_threshold_just_clears_state() {
+        let mut state = make_focal_test_state();
+        state.begin_move_drag(100.0, 100.0);
+        // Below-threshold drag — window 1 still tiled, drag staged.
+        assert!(state.is_dragging());
+        assert!(state.workspaces.get(0).tree.contains(1));
+
+        state.cancel_drag();
+        assert!(!state.is_dragging());
+        assert!(state.workspaces.get(0).tree.contains(1));
+        assert!(!state.drag_threshold_active);
+        assert!(state.drag_suppress_focus_until.is_none());
     }
 
     // --- HX-99-A force_split=follow_mouse cursor-side tests ---
