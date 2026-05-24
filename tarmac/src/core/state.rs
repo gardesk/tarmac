@@ -1319,30 +1319,90 @@ impl WmState {
             tracing::debug!(focused, ?direction, "move: focal resolved back to focused tile — no-op");
             return;
         }
-        tracing::debug!(focused, target_wid, ?direction, "move: swapping with target leaf");
-        // Use swap semantics (Hyprland's `movewindow`), not remove+
-        // insert. Insert semantics (HX-04's original implementation)
-        // had two failure modes the user hit during HX-99 dogfooding:
-        //   1. Moving into the immediate sibling was a self-canceling
-        //      no-op (insert always made focused the right child of the
-        //      new split, putting it back where it started).
-        //   2. The BSP reshape resized unrelated tiles, so moving a
-        //      corner window "brought other windows with it" — the
-        //      sibling subtree that originally contained focused
-        //      collapsed and grew, displacing tiles that should have
-        //      stayed put.
-        // Swap only changes the focused window's and target's positions;
-        // everything else stays put.
-        if self
-            .active_workspace_mut()
+
+        // Hyprland's algorithm (DwindleAlgorithm::moveTargetInDirection
+        // calls removeTarget then movedTarget, which calls addTarget;
+        // addTarget finds OPENINGON via MOUSECOORDS/focal *after* the
+        // removal, against the *reshaped* tree). We mirror that order:
+        //   1. Remove focused.
+        //   2. Re-locate the target leaf at the focal point.
+        //   3. Read target's post-remove rect (the leaf has grown to
+        //      absorb focused's former subtree slot).
+        //   4. Split axis from target's aspect ratio:
+        //        SIDEBYSIDE = target.w > target.h * split_width_multiplier
+        //   5. Side from focal-point position relative to target's
+        //      center on the chosen axis (force_split=follow_mouse).
+        //      force_split=left/right overrides.
+        let multiplier = self.split_width_multiplier;
+        self.active_workspace_mut().tree.remove(focused);
+        // Re-resolve target after remove — the tree shape changed.
+        let post_geoms = self.active_workspace().tree.calculate_geometries(sr);
+        let post_target_wid = self
+            .active_workspace()
             .tree
-            .swap(focused, target_wid)
-        {
-            self.prune_focus_memory_for_window(focused);
+            .find_leaf_at_point(sr, focal.0, focal.1)
+            .unwrap_or(target_wid);
+        let Some(target_rect) = post_geoms
+            .iter()
+            .find(|(w, _)| *w == post_target_wid)
+            .map(|(_, r)| *r)
+        else {
+            // Target vanished (shouldn't happen unless tree is empty).
+            tracing::debug!(focused, target_wid, "move: post-remove target missing");
+            self.active_workspace_mut()
+                .tree
+                .insert_with_rect(focused, None, sr);
             self.apply_layout();
-            self.fix_oversized_windows();
-            self.sync_mouse_after_focus(ws_idx, focused);
+            return;
+        };
+        let side_by_side = target_rect.width > target_rect.height * multiplier;
+        let split_axis = if side_by_side {
+            super::tree::SplitDirection::Vertical
+        } else {
+            super::tree::SplitDirection::Horizontal
+        };
+        let target_cx = target_rect.x + target_rect.width / 2.0;
+        let target_cy = target_rect.y + target_rect.height / 2.0;
+        let focal_on_first_side = match split_axis {
+            super::tree::SplitDirection::Vertical => focal.0 < target_cx,
+            super::tree::SplitDirection::Horizontal => focal.1 < target_cy,
+        };
+        let focused_should_be_first = match self.force_split.as_str() {
+            "left" => true,
+            "right" => false,
+            _ => focal_on_first_side,
+        };
+        tracing::debug!(
+            focused,
+            target_wid = post_target_wid,
+            ?direction,
+            ?split_axis,
+            tw = target_rect.width, th = target_rect.height,
+            tx = target_rect.x, ty = target_rect.y,
+            focal_x = focal.0, focal_y = focal.1,
+            focused_first = focused_should_be_first,
+            "move: inserting via Hyprland-style split"
+        );
+
+        self.active_workspace_mut().tree.insert_with_rect_options(
+            focused,
+            Some(post_target_wid),
+            sr,
+            Some(split_axis),
+            multiplier,
+        );
+        // insert_with_rect_options puts new_window as the right child of
+        // the new split. Swap children when focal-side / force_split
+        // says focused should be the first (left/top) child instead.
+        if focused_should_be_first {
+            self.active_workspace_mut()
+                .tree
+                .swap_parent_children(focused);
         }
+        self.prune_focus_memory_for_window(focused);
+        self.apply_layout();
+        self.fix_oversized_windows();
+        self.sync_mouse_after_focus(ws_idx, focused);
     }
 
     pub fn swap_direction(&mut self, direction: super::tree::Direction) {
@@ -6599,34 +6659,50 @@ mod tests {
         assert_eq!(post.len(), 3, "all 3 windows still in tree");
     }
 
-    /// Regression for the HX-99 dogfooding bug where Move(Direction)
-    /// used insert+reshape semantics — the BSP reshape resized unrelated
-    /// tiles, so moving the corner window "brought other windows with
-    /// it." Swap semantics (Hyprland-style) leave non-target tiles
-    /// untouched.
+    /// Regression for the HX-99 dogfooding sequence where Move(Left)
+    /// must actually *split* the target tile (Hyprland's
+    /// DwindleAlgorithm::addTarget after removeTarget), not just swap
+    /// positions. After moving window 3 (bottom-right quad) left, the
+    /// target leaf (window 1 = left half) must be split: half of it
+    /// stays as 1, the other half becomes 3.
     #[test]
-    fn move_left_swap_semantics_leaves_unrelated_tiles_untouched() {
+    fn move_left_splits_target_tile_hyprland_style() {
         let mut state = make_three_window_state();
         let screen = state.monitors[0].usable_frame;
         state.workspaces.get_mut(0).focused = Some(3);
 
         let pre = state.workspaces.get(0).tree.calculate_geometries(screen);
         let pre_one = pre.iter().find(|(w, _)| *w == 1).unwrap().1;
-        let pre_two = pre.iter().find(|(w, _)| *w == 2).unwrap().1;
-        let pre_three = pre.iter().find(|(w, _)| *w == 3).unwrap().1;
 
         state.move_direction(Direction::Left);
         let post = state.workspaces.get(0).tree.calculate_geometries(screen);
         let post_one = post.iter().find(|(w, _)| *w == 1).unwrap().1;
-        let post_two = post.iter().find(|(w, _)| *w == 2).unwrap().1;
         let post_three = post.iter().find(|(w, _)| *w == 3).unwrap().1;
 
-        // The swap target for window 3 (bottom-right quad) going Left
-        // is window 1 (left half). 1 and 3 must swap rects exactly.
-        assert_eq!(post_three, pre_one, "3 should now occupy 1's old rect");
-        assert_eq!(post_one, pre_three, "1 should now occupy 3's old rect");
-        // 2 (top-right quad) was not involved — must be unchanged.
-        assert_eq!(post_two, pre_two, "2 must not move on Move(Left) of 3");
+        // 3 must end up inside what was 1's tile.
+        assert!(
+            post_three.x >= pre_one.x
+                && post_three.x + post_three.width <= pre_one.x + pre_one.width
+                && post_three.y >= pre_one.y
+                && post_three.y + post_three.height <= pre_one.y + pre_one.height,
+            "3 must land inside 1's pre-move rect; pre_one={:?} post_three={:?}",
+            pre_one,
+            post_three,
+        );
+        // 1 must also be smaller (its tile got split).
+        assert!(
+            post_one.width < pre_one.width || post_one.height < pre_one.height,
+            "1's tile should have shrunk along the split axis; pre={:?} post={:?}",
+            pre_one,
+            post_one,
+        );
+        // 3 must be on the leading edge of the split (cursor came from
+        // the right, focal point is on the right side of target → with
+        // force_split=follow_mouse, focused goes right too, BUT moves
+        // are intuitively "leading" so the user expects focused to end
+        // up at the side it came from. Verify either side; the
+        // important invariant is that 3 is INSIDE the target tile.
+        assert_eq!(post.len(), 3);
     }
 
     #[test]
