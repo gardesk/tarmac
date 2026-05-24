@@ -52,9 +52,18 @@ fn main() {
         eprintln!("                                Merge focused window into adjacent leaf as Stack (HX-07)");
         eprintln!("  split_from_stack              Pull active stack member out as sibling (HX-07)");
         eprintln!("  cancel_drag                   Abort an in-flight drag and restore pre-drag state (HX-99-C)");
+        eprintln!("  spawn_terminal                Spawn the configured terminal");
         eprintln!("  workspace <1-10>              Switch workspace");
+        eprintln!("  workspace_next                Cycle to the next workspace");
+        eprintln!("  workspace_prev                Cycle to the previous workspace");
         eprintln!("  move-to-workspace <1-10>      Move window to workspace");
         eprintln!("  toggle-floating               Toggle floating state");
+        eprintln!("  toggle-special <name>         Toggle a scratchpad/special workspace overlay");
+        eprintln!("  move-to-special <name>        Move focused window to a scratchpad");
+        eprintln!("  focus_monitor_next            Focus the next monitor");
+        eprintln!("  focus_monitor_prev            Focus the previous monitor");
+        eprintln!("  move_to_monitor_next          Move focused window to the next monitor");
+        eprintln!("  move_to_monitor_prev          Move focused window to the previous monitor");
         eprintln!("  reload                        Hot reload config");
         eprintln!("  get-workspaces                Get workspace info");
         eprintln!("  get-focused                   Get focused window info");
