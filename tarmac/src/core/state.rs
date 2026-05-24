@@ -1250,7 +1250,12 @@ impl WmState {
         };
         let sr = self.focused_rect();
         let ws_idx = self.active_ws_idx();
-        let geoms = self.workspace_focus_geometries(ws_idx, sr);
+        // Use the tree's un-gapped geometry: focal_point_for_direction
+        // emits a 1-px offset which, against a *gapped* rect, lands in
+        // the inner-gap area that the tree assigns back to this same
+        // leaf — making find_leaf_at_point return the focused window
+        // and the move silently no-op (HX-99 dogfooding bug).
+        let geoms = self.active_workspace().tree.calculate_geometries(sr);
         let Some(src_rect) = geoms
             .iter()
             .find(|(w, _)| *w == focused)
@@ -1261,7 +1266,7 @@ impl WmState {
                 ws_idx,
                 ?direction,
                 geoms_count = geoms.len(),
-                "move: focused window not in workspace focus_geometries — likely floating or off-tree"
+                "move: focused window not in tree geometries — likely floating or off-tree"
             );
             return;
         };
