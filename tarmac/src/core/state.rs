@@ -1311,23 +1311,38 @@ impl WmState {
             .active_workspace()
             .tree
             .find_leaf_at_point(sr, focal.0, focal.1);
-        if target == Some(focused) {
+        let Some(target_wid) = target else {
+            tracing::debug!(focused, ?direction, "move: focal resolved to no leaf — no-op");
+            return;
+        };
+        if target_wid == focused {
             tracing::debug!(focused, ?direction, "move: focal resolved back to focused tile — no-op");
             return;
         }
-        if target.is_none() {
-            tracing::debug!(focused, ?direction, "move: focal resolved to no leaf — no-op");
-            return;
-        }
-        tracing::debug!(focused, ?target, ?direction, "move: relocating in workspace");
-        self.active_workspace_mut().tree.remove(focused);
-        self.active_workspace_mut()
+        tracing::debug!(focused, target_wid, ?direction, "move: swapping with target leaf");
+        // Use swap semantics (Hyprland's `movewindow`), not remove+
+        // insert. Insert semantics (HX-04's original implementation)
+        // had two failure modes the user hit during HX-99 dogfooding:
+        //   1. Moving into the immediate sibling was a self-canceling
+        //      no-op (insert always made focused the right child of the
+        //      new split, putting it back where it started).
+        //   2. The BSP reshape resized unrelated tiles, so moving a
+        //      corner window "brought other windows with it" — the
+        //      sibling subtree that originally contained focused
+        //      collapsed and grew, displacing tiles that should have
+        //      stayed put.
+        // Swap only changes the focused window's and target's positions;
+        // everything else stays put.
+        if self
+            .active_workspace_mut()
             .tree
-            .insert_with_rect(focused, target, sr);
-        self.prune_focus_memory_for_window(focused);
-        self.apply_layout();
-        self.fix_oversized_windows();
-        self.sync_mouse_after_focus(ws_idx, focused);
+            .swap(focused, target_wid)
+        {
+            self.prune_focus_memory_for_window(focused);
+            self.apply_layout();
+            self.fix_oversized_windows();
+            self.sync_mouse_after_focus(ws_idx, focused);
+        }
     }
 
     pub fn swap_direction(&mut self, direction: super::tree::Direction) {
@@ -6552,6 +6567,66 @@ mod tests {
 
         // And verify the workspace rect was used correctly (no crash).
         let _ = state.workspaces.get(0).tree.calculate_geometries(screen);
+    }
+
+    /// Regression for the HX-99 dogfooding bug where Move(Left) into an
+    /// immediate sibling was a self-canceling no-op: insert_with_rect
+    /// always made the moved window the right child of the new split,
+    /// putting it back at its original visible position.
+    #[test]
+    fn move_left_into_immediate_sibling_swaps_visible_positions() {
+        let mut state = make_three_window_state();
+        let screen = state.monitors[0].usable_frame;
+
+        // make_three_window_state geometry: 1 = left half, 2 = top-right
+        // quad, 3 = bottom-right quad. Move 2 (top-right) left should
+        // land 2 in the upper-LEFT region, displacing 1 to the right
+        // of the upper-half split.
+        state.workspaces.get_mut(0).focused = Some(2);
+
+        let pre = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let pre_two = pre.iter().find(|(w, _)| *w == 2).unwrap().1;
+        state.move_direction(Direction::Left);
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_two = post.iter().find(|(w, _)| *w == 2).unwrap().1;
+
+        assert!(
+            post_two.x < pre_two.x,
+            "Move(Left) must reduce focused window's x; was {} now {}",
+            pre_two.x,
+            post_two.x
+        );
+        assert_eq!(post.len(), 3, "all 3 windows still in tree");
+    }
+
+    /// Regression for the HX-99 dogfooding bug where Move(Direction)
+    /// used insert+reshape semantics — the BSP reshape resized unrelated
+    /// tiles, so moving the corner window "brought other windows with
+    /// it." Swap semantics (Hyprland-style) leave non-target tiles
+    /// untouched.
+    #[test]
+    fn move_left_swap_semantics_leaves_unrelated_tiles_untouched() {
+        let mut state = make_three_window_state();
+        let screen = state.monitors[0].usable_frame;
+        state.workspaces.get_mut(0).focused = Some(3);
+
+        let pre = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let pre_one = pre.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let pre_two = pre.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let pre_three = pre.iter().find(|(w, _)| *w == 3).unwrap().1;
+
+        state.move_direction(Direction::Left);
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_one = post.iter().find(|(w, _)| *w == 1).unwrap().1;
+        let post_two = post.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let post_three = post.iter().find(|(w, _)| *w == 3).unwrap().1;
+
+        // The swap target for window 3 (bottom-right quad) going Left
+        // is window 1 (left half). 1 and 3 must swap rects exactly.
+        assert_eq!(post_three, pre_one, "3 should now occupy 1's old rect");
+        assert_eq!(post_one, pre_three, "1 should now occupy 3's old rect");
+        // 2 (top-right quad) was not involved — must be unchanged.
+        assert_eq!(post_two, pre_two, "2 must not move on Move(Left) of 3");
     }
 
     #[test]
