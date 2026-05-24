@@ -31,6 +31,44 @@ thread_local! {
     static SETTINGS_SELECTED_KEYBIND_ID: RefCell<Option<String>> = const { RefCell::new(None) };
     static SETTINGS_SELECTED_RULE_ID: RefCell<Option<String>> = const { RefCell::new(None) };
     static SETTINGS_SELECTED_WORKSPACE_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+    // HX-99-C: id of the transient Escape hotkey registered while a drag
+    // is in flight. None when no drag is active.
+    static DRAG_CANCEL_HOTKEY_ID: RefCell<Option<u32>> = const { RefCell::new(None) };
+}
+
+/// HX-99-C: register an Escape (no-modifiers) hotkey that fires
+/// `Action::CancelDrag`. Idempotent: a no-op if already registered.
+/// Called immediately after a drag is begun in the event-tap handler.
+fn register_drag_cancel_hotkey() {
+    DRAG_CANCEL_HOTKEY_ID.with(|cell| {
+        if cell.borrow().is_some() {
+            return;
+        }
+        HOTKEY_MGR.with(|h| {
+            if let Some(mgr) = h.borrow_mut().as_mut() {
+                let id = mgr.register_id(
+                    tarmac::core::input::Modifiers::empty(),
+                    tarmac::core::input::Key::Escape,
+                    Action::CancelDrag,
+                );
+                *cell.borrow_mut() = id;
+            }
+        });
+    });
+}
+
+/// HX-99-C: release the transient Escape hotkey if one is held.
+/// Called from end_drag and after CancelDrag is dispatched.
+fn unregister_drag_cancel_hotkey() {
+    DRAG_CANCEL_HOTKEY_ID.with(|cell| {
+        if let Some(id) = cell.borrow_mut().take() {
+            HOTKEY_MGR.with(|h| {
+                if let Some(mgr) = h.borrow_mut().as_mut() {
+                    mgr.unregister(id);
+                }
+            });
+        }
+    });
 }
 
 fn main() {
@@ -101,6 +139,13 @@ fn main() {
     // CGEventTap for mouse events: click-to-focus and focus-follows-mouse
     let _event_tap = EventTap::install(Box::new(move |event| {
         use tarmac::platform::event_tap::MouseEvent;
+        // HX-99-C: arm/disarm the Escape-cancel hotkey based on drag
+        // lifecycle. The drag transitions we care about happen synchronously
+        // inside the WM_STATE.with closure; we observe is_dragging before
+        // and after to decide which hook to fire after the borrow drops.
+        let was_dragging = WM_STATE.with(|s| {
+            s.borrow().as_ref().map(|st| st.is_dragging()).unwrap_or(false)
+        });
         WM_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
                 match event {
@@ -134,6 +179,14 @@ fn main() {
                 }
             }
         });
+        let is_dragging = WM_STATE.with(|s| {
+            s.borrow().as_ref().map(|st| st.is_dragging()).unwrap_or(false)
+        });
+        match (was_dragging, is_dragging) {
+            (false, true) => register_drag_cancel_hotkey(),
+            (true, false) => unregister_drag_cancel_hotkey(),
+            _ => {}
+        }
     }));
 
     // Set up polling for new/closed windows and app terminations
@@ -273,6 +326,10 @@ fn handle_action(action: Action) {
                 Action::TogglePseudo => state.toggle_pseudo(),
                 Action::AddToStack(dir) => state.add_to_stack(dir),
                 Action::SplitFromStack => state.split_from_stack(),
+                Action::CancelDrag => {
+                    state.cancel_drag();
+                    unregister_drag_cancel_hotkey();
+                }
                 Action::ToggleSpecial(ref name) => state.toggle_special(name),
                 Action::MoveToSpecial(ref name) => state.move_to_special(name),
                 Action::FocusMonitorNext => {
