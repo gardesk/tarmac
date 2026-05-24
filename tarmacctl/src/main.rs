@@ -51,6 +51,7 @@ fn main() {
         eprintln!("  add_to_stack <left|right|up|down>");
         eprintln!("                                Merge focused window into adjacent leaf as Stack (HX-07)");
         eprintln!("  split_from_stack              Pull active stack member out as sibling (HX-07)");
+        eprintln!("  cancel_drag                   Abort an in-flight drag and restore pre-drag state (HX-99-C)");
         eprintln!("  workspace <1-10>              Switch workspace");
         eprintln!("  move-to-workspace <1-10>      Move window to workspace");
         eprintln!("  toggle-floating               Toggle floating state");
