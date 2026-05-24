@@ -1880,7 +1880,7 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         mtm,
         &view,
         handler,
-        "Preserve split direction on re-insert (reserved)",
+        "Preserve split direction on re-insert (no-op: tarmac never re-derives)",
         lx,
         y,
         sel!(onPreserveSplitChanged:),

@@ -431,7 +431,10 @@ gar.set("force_split", "follow_mouse")
 -- When true, `gar.bind(..., "preselect right")` and other preselect hints
 -- persist across multiple window opens instead of clearing after one use.
 gar.set("permanent_direction_override", "false")
--- Reserved for future polish: preserve parent split direction on re-insert.
+-- `preserve_split` is a no-op in tarmac's current model: calculate_geometries
+-- always honors each Internal's stored split direction, so we effectively
+-- behave as preserve_split=true regardless of this value. Parsed for
+-- Hyprland-config compatibility; takes no behavioral effect.
 gar.set("preserve_split", "false")
 
 -- HX-08/HX-09 drag-to-tile: Mod+LeftDrag on a tiled window.
