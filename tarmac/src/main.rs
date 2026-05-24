@@ -965,6 +965,26 @@ fn process_ipc_command(
                             .as_ref()
                             .map(|(members, active)| members.get(*active) == Some(wid))
                             .unwrap_or(false);
+                        // HX-99-D: expose the full member roster so
+                        // external indicators (sketchybar, custom
+                        // overlays) can render a tab strip without
+                        // probing per-window.
+                        let stack_members: Option<Vec<serde_json::Value>> =
+                            stack.as_ref().map(|(members, _)| {
+                                members
+                                    .iter()
+                                    .map(|mid| {
+                                        let app = state
+                                            .registry
+                                            .get(*mid)
+                                            .map(|w| w.app_name.clone())
+                                            .unwrap_or_default();
+                                        serde_json::json!({ "id": mid, "app_name": app })
+                                    })
+                                    .collect()
+                            });
+                        let stack_active_index =
+                            stack.as_ref().map(|(_, active)| *active);
                         serde_json::json!({
                             "id": wid,
                             "app_name": app_name,
@@ -973,6 +993,8 @@ fn process_ipc_command(
                             "stacked": stack.is_some(),
                             "stack_index": stack_index,
                             "stack_active": stack_active,
+                            "stack_members": stack_members,
+                            "stack_active_index": stack_active_index,
                         })
                     })
                     .collect();
