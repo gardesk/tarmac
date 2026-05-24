@@ -1245,6 +1245,7 @@ impl WmState {
     pub fn move_direction(&mut self, direction: super::tree::Direction) {
         let ws = self.active_workspace();
         let Some(focused) = ws.focused else {
+            tracing::debug!(?direction, "move: no focused window in active workspace");
             return;
         };
         let sr = self.focused_rect();
@@ -1255,15 +1256,34 @@ impl WmState {
             .find(|(w, _)| *w == focused)
             .map(|(_, r)| *r)
         else {
+            tracing::debug!(
+                focused,
+                ws_idx,
+                ?direction,
+                geoms_count = geoms.len(),
+                "move: focused window not in workspace focus_geometries — likely floating or off-tree"
+            );
             return;
         };
         let focal = src_rect.focal_point_for_direction(direction);
+        tracing::debug!(
+            focused,
+            ?direction,
+            src_x = src_rect.x, src_y = src_rect.y, src_w = src_rect.width, src_h = src_rect.height,
+            focal_x = focal.0, focal_y = focal.1,
+            sr_x = sr.x, sr_y = sr.y, sr_w = sr.width, sr_h = sr.height,
+            "move: computed focal"
+        );
 
         if !sr.contains_point(focal.0, focal.1) {
             // Focal landed off the workspace rect — focused window is
             // at the workspace edge in `direction`. Cross to the
             // adjacent monitor when fallback is enabled.
             if !self.window_direction_monitor_fallback || self.monitors.len() <= 1 {
+                tracing::debug!(
+                    focused, ?direction,
+                    "move: focal off-rect, no monitor fallback (disabled or single display)"
+                );
                 return;
             }
             if let Some(target_mi) =
@@ -1287,6 +1307,11 @@ impl WmState {
             .tree
             .find_leaf_at_point(sr, focal.0, focal.1);
         if target == Some(focused) {
+            tracing::debug!(focused, ?direction, "move: focal resolved back to focused tile — no-op");
+            return;
+        }
+        if target.is_none() {
+            tracing::debug!(focused, ?direction, "move: focal resolved to no leaf — no-op");
             return;
         }
         tracing::debug!(focused, ?target, ?direction, "move: relocating in workspace");
