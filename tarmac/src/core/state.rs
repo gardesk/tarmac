@@ -6081,6 +6081,121 @@ mod tests {
         assert_eq!(focal2, (480.0, 1081.0));
     }
 
+    #[test]
+    fn split_axis_override_maps_setting_to_enum() {
+        // HX-05: gar.set("split_axis", "horizontal"|"vertical"|"smart")
+        // → split_axis_override() decides whether to force a split axis
+        // on new-window insertion. The setting flows through here.
+        let mut state = make_focal_test_state();
+
+        state.split_axis = "horizontal".to_string();
+        assert_eq!(
+            state.split_axis_override(),
+            Some(super::super::tree::SplitDirection::Horizontal)
+        );
+
+        state.split_axis = "vertical".to_string();
+        assert_eq!(
+            state.split_axis_override(),
+            Some(super::super::tree::SplitDirection::Vertical)
+        );
+
+        state.split_axis = "smart".to_string();
+        assert_eq!(state.split_axis_override(), None);
+
+        // Unknown values fall through to None (smart default).
+        state.split_axis = "garbage".to_string();
+        assert_eq!(state.split_axis_override(), None);
+    }
+
+    #[test]
+    fn move_with_force_split_left_lands_focused_on_first_side() {
+        // HX-05 + HX-99-A: force_split = "left" overrides cursor-side
+        // semantics; focused always becomes the first (left/top) child
+        // of the new split regardless of direction.
+        let mut state = make_focal_test_state();
+        state.force_split = "left".to_string();
+        state.workspaces.get_mut(0).focused = Some(2);
+        let screen = state.monitors[0].usable_frame;
+
+        let pre = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let pre_two_x = pre.iter().find(|(w, _)| *w == 2).unwrap().1.x;
+        assert!(pre_two_x > 0.0, "test setup: 2 starts on the right");
+
+        state.move_direction(Direction::Left);
+
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_two_x = post.iter().find(|(w, _)| *w == 2).unwrap().1.x;
+        assert_eq!(
+            post_two_x, 0.0,
+            "force_split=left → focused (2) must become first child (x=0); got x={post_two_x}"
+        );
+    }
+
+    #[test]
+    fn move_with_force_split_right_lands_focused_on_second_side() {
+        // HX-05 + HX-99-A: force_split = "right" overrides cursor-side;
+        // focused always becomes the second (right/bottom) child.
+        let mut state = make_focal_test_state();
+        state.force_split = "right".to_string();
+        state.workspaces.get_mut(0).focused = Some(2);
+        let screen = state.monitors[0].usable_frame;
+
+        state.move_direction(Direction::Left);
+
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_two_x = post.iter().find(|(w, _)| *w == 2).unwrap().1.x;
+        // With force_split=right, 2 stays as the right child of the new
+        // split (i.e., at x = screen.width/2 = 960, since the post-remove
+        // target rect spans the whole screen).
+        assert!(
+            post_two_x > 0.0,
+            "force_split=right → focused (2) must become second child (x > 0); got x={post_two_x}"
+        );
+    }
+
+    #[test]
+    fn permanent_direction_override_keeps_preselect_alive_across_inserts() {
+        // HX-05: with permanent_direction_override = true, a preselect
+        // hint persists across multiple new-window inserts instead of
+        // clearing after one use. Pins the WmState wrapping so a
+        // regression that drops the persistent flag during consumption
+        // gets caught (separate from the existing
+        // compute_focal_point_persistent_preselect_is_restored test,
+        // which only asserts the post-consume state of the hint and
+        // doesn't actually run the take-and-re-apply round trip).
+        let mut state = make_focal_test_state();
+        state.permanent_direction_override = true;
+        state.workspaces.get_mut(0).preselect = Some((Direction::Right, true));
+
+        let focal1 = state.compute_focal_point_for_new_window();
+        let focal2 = state.compute_focal_point_for_new_window();
+        let focal3 = state.compute_focal_point_for_new_window();
+        // All three calls produce the same focal — the persistent hint
+        // is re-stored each time.
+        assert_eq!(focal1, focal2);
+        assert_eq!(focal2, focal3);
+        // Hint is still alive in the workspace.
+        assert_eq!(
+            state.workspaces.get(0).preselect,
+            Some((Direction::Right, true))
+        );
+    }
+
+    #[test]
+    fn compute_focal_point_cursor_mode_with_no_cursor_falls_back_to_active() {
+        // HX-05: focal_point_source = "cursor" should fall back to the
+        // focused window's center when last_cursor is None (e.g., at
+        // boot before any mouse event has fired). Previously only the
+        // "cursor_or_active" mode had its fallback pinned.
+        let mut state = make_focal_test_state();
+        state.focal_point_source = "cursor".to_string();
+        state.last_cursor = None;
+        let focal = state.compute_focal_point_for_new_window();
+        // Focused window 1's rect is (0,0,960,1080) → center (480, 540).
+        assert_eq!(focal, (480.0, 540.0));
+    }
+
     // --- HX-08 rate-limiter + drag-prep tests ---
 
     #[test]
