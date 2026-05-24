@@ -866,6 +866,7 @@ fn parse_action(action: &str) -> Result<Action, &'static str> {
             Ok(Action::AddToStack(dir))
         }
         "split_from_stack" => Ok(Action::SplitFromStack),
+        "cancel_drag" => Ok(Action::CancelDrag),
         "workspace_next" => Ok(Action::WorkspaceNext),
         "workspace_prev" => Ok(Action::WorkspacePrev),
         "focus_monitor_next" => Ok(Action::FocusMonitorNext),
@@ -1209,6 +1210,7 @@ pub fn format_action(action: &Action) -> String {
         Action::TogglePseudo => "toggle_pseudo".to_string(),
         Action::AddToStack(dir) => format!("add_to_stack {}", direction_name(*dir)),
         Action::SplitFromStack => "split_from_stack".to_string(),
+        Action::CancelDrag => "cancel_drag".to_string(),
         Action::ToggleSpecial(name) => format!("toggle_special {name}"),
         Action::MoveToSpecial(name) => format!("move_to_special {name}"),
         Action::FocusMonitorNext => "focus_monitor_next".to_string(),
