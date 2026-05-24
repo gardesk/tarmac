@@ -6105,6 +6105,27 @@ mod tests {
     }
 
     #[test]
+    fn pending_show_window_drains_throttled_writes() {
+        // HX-08: writes throttled by should_throttle_ax_write get queued
+        // in pending_show_window; apply_layout drains them at the top of
+        // the next pass. This test pins the drain itself: a planted
+        // pending entry is removed by drain_pending_show_window, leaving
+        // the queue empty.
+        let state = WmState::new();
+        let rect = super::super::tree::Rect::new(0.0, 0.0, 100.0, 100.0);
+        state.pending_show_window.borrow_mut().insert(42, rect);
+        assert_eq!(state.pending_show_window.borrow().len(), 1);
+
+        state.drain_pending_show_window();
+
+        assert_eq!(
+            state.pending_show_window.borrow().len(),
+            0,
+            "drain must empty the pending queue (even when AX ref is missing)"
+        );
+    }
+
+    #[test]
     fn ax_write_rate_limiter_is_per_window() {
         let state = WmState::new();
         // Window 42 burns its slot.
