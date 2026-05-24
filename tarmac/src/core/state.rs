@@ -6254,6 +6254,69 @@ mod tests {
         assert!(!state.is_dragging());
     }
 
+    #[test]
+    fn drag_drop_cross_monitor_inserts_into_target_workspace() {
+        // HX-09 promised disposition_cross_monitor_inserts_into_target_workspace
+        // and never shipped it. This regression pins the behavior:
+        // dropping a tiled window onto a tile on a different monitor
+        // moves the window to that monitor's active workspace and
+        // re-tiles there.
+        let mut state = WmState::new();
+        state.monitors = vec![
+            Monitor {
+                id: 1,
+                frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+                is_primary: true,
+                active_workspace: 0,
+            },
+            Monitor {
+                id: 2,
+                frame: Rect::new(1920.0, 0.0, 1920.0, 1080.0),
+                usable_frame: Rect::new(1920.0, 0.0, 1920.0, 1080.0),
+                is_primary: false,
+                active_workspace: 1,
+            },
+        ];
+        state.mouse_follows_focus = false;
+        state.sync_workspace_visibility();
+
+        // Monitor 1 (ws 0): windows 1 and 2 side by side.
+        // Monitor 2 (ws 1): window 3 alone.
+        for wid in 1u32..=3 {
+            state.registry.add(tracked_window(wid, 100, "Ghost"));
+        }
+        let mon1 = state.monitors[0].usable_frame;
+        let mon2 = state.monitors[1].usable_frame;
+        let ws0 = state.workspaces.get_mut(0);
+        ws0.tree.insert_with_rect(1, None, mon1);
+        ws0.tree.insert_with_rect(2, Some(1), mon1);
+        ws0.focused = Some(1);
+        let ws1 = state.workspaces.get_mut(1);
+        ws1.tree.insert_with_rect(3, None, mon2);
+
+        // Drag window 1 (on monitor 1) past threshold and drop onto
+        // monitor 2's tile (containing window 3).
+        state.begin_move_drag(100.0, 100.0);
+        state.update_drag(200.0, 100.0);
+        state.end_drag(2500.0, 540.0); // inside monitor 2
+
+        // Window 1 lands on workspace 1 (monitor 2's active workspace).
+        assert!(
+            state.workspaces.get(1).tree.contains(1),
+            "window 1 should have crossed to ws 1's tree"
+        );
+        assert!(
+            !state.workspaces.get(0).tree.contains(1),
+            "window 1 must no longer be on the source workspace's tree"
+        );
+        assert!(
+            state.workspaces.get(0).floating.is_empty(),
+            "source workspace floating list should be empty"
+        );
+        assert!(!state.is_dragging());
+    }
+
     // --- HX-99-C cancel_drag tests ---
 
     #[test]
