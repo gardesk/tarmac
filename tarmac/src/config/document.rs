@@ -696,8 +696,58 @@ fn write_settings(out: &mut String, settings: &Settings) {
         lua_string(&settings.border_color_unfocused)
     ));
     out.push_str(&format!(
-        "gar.set(\"border_radius\", {})\n\n",
+        "gar.set(\"border_radius\", {})\n",
         lua_number(settings.border_radius)
+    ));
+    // HX-99-E: round-trip every HX-introduced setting so that Settings
+    // UI edits actually survive a daemon restart. Prior to this, the
+    // 9 HX-added knobs (smart_resizing, window_direction_monitor_fallback,
+    // split_axis, force_split, split_width_multiplier, preserve_split,
+    // permanent_direction_override, focal_point_source, drag_threshold)
+    // were never emitted, so UI changes silently vanished.
+    out.push_str(&format!(
+        "gar.set(\"smart_resizing\", {})\n",
+        if settings.smart_resizing { "true" } else { "false" }
+    ));
+    out.push_str(&format!(
+        "gar.set(\"window_direction_monitor_fallback\", {})\n",
+        if settings.window_direction_monitor_fallback {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    out.push_str(&format!(
+        "gar.set(\"split_axis\", {})\n",
+        lua_string(&settings.split_axis)
+    ));
+    out.push_str(&format!(
+        "gar.set(\"force_split\", {})\n",
+        lua_string(&settings.force_split)
+    ));
+    out.push_str(&format!(
+        "gar.set(\"split_width_multiplier\", {})\n",
+        lua_number(settings.split_width_multiplier)
+    ));
+    out.push_str(&format!(
+        "gar.set(\"preserve_split\", {})\n",
+        if settings.preserve_split { "true" } else { "false" }
+    ));
+    out.push_str(&format!(
+        "gar.set(\"permanent_direction_override\", {})\n",
+        if settings.permanent_direction_override {
+            "true"
+        } else {
+            "false"
+        }
+    ));
+    out.push_str(&format!(
+        "gar.set(\"focal_point_source\", {})\n",
+        lua_string(&settings.focal_point_source)
+    ));
+    out.push_str(&format!(
+        "gar.set(\"drag_threshold\", {})\n\n",
+        lua_number(settings.drag_threshold)
     ));
 }
 
@@ -865,6 +915,45 @@ mod tests {
         assert_eq!(prefix, "print('hi')\n");
         assert!(managed.unwrap().contains("old"));
         assert_eq!(suffix, "print('bye')\n");
+    }
+
+    #[test]
+    fn write_settings_round_trips_every_hx_knob() {
+        // Regression for HX-99-E: prior to this every HX-added setting
+        // was silently dropped on disk save, so Settings UI mutations
+        // vanished on restart. This test pins the 9 HX-added settings
+        // to actually appear in the serialized output.
+        let settings = Settings {
+            smart_resizing: false,
+            window_direction_monitor_fallback: false,
+            split_axis: "horizontal".to_string(),
+            force_split: "left".to_string(),
+            split_width_multiplier: 1.5,
+            preserve_split: true,
+            permanent_direction_override: true,
+            focal_point_source: "cursor".to_string(),
+            drag_threshold: 12.0,
+            ..Default::default()
+        };
+
+        let mut out = String::new();
+        write_settings(&mut out, &settings);
+
+        assert!(out.contains("gar.set(\"smart_resizing\", false)"), "{out}");
+        assert!(
+            out.contains("gar.set(\"window_direction_monitor_fallback\", false)"),
+            "{out}"
+        );
+        assert!(out.contains("gar.set(\"split_axis\", \"horizontal\")"), "{out}");
+        assert!(out.contains("gar.set(\"force_split\", \"left\")"), "{out}");
+        assert!(out.contains("gar.set(\"split_width_multiplier\", 1.50)"), "{out}");
+        assert!(out.contains("gar.set(\"preserve_split\", true)"), "{out}");
+        assert!(
+            out.contains("gar.set(\"permanent_direction_override\", true)"),
+            "{out}"
+        );
+        assert!(out.contains("gar.set(\"focal_point_source\", \"cursor\")"), "{out}");
+        assert!(out.contains("gar.set(\"drag_threshold\", 12)"), "{out}");
     }
 
     #[test]
