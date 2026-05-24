@@ -366,11 +366,10 @@ gar.set("split_axis", "smart")
 -- Aspect threshold for "smart" split. >1 biases Horizontal, <1 biases Vertical.
 gar.set("split_width_multiplier", "1.0")
 -- `force_split` decides whether the new window becomes the first or second child
--- of the new Internal node. Default `follow_mouse` keeps Hyprland-style behavior
--- (currently a no-op alias for `right` — cursor-side semantics is deferred polish).
---   "follow_mouse" — default (new goes right/bottom).
---   "left"         — new goes left/top.
---   "right"        — new goes right/bottom.
+-- of the new Internal node.
+--   "follow_mouse" — default; cursor's side of the parent rect wins (Hyprland).
+--   "left"         — new always goes left/top.
+--   "right"        — new always goes right/bottom.
 gar.set("force_split", "follow_mouse")
 -- When true, `gar.bind(..., "preselect right")` and other preselect hints
 -- persist across multiple window opens instead of clearing after one use.
