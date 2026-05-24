@@ -158,6 +158,14 @@ pub struct WmState {
     /// and are retried at the top of the next `apply_layout`. Same
     /// interior-mutability rationale as `ax_write_last`.
     pending_show_window: std::cell::RefCell<HashMap<WindowId, Rect>>,
+    /// Windows currently parked off-screen via `hide_window`. The
+    /// apply_layout safety-net sweep consults this to skip already-
+    /// hidden windows on every layout pass — without it, every swap
+    /// inside the active workspace re-issued ~10 ms AX position writes
+    /// for every window on every other workspace (~280 ms per swap
+    /// observed in dogfooding). Cleared on show_window and on window
+    /// removal so a re-tile after a focus/show correctly re-hides.
+    hidden_offscreen: std::cell::RefCell<std::collections::HashSet<WindowId>>,
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
@@ -214,6 +222,7 @@ impl WmState {
             drag_threshold_active: false,
             ax_write_last: std::cell::RefCell::new(HashMap::new()),
             pending_show_window: std::cell::RefCell::new(HashMap::new()),
+            hidden_offscreen: std::cell::RefCell::new(std::collections::HashSet::new()),
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
@@ -671,6 +680,10 @@ impl WmState {
             return;
         };
 
+        // No longer off-screen — the safety-net sweep skips visible
+        // wids by consulting this set.
+        self.hidden_offscreen.borrow_mut().remove(&wid);
+
         // HX-08: throttle per-window to ~60 Hz. Rapid back-to-back
         // writes (drag cursor-follow, resize oscillation) get deferred
         // to the next apply_layout, which fires often enough that
@@ -1046,23 +1059,32 @@ impl WmState {
             processed.push(ws_idx);
         }
 
-        // Safety net: ensure ALL windows on non-visible workspaces are hidden.
-        // Uses the same hide_window as switch_workspace (alpha=0 + AX position
-        // off-screen). This is the LAST thing that runs, so the AX position
+        // Safety net: ensure windows on non-visible workspaces remain
+        // hidden. Uses the same hide_window as switch_workspace (alpha=0
+        // + AX position off-screen). Runs LAST so the AX position
         // command overrides any prior positioning from apply_layout.
+        //
+        // PERF: only touch wids not already known-offscreen, so a swap
+        // inside the active workspace doesn't pay ~10 ms × (windows on
+        // other workspaces) per layout pass. The hidden_offscreen set
+        // is maintained by hide_window / show_window.
         for ws_idx in 0..self.workspaces.count() {
             if self.monitor_showing_workspace(ws_idx).is_some() {
                 continue; // Visible workspace — windows should be shown
             }
             let wids = self.workspaces.get(ws_idx).all_window_ids();
-            if !wids.is_empty() {
+            let needs_hide: Vec<WindowId> = {
+                let hidden = self.hidden_offscreen.borrow();
+                wids.into_iter().filter(|w| !hidden.contains(w)).collect()
+            };
+            if !needs_hide.is_empty() {
                 tracing::info!(
                     ws = ws_idx + 1,
-                    count = wids.len(),
+                    count = needs_hide.len(),
                     "safety net hiding non-visible workspace"
                 );
             }
-            for wid in wids {
+            for wid in needs_hide {
                 self.hide_window(wid);
                 self.log_hidden_window_diagnostics(wid, "post-safety-hide");
             }
@@ -3106,6 +3128,9 @@ impl WmState {
     fn hide_window(&self, wid: WindowId) {
         let (hide_frame, monitor_idx) = self.hide_anchor_frame(wid);
         self.hide_window_on_frame(wid, hide_frame, monitor_idx);
+        // Mark as offscreen so the apply_layout safety-net sweep skips
+        // this wid on subsequent passes until something shows it again.
+        self.hidden_offscreen.borrow_mut().insert(wid);
     }
 
     fn hide_window_on_frame(&self, wid: WindowId, hide_frame: Rect, monitor_idx: Option<usize>) {
@@ -4095,6 +4120,7 @@ impl WmState {
         self.pseudo_windows.remove(&id);
         self.ax_write_last.borrow_mut().remove(&id);
         self.pending_show_window.borrow_mut().remove(&id);
+        self.hidden_offscreen.borrow_mut().remove(&id);
         self.prune_focus_memory_for_window(id);
 
         // Find the workspace containing this window and remove from it
@@ -4167,6 +4193,7 @@ impl WmState {
             self.pseudo_windows.remove(&w.id);
             self.ax_write_last.borrow_mut().remove(&w.id);
             self.pending_show_window.borrow_mut().remove(&w.id);
+            self.hidden_offscreen.borrow_mut().remove(&w.id);
             self.prune_focus_memory_for_window(w.id);
             // Find the workspace containing this window and remove from it
             if let Some(ws_idx) = self.workspaces.find_window(w.id) {
