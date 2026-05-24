@@ -6659,6 +6659,126 @@ mod tests {
         assert_eq!(post.len(), 3, "all 3 windows still in tree");
     }
 
+    // --- HX-01 / HX-02 state-level wrappers ---
+
+    #[test]
+    fn state_toggle_split_flips_focused_parent_axis() {
+        let mut state = make_three_window_state();
+        let screen = state.monitors[0].usable_frame;
+        // 1 = left half, 2 = top-right quad, 3 = bottom-right quad.
+        // 2's immediate parent split is Horizontal (top vs bottom of right
+        // column). Toggling should make 2 and 3 sit side-by-side instead
+        // of stacked, so their rects share the same y but differ in x.
+        state.workspaces.get_mut(0).focused = Some(2);
+        let pre = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let pre_two = pre.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let pre_three = pre.iter().find(|(w, _)| *w == 3).unwrap().1;
+        assert_eq!(pre_two.x, pre_three.x, "pre: stacked horizontally");
+
+        state.toggle_split();
+
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_two = post.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let post_three = post.iter().find(|(w, _)| *w == 3).unwrap().1;
+        assert_eq!(post_two.y, post_three.y, "post: side-by-side same y");
+        assert_ne!(post_two.x, post_three.x, "post: differ in x");
+    }
+
+    #[test]
+    fn state_swap_split_swaps_focused_parent_children() {
+        let mut state = make_three_window_state();
+        let screen = state.monitors[0].usable_frame;
+        // 2 starts in top half of right column; 3 in bottom half.
+        state.workspaces.get_mut(0).focused = Some(2);
+        let pre = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let pre_two = pre.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let pre_three = pre.iter().find(|(w, _)| *w == 3).unwrap().1;
+
+        state.swap_split();
+
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_two = post.iter().find(|(w, _)| *w == 2).unwrap().1;
+        let post_three = post.iter().find(|(w, _)| *w == 3).unwrap().1;
+        // 2 and 3 swapped rects; 1 (the unrelated sibling at root) unchanged.
+        assert_eq!(post_two, pre_three);
+        assert_eq!(post_three, pre_two);
+    }
+
+    #[test]
+    fn state_set_ratio_changes_focused_parent_ratio() {
+        let mut state = make_three_window_state();
+        let screen = state.monitors[0].usable_frame;
+        // 2's parent split is Horizontal at ratio 0.5; top half = 540.
+        state.workspaces.get_mut(0).focused = Some(2);
+        let pre = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let pre_two_h = pre.iter().find(|(w, _)| *w == 2).unwrap().1.height;
+        assert_eq!(pre_two_h, 540.0);
+
+        state.set_ratio(0.7);
+
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_two_h = post.iter().find(|(w, _)| *w == 2).unwrap().1.height;
+        // ratio 0.7 of the 1080 right-column height = 756.
+        assert!(
+            (post_two_h - 756.0).abs() < 0.5,
+            "expected ~756, got {post_two_h}"
+        );
+    }
+
+    #[test]
+    fn state_set_ratio_clamps_to_legal_range() {
+        let mut state = make_three_window_state();
+        let screen = state.monitors[0].usable_frame;
+        state.workspaces.get_mut(0).focused = Some(2);
+
+        // Out-of-range high: clamps to 0.9 → top half = 972 of 1080.
+        state.set_ratio(1.5);
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_two_h = post.iter().find(|(w, _)| *w == 2).unwrap().1.height;
+        assert!(
+            (post_two_h - 972.0).abs() < 0.5,
+            "expected ~972 (clamped 0.9), got {post_two_h}"
+        );
+
+        // Out-of-range low: clamps to 0.1 → top half = 108 of 1080.
+        state.set_ratio(-0.5);
+        let post = state.workspaces.get(0).tree.calculate_geometries(screen);
+        let post_two_h = post.iter().find(|(w, _)| *w == 2).unwrap().1.height;
+        assert!(
+            (post_two_h - 108.0).abs() < 0.5,
+            "expected ~108 (clamped 0.1), got {post_two_h}"
+        );
+    }
+
+    #[test]
+    fn state_set_ratio_no_op_for_root_window() {
+        // Single window has no parent split. set_ratio must not panic,
+        // and the tree shape must not change.
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.mouse_follows_focus = false;
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+        state.registry.add(tracked_window(7, 100, "Solo"));
+        state
+            .workspaces
+            .get_mut(0)
+            .tree
+            .insert_with_rect(7, None, screen);
+        state.workspaces.get_mut(0).focused = Some(7);
+
+        let pre = state.workspaces.get(0).tree.clone();
+        state.set_ratio(0.7);
+        let post = state.workspaces.get(0).tree.clone();
+        assert_eq!(pre, post);
+    }
+
     /// Regression for the HX-99 dogfooding sequence where Move(Left)
     /// must actually *split* the target tile (Hyprland's
     /// DwindleAlgorithm::addTarget after removeTarget), not just swap
