@@ -1353,10 +1353,40 @@ impl WmState {
             None => return,
         };
         let smart = self.smart_resizing;
+        // HX-99-B: convert a constant *pixel* delta into the matching
+        // ancestor's local ratio space, so the focused window's edge
+        // moves by ~the same distance regardless of tree depth. Falls
+        // back to the legacy 5% ratio shift when smart_resizing is off
+        // or when no matching ancestor can be located (shouldn't happen
+        // — tree.resize would also return false in that case).
+        let delta = if smart {
+            let sr = self.focused_rect();
+            let target = self
+                .active_workspace()
+                .tree
+                .find_resize_target_rect(focused, direction, sr, true);
+            const RESIZE_STEP_PIXELS: f64 = 60.0;
+            match target {
+                Some(rect) => {
+                    let extent = match direction {
+                        super::tree::Direction::Left | super::tree::Direction::Right => rect.width,
+                        super::tree::Direction::Up | super::tree::Direction::Down => rect.height,
+                    };
+                    if extent > 0.0 {
+                        (RESIZE_STEP_PIXELS / extent) as f32
+                    } else {
+                        0.05
+                    }
+                }
+                None => 0.05,
+            }
+        } else {
+            0.05
+        };
         if self
             .active_workspace_mut()
             .tree
-            .resize(focused, direction, 0.05, smart)
+            .resize(focused, direction, delta, smart)
         {
             self.apply_layout();
         }
