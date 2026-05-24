@@ -2210,7 +2210,28 @@ impl WmState {
                 // Tile hit — retile at the drop focal point.
                 let split_override = self.split_axis_override();
                 let multiplier = self.split_width_multiplier;
-                let force_split_left = self.force_split == "left";
+                // HX-99-A: cursor-side `follow_mouse` semantics here too,
+                // matching add_window_to_active's behavior.
+                let target_leaf_rect = self
+                    .workspaces
+                    .get(target_ws)
+                    .tree
+                    .find_leaf_at_point(target_rect, drop.0, drop.1)
+                    .and_then(|target_wid| {
+                        self.workspaces
+                            .get(target_ws)
+                            .tree
+                            .calculate_geometries(target_rect)
+                            .into_iter()
+                            .find(|(w, _)| *w == target_wid)
+                            .map(|(_, r)| r)
+                    });
+                let should_swap = self.should_swap_for_force_split(
+                    drop,
+                    target_leaf_rect,
+                    split_override,
+                    multiplier,
+                );
                 let ws = self.workspaces.get_mut(target_ws);
                 ws.tree.insert_at_focal_point_options(
                     wid,
@@ -2219,7 +2240,7 @@ impl WmState {
                     split_override,
                     multiplier,
                 );
-                if force_split_left {
+                if should_swap {
                     ws.tree.swap_parent_children(wid);
                 }
                 ws.record_focus(wid);
@@ -4107,6 +4128,55 @@ impl WmState {
         }
     }
 
+    /// HX-99-A: decide whether the post-insert `swap_parent_children`
+    /// should fire, given the focal point and the rect of the leaf
+    /// that's about to be split. Captures Hyprland's `force_split`
+    /// semantics:
+    ///
+    /// - `"left"`  → always swap (new becomes left/top child).
+    /// - `"right"` → never swap (new becomes right/bottom — default).
+    /// - `"follow_mouse"` → swap when the cursor is on the LEFT/TOP
+    ///   half of the target rect, so the new window lands on the side
+    ///   the user pointed at. When the focal is outside the target
+    ///   rect (rare; happens when focal lands in a sibling rect that
+    ///   `find_leaf_at_point` mapped to this leaf), behaves like the
+    ///   `"right"` default.
+    ///
+    /// `split_override` and `multiplier` are the same values passed to
+    /// `insert_at_focal_point_options`, so the predicted split
+    /// direction matches what the tree actually picks.
+    fn should_swap_for_force_split(
+        &self,
+        focal: super::tree::FocalPoint,
+        target_rect: Option<super::tree::Rect>,
+        split_override: Option<super::tree::SplitDirection>,
+        multiplier: f64,
+    ) -> bool {
+        match self.force_split.as_str() {
+            "left" => true,
+            "right" => false,
+            _ => {
+                // follow_mouse (default) — need a target rect to know
+                // which side the cursor is on. Without one, fall back
+                // to "right" (no swap).
+                let Some(rect) = target_rect else { return false };
+                let split = split_override.unwrap_or_else(|| {
+                    super::tree::Node::smart_split_direction_with_multiplier(&rect, multiplier)
+                });
+                match split {
+                    super::tree::SplitDirection::Vertical => {
+                        let midpoint = rect.x + rect.width / 2.0;
+                        focal.0 < midpoint
+                    }
+                    super::tree::SplitDirection::Horizontal => {
+                        let midpoint = rect.y + rect.height / 2.0;
+                        focal.1 < midpoint
+                    }
+                }
+            }
+        }
+    }
+
     /// Map `Settings::split_axis` string onto a tree-level split
     /// override. "smart" → None (aspect-driven via multiplier).
     fn split_axis_override(&self) -> Option<super::tree::SplitDirection> {
@@ -4275,7 +4345,27 @@ impl WmState {
                 let focal = self.compute_focal_point_for_new_window();
                 let split_override = self.split_axis_override();
                 let multiplier = self.split_width_multiplier;
-                let force_split_left = self.force_split == "left";
+                // HX-99-A: capture target leaf's rect *before* insertion
+                // so follow_mouse can compute cursor-side against the
+                // pre-split parent rect.
+                let target_rect = self
+                    .active_workspace()
+                    .tree
+                    .find_leaf_at_point(sr, focal.0, focal.1)
+                    .and_then(|target_wid| {
+                        self.active_workspace()
+                            .tree
+                            .calculate_geometries(sr)
+                            .into_iter()
+                            .find(|(w, _)| *w == target_wid)
+                            .map(|(_, r)| r)
+                    });
+                let should_swap = self.should_swap_for_force_split(
+                    focal,
+                    target_rect,
+                    split_override,
+                    multiplier,
+                );
                 let new_id = *id;
                 let ws = self.active_workspace_mut();
                 ws.tree.insert_at_focal_point_options(
@@ -4285,11 +4375,11 @@ impl WmState {
                     split_override,
                     multiplier,
                 );
-                if force_split_left {
-                    // The default Leaf→Internal conversion puts the new
-                    // window on the right (second child). force_split=left
-                    // inverts that by swapping the freshly-created
-                    // parent's children.
+                if should_swap {
+                    // Inverts the default Leaf→Internal child ordering
+                    // (existing on left/top, new on right/bottom) so
+                    // the new window lands on the side determined by
+                    // force_split.
                     ws.tree.swap_parent_children(new_id);
                 }
                 ws.record_focus(new_id);
@@ -5887,6 +5977,94 @@ mod tests {
         assert!(state.workspaces.get(0).floating.iter().any(|f| f.id == 1));
         assert!(!state.workspaces.get(0).tree.contains(1));
         assert!(!state.is_dragging());
+    }
+
+    // --- HX-99-A force_split=follow_mouse cursor-side tests ---
+
+    #[test]
+    fn follow_mouse_swaps_when_cursor_on_left_half() {
+        let mut state = WmState::new();
+        state.force_split = "follow_mouse".to_string();
+        let rect = super::super::tree::Rect::new(0.0, 0.0, 1000.0, 800.0);
+        // Vertical split (smart with default multiplier on wide rect).
+        // Cursor at x=200 → left half → swap.
+        let swap = state.should_swap_for_force_split(
+            (200.0, 400.0),
+            Some(rect),
+            None,
+            1.0,
+        );
+        assert!(swap, "cursor on left half should swap (new becomes left)");
+    }
+
+    #[test]
+    fn follow_mouse_keeps_default_when_cursor_on_right_half() {
+        let mut state = WmState::new();
+        state.force_split = "follow_mouse".to_string();
+        let rect = super::super::tree::Rect::new(0.0, 0.0, 1000.0, 800.0);
+        // Cursor at x=800 → right half → no swap (new stays on right).
+        let swap = state.should_swap_for_force_split(
+            (800.0, 400.0),
+            Some(rect),
+            None,
+            1.0,
+        );
+        assert!(!swap);
+    }
+
+    #[test]
+    fn follow_mouse_horizontal_split_swaps_on_top_half() {
+        let mut state = WmState::new();
+        state.force_split = "follow_mouse".to_string();
+        // Tall rect → smart split = Horizontal.
+        let rect = super::super::tree::Rect::new(0.0, 0.0, 500.0, 1000.0);
+        // Cursor at y=200 → top half → swap (new becomes top).
+        let swap = state.should_swap_for_force_split(
+            (250.0, 200.0),
+            Some(rect),
+            None,
+            1.0,
+        );
+        assert!(swap);
+    }
+
+    #[test]
+    fn follow_mouse_no_target_rect_keeps_default() {
+        let mut state = WmState::new();
+        state.force_split = "follow_mouse".to_string();
+        let swap = state.should_swap_for_force_split((100.0, 100.0), None, None, 1.0);
+        assert!(!swap, "no target rect → fall back to right-side default");
+    }
+
+    #[test]
+    fn force_split_left_always_swaps() {
+        let mut state = WmState::new();
+        state.force_split = "left".to_string();
+        let rect = super::super::tree::Rect::new(0.0, 0.0, 1000.0, 800.0);
+        // Right-half cursor would normally not swap, but force_split=left forces it.
+        let swap = state.should_swap_for_force_split(
+            (800.0, 400.0),
+            Some(rect),
+            None,
+            1.0,
+        );
+        assert!(swap);
+    }
+
+    #[test]
+    fn force_split_right_never_swaps() {
+        let mut state = WmState::new();
+        state.force_split = "right".to_string();
+        let rect = super::super::tree::Rect::new(0.0, 0.0, 1000.0, 800.0);
+        // Left-half cursor would normally swap (under follow_mouse), but
+        // force_split=right keeps default.
+        let swap = state.should_swap_for_force_split(
+            (200.0, 400.0),
+            Some(rect),
+            None,
+            1.0,
+        );
+        assert!(!swap);
     }
 
     // --- HX-10 canonical "Hyprland-feel" scenarios ---
