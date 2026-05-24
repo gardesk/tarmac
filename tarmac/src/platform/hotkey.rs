@@ -154,14 +154,18 @@ impl HotkeyManager {
         })
     }
 
-    /// Register a global hotkey.
-    pub fn register(&mut self, modifiers: Modifiers, key: Key, action: Action) -> bool {
+    /// Register a global hotkey, returning the assigned id on success
+    /// (useful when the caller needs to later `unregister` it).
+    pub fn register_id(
+        &mut self,
+        modifiers: Modifiers,
+        key: Key,
+        action: Action,
+    ) -> Option<u32> {
         let carbon_mods = modifiers_to_carbon(modifiers);
-        let carbon_key = key_to_carbon(key);
-
-        let Some(carbon_key) = carbon_key else {
+        let Some(carbon_key) = key_to_carbon(key) else {
             tracing::warn!(?key, "no Carbon keycode for key");
-            return false;
+            return None;
         };
 
         let id = NEXT_HOTKEY_ID.fetch_add(1, Ordering::Relaxed);
@@ -191,10 +195,9 @@ impl HotkeyManager {
                 carbon_mods,
                 "failed to register hotkey"
             );
-            return false;
+            return None;
         }
 
-        // Register the action mapping in the callback context
         unsafe {
             (*self._callback_ctx)
                 .id_to_action
@@ -204,7 +207,25 @@ impl HotkeyManager {
         tracing::debug!(?key, ?modifiers, ?action, id, "hotkey registered");
         self.hotkeys
             .insert(id, RegisteredHotKey { carbon_ref, action });
-        true
+        Some(id)
+    }
+
+    /// Unregister a previously-registered hotkey by id. Idempotent; a
+    /// no-op when the id is unknown. Used by transient registrations
+    /// (e.g. HX-99-C's drag-cancel Escape grab).
+    pub fn unregister(&mut self, id: u32) {
+        if let Some(hk) = self.hotkeys.remove(&id) {
+            unsafe { UnregisterEventHotKey(hk.carbon_ref) };
+            unsafe {
+                (*self._callback_ctx).id_to_action.remove(&id);
+            }
+            tracing::debug!(id, "hotkey unregistered");
+        }
+    }
+
+    /// Register a global hotkey. Returns true on success.
+    pub fn register(&mut self, modifiers: Modifiers, key: Key, action: Action) -> bool {
+        self.register_id(modifiers, key, action).is_some()
     }
 
     /// Register all default keybindings.
