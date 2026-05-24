@@ -206,6 +206,7 @@ pub enum Action {
     TogglePseudo,                     // Toggle pseudo-tile mode on the focused window
     AddToStack(Direction),            // Merge focused window into the adjacent leaf, forming a Stack
     SplitFromStack,                   // Pull the active stack member out as a side-by-side sibling
+    CancelDrag,                       // HX-99-C: abort an in-flight drag and restore pre-drag state
     Reload,                           // Hot reload config
     Exit,                             // Clean exit
 }
