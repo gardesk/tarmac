@@ -395,6 +395,41 @@ impl Node {
         self.calculate_focus_geometries_with_gaps(rect, 0.0, 0.0, true)
     }
 
+    /// Perf #134: targeted single-window rect lookup. Walks only the
+    /// ancestor chain of `wid` instead of computing every leaf's rect.
+    /// O(depth) instead of O(N). Used by move_direction and
+    /// add_window_to_active to read just the focused/target rect
+    /// without paying a full BSP traversal per action.
+    pub fn geometry_for(&self, wid: WindowId, rect: Rect) -> Option<Rect> {
+        match self {
+            Node::Leaf { window: Some(w) } if *w == wid => Some(rect),
+            Node::Leaf { .. } => None,
+            Node::Stack { windows, .. } => {
+                // All stack members share the tile rect.
+                if windows.contains(&wid) {
+                    Some(rect)
+                } else {
+                    None
+                }
+            }
+            Node::Internal {
+                split,
+                ratio,
+                left,
+                right,
+            } => {
+                let (left_rect, right_rect) = rect.split(*split, *ratio);
+                if left.contains(wid) {
+                    left.geometry_for(wid, left_rect)
+                } else if right.contains(wid) {
+                    right.geometry_for(wid, right_rect)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
     /// Calculate geometries with inner and outer gaps.
     /// `gap_outer` is applied to the root rect edges.
     /// `gap_inner` is the space between adjacent windows (half applied to each side).
@@ -2509,6 +2544,41 @@ mod tests {
         assert!(!tree.resize(1, Direction::Left, 0.05, true));
         assert!(!tree.resize(1, Direction::Right, 0.05, true));
         assert!(!tree.resize(1, Direction::Left, 0.05, false));
+    }
+
+    #[test]
+    fn geometry_for_matches_full_traversal_results() {
+        // Perf #134: geometry_for is a targeted lookup; it must agree
+        // with calculate_geometries for every wid present in the tree.
+        let tree = build_mixed_split_tree();
+        let full = tree.calculate_geometries(SCREEN);
+        for (wid, expected) in &full {
+            let got = tree
+                .geometry_for(*wid, SCREEN)
+                .unwrap_or_else(|| panic!("geometry_for({wid}) returned None"));
+            assert!(
+                (got.x - expected.x).abs() < 0.001
+                    && (got.y - expected.y).abs() < 0.001
+                    && (got.width - expected.width).abs() < 0.001
+                    && (got.height - expected.height).abs() < 0.001,
+                "geometry_for({wid}) disagreed: got {got:?}, expected {expected:?}",
+            );
+        }
+        // Unknown wid → None.
+        assert!(tree.geometry_for(9999, SCREEN).is_none());
+    }
+
+    #[test]
+    fn geometry_for_returns_tile_rect_for_stack_members() {
+        // All stack members share the tile rect.
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.merge_into_neighbor(1, 2);
+        let geom1 = tree.geometry_for(1, SCREEN);
+        let geom2 = tree.geometry_for(2, SCREEN);
+        assert!(geom1.is_some() && geom2.is_some());
+        assert_eq!(geom1, geom2, "stack members share the tile rect");
     }
 
     #[test]

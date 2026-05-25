@@ -1313,18 +1313,15 @@ impl WmState {
         // the inner-gap area that the tree assigns back to this same
         // leaf — making find_leaf_at_point return the focused window
         // and the move silently no-op (HX-99 dogfooding bug).
-        let geoms = self.active_workspace().tree.calculate_geometries(sr);
-        let Some(src_rect) = geoms
-            .iter()
-            .find(|(w, _)| *w == focused)
-            .map(|(_, r)| *r)
-        else {
+        //
+        // Perf #134: O(depth) lookup via geometry_for instead of a
+        // full BSP traversal just to extract the focused window's rect.
+        let Some(src_rect) = self.active_workspace().tree.geometry_for(focused, sr) else {
             tracing::debug!(
                 focused,
                 ws_idx,
                 ?direction,
-                geoms_count = geoms.len(),
-                "move: focused window not in tree geometries — likely floating or off-tree"
+                "move: focused window not in tree — likely floating or off-tree"
             );
             return;
         };
@@ -1394,16 +1391,16 @@ impl WmState {
         let multiplier = self.split_width_multiplier;
         self.active_workspace_mut().tree.remove(focused);
         // Re-resolve target after remove — the tree shape changed.
-        let post_geoms = self.active_workspace().tree.calculate_geometries(sr);
+        // Perf #134: targeted geometry_for instead of full tree walk.
         let post_target_wid = self
             .active_workspace()
             .tree
             .find_leaf_at_point(sr, focal.0, focal.1)
             .unwrap_or(target_wid);
-        let Some(target_rect) = post_geoms
-            .iter()
-            .find(|(w, _)| *w == post_target_wid)
-            .map(|(_, r)| *r)
+        let Some(target_rect) = self
+            .active_workspace()
+            .tree
+            .geometry_for(post_target_wid, sr)
         else {
             // Target vanished (shouldn't happen unless tree is empty).
             tracing::debug!(focused, target_wid, "move: post-remove target missing");
@@ -2427,6 +2424,7 @@ impl WmState {
                 let multiplier = self.split_width_multiplier;
                 // HX-99-A: cursor-side `follow_mouse` semantics here too,
                 // matching add_window_to_active's behavior.
+                // Perf #134: targeted geometry_for instead of full walk.
                 let target_leaf_rect = self
                     .workspaces
                     .get(target_ws)
@@ -2436,10 +2434,7 @@ impl WmState {
                         self.workspaces
                             .get(target_ws)
                             .tree
-                            .calculate_geometries(target_rect)
-                            .into_iter()
-                            .find(|(w, _)| *w == target_wid)
-                            .map(|(_, r)| r)
+                            .geometry_for(target_wid, target_rect)
                     });
                 let should_swap = self.should_swap_for_force_split(
                     drop,
@@ -2552,13 +2547,11 @@ impl WmState {
                     .tree
                     .find_leaf_at_point(sr_for_source, focal.0, focal.1)
                     .and_then(|target_wid| {
+                        // Perf #134: targeted geometry_for instead of full walk.
                         self.workspaces
                             .get(source_ws)
                             .tree
-                            .calculate_geometries(sr_for_source)
-                            .into_iter()
-                            .find(|(w, _)| *w == target_wid)
-                            .map(|(_, r)| r)
+                            .geometry_for(target_wid, sr_for_source)
                     });
                 let should_swap = self.should_swap_for_force_split(
                     focal,
@@ -4703,17 +4696,14 @@ impl WmState {
                 // HX-99-A: capture target leaf's rect *before* insertion
                 // so follow_mouse can compute cursor-side against the
                 // pre-split parent rect.
+                // Perf #134: O(depth) geometry_for instead of full BSP
+                // walk just to extract one leaf's rect.
                 let target_rect = self
                     .active_workspace()
                     .tree
                     .find_leaf_at_point(sr, focal.0, focal.1)
                     .and_then(|target_wid| {
-                        self.active_workspace()
-                            .tree
-                            .calculate_geometries(sr)
-                            .into_iter()
-                            .find(|(w, _)| *w == target_wid)
-                            .map(|(_, r)| r)
+                        self.active_workspace().tree.geometry_for(target_wid, sr)
                     });
                 let should_swap = self.should_swap_for_force_split(
                     focal,
