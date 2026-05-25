@@ -6,6 +6,7 @@
 //! lets ers act on tarmac's intent immediately and covers AX-driven
 //! moves where SLS doesn't even fire a notification.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -81,13 +82,17 @@ pub struct BorderManager {
     /// writes newline-delimited commands (`focus <wid>`, `move <wid>`,
     /// `destroy <wid>`); ers parses them and folds into its existing
     /// event pipeline.
-    stdin: Option<BufWriter<ChildStdin>>,
+    ///
+    /// RefCell so the methods can take `&self` — apply_layout holds an
+    /// immutable borrow of WmState while iterating tile geometries and
+    /// needs to push update_border calls from inside that loop.
+    stdin: RefCell<Option<BufWriter<ChildStdin>>>,
     /// Last focus wid sent on the control channel, so `update_border`
     /// only writes `focus <wid>` when it actually changes.
-    last_focus_sent: Option<u32>,
+    last_focus_sent: RefCell<Option<u32>>,
     /// Last rect sent for each wid, so duplicate `move <wid>` commands
     /// (apply_layout re-runs that don't change geometry) get dropped.
-    last_move_sent: HashMap<u32, Rect>,
+    last_move_sent: RefCell<HashMap<u32, Rect>>,
     /// Timestamps of recent automatic respawns (oldest first). Used to
     /// rate-limit the watchdog so a permanently-broken ers backs off
     /// instead of fork-bombing the system.
@@ -113,9 +118,9 @@ impl BorderManager {
             unfocused_color: BorderColor::from_hex("#2d2d2d"),
             radius: 10.0,
             child: None,
-            stdin: None,
-            last_focus_sent: None,
-            last_move_sent: HashMap::new(),
+            stdin: RefCell::new(None),
+            last_focus_sent: RefCell::new(None),
+            last_move_sent: RefCell::new(HashMap::new()),
             recent_restarts: Vec::new(),
             backoff_until: None,
             last_health_check: None,
@@ -164,13 +169,13 @@ impl BorderManager {
         {
             Ok(mut child) => {
                 // Capture stdin for the perf #135 control channel.
-                self.stdin = child.stdin.take().map(BufWriter::new);
+                *self.stdin.borrow_mut() = child.stdin.take().map(BufWriter::new);
                 self.child = Some(child);
                 // The new ers process has no idea what's focused or
                 // where anything is — invalidate our per-wid caches so
                 // the next layout pass re-sends the current state.
-                self.last_focus_sent = None;
-                self.last_move_sent.clear();
+                *self.last_focus_sent.borrow_mut() = None;
+                self.last_move_sent.borrow_mut().clear();
             }
             Err(e) => {
                 tracing::warn!(err = %e, ers_bin = ?ers_bin, "failed to spawn ers");
@@ -182,14 +187,14 @@ impl BorderManager {
     pub fn kill(&mut self) {
         // Drop the stdin writer first so ers sees EOF and exits its
         // reader thread cleanly.
-        self.stdin = None;
+        *self.stdin.borrow_mut() = None;
         if let Some(ref mut child) = self.child {
             let _ = child.kill();
             let _ = child.wait();
         }
         self.child = None;
-        self.last_focus_sent = None;
-        self.last_move_sent.clear();
+        *self.last_focus_sent.borrow_mut() = None;
+        self.last_move_sent.borrow_mut().clear();
     }
 
     /// Restart ers with current settings (used on config reload). Resets
@@ -275,11 +280,15 @@ impl BorderManager {
     /// — apply_layout re-runs that don't change geometry don't bombard
     /// the pipe. When `focused` is true and differs from the last
     /// focus hint we also push `focus <wid>`.
-    pub fn update_border(&mut self, wid: u32, rect: Rect, focused: bool) {
+    ///
+    /// `&self` so apply_layout (which holds `&WmState`) can call this
+    /// from inside its tile-iteration loop without an extra mutable
+    /// borrow.
+    pub fn update_border(&self, wid: u32, rect: Rect, focused: bool) {
         if focused {
             self.send_focus(wid);
         }
-        let cached = self.last_move_sent.get(&wid).copied();
+        let cached = self.last_move_sent.borrow().get(&wid).copied();
         let unchanged = cached.is_some_and(|c| {
             (c.x - rect.x).abs() < 1.0
                 && (c.y - rect.y).abs() < 1.0
@@ -287,7 +296,7 @@ impl BorderManager {
                 && (c.height - rect.height).abs() < 1.0
         });
         if !unchanged {
-            self.last_move_sent.insert(wid, rect);
+            self.last_move_sent.borrow_mut().insert(wid, rect);
             // Perf #135 follow-on: send full target geometry so ers
             // can snap the border to tarmac's intent without polling
             // SLS (which lags ~800ms behind tarmac's AX writes).
@@ -299,44 +308,54 @@ impl BorderManager {
     }
 
     /// Tell ers a window is gone.
-    pub fn remove_border(&mut self, wid: u32) {
-        self.last_move_sent.remove(&wid);
-        if self.last_focus_sent == Some(wid) {
-            self.last_focus_sent = None;
-        }
+    pub fn remove_border(&self, wid: u32) {
+        self.last_move_sent.borrow_mut().remove(&wid);
+        let cleared = {
+            let mut last = self.last_focus_sent.borrow_mut();
+            if *last == Some(wid) {
+                *last = None;
+                true
+            } else {
+                false
+            }
+        };
+        let _ = cleared;
         self.write_cmd(format_args!("destroy {wid}\n"));
     }
 
     /// Tell ers about a focus change. `0` clears focus. Dedups so
     /// repeated apply_layouts on the same focused window don't spam
     /// ers; pass-through when it actually changes.
-    pub fn notify_focus(&mut self, wid: u32) {
+    pub fn notify_focus(&self, wid: u32) {
         self.send_focus(wid);
     }
 
-    fn send_focus(&mut self, wid: u32) {
-        if self.last_focus_sent == Some(wid) {
-            return;
+    fn send_focus(&self, wid: u32) {
+        {
+            let mut last = self.last_focus_sent.borrow_mut();
+            if *last == Some(wid) {
+                return;
+            }
+            *last = Some(wid);
         }
-        self.last_focus_sent = Some(wid);
         self.write_cmd(format_args!("focus {wid}\n"));
     }
 
-    fn write_cmd(&mut self, args: std::fmt::Arguments<'_>) {
-        let Some(stdin) = self.stdin.as_mut() else {
+    fn write_cmd(&self, args: std::fmt::Arguments<'_>) {
+        let mut stdin_slot = self.stdin.borrow_mut();
+        let Some(stdin) = stdin_slot.as_mut() else {
             tracing::warn!(?args, "border: write_cmd dropped — no stdin pipe");
             return;
         };
         // Both write_fmt and flush can fail if ers died; the
-        // health_check watchdog will respawn. Silently drop here.
+        // health_check watchdog will respawn. Drop the pipe so the
+        // next call observes the missing-stdin branch and warns once.
         if let Err(e) = stdin.write_fmt(args) {
             tracing::warn!(?args, err = %e, "border: write_cmd failed — dropping pipe");
-            // Pipe broken — discard the writer so subsequent calls
-            // don't reattempt. Health check will respawn ers and
-            // re-establish a fresh pipe.
-            self.stdin = None;
-            self.last_focus_sent = None;
-            self.last_move_sent.clear();
+            *stdin_slot = None;
+            drop(stdin_slot);
+            *self.last_focus_sent.borrow_mut() = None;
+            self.last_move_sent.borrow_mut().clear();
             return;
         }
         if let Err(e) = stdin.flush() {

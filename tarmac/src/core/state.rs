@@ -677,10 +677,23 @@ impl WmState {
             }
             self.restack_floating_windows(ws_idx);
         }
+
+        // Perf #135 wiring: push the freshly-applied geometry to ers
+        // over its stdin control channel. Without this, ers only
+        // learned of moves via the SLS poll path (lagging ~800ms
+        // behind tarmac's AX writes), defeating the entire #135
+        // control-channel architecture for every action after boot.
+        self.update_borders();
     }
 
     /// Update border overlays for all visible windows.
-    pub fn update_borders(&mut self) {
+    /// Push per-window move/focus hints to ers via the perf #135
+    /// control channel. Now `&self` so apply_layout can invoke it
+    /// inline. Earlier this only fired from startup discovery and
+    /// config reload, leaving every move/swap/focus after boot
+    /// sending zero updates to ers (which then fell back to slow SLS
+    /// polling).
+    pub fn update_borders(&self) {
         if !self.borders.is_enabled() {
             return;
         }
