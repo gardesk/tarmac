@@ -166,6 +166,14 @@ pub struct WmState {
     /// observed in dogfooding). Cleared on show_window and on window
     /// removal so a re-tile after a focus/show correctly re-hides.
     hidden_offscreen: std::cell::RefCell<std::collections::HashSet<WindowId>>,
+    /// HX-99-F perf #126: deferred "second pass" after a cross-monitor /
+    /// workspace-switch / monitor-reconfig action. Sites used to do
+    /// `apply_layout(); sleep(50ms); apply_layout(); fix_oversized()`
+    /// inline, blocking the main runloop and the polling timer for
+    /// 150ms+. Now they schedule a fire-time here; the polling tick
+    /// drains it when the deadline passes. `bool` = whether to call
+    /// fix_oversized_windows after the second apply.
+    pending_followup_apply: std::cell::Cell<Option<(std::time::Instant, bool)>>,
     pub rules: Vec<crate::config::lua::WindowRule>,
     /// Active special workspace overlay per monitor (None = no overlay).
     active_specials: Vec<Option<usize>>,
@@ -223,6 +231,7 @@ impl WmState {
             ax_write_last: std::cell::RefCell::new(HashMap::new()),
             pending_show_window: std::cell::RefCell::new(HashMap::new()),
             hidden_offscreen: std::cell::RefCell::new(std::collections::HashSet::new()),
+            pending_followup_apply: std::cell::Cell::new(None),
             rules: Vec::new(),
             active_specials: Vec::new(),
             special_configs: Vec::new(),
@@ -2988,6 +2997,42 @@ impl WmState {
         }
     }
 
+    /// HX-99-F perf #126: schedule a second `apply_layout` (and
+    /// optional `fix_oversized_windows`) to fire ~50 ms later. Used by
+    /// cross-monitor moves, workspace switches, and monitor reconfig
+    /// paths that previously did `apply_layout(); sleep(50ms); apply_layout()`
+    /// inline. Idempotent — calling twice doesn't double-schedule;
+    /// the later deadline wins.
+    pub fn schedule_followup_apply(&self, with_fix_oversized: bool) {
+        let due = std::time::Instant::now() + std::time::Duration::from_millis(50);
+        let merged = match self.pending_followup_apply.get() {
+            Some((existing_due, existing_fix)) => {
+                // Keep the later deadline so we don't fire prematurely;
+                // OR the fix flag so any caller that needs it gets it.
+                (existing_due.max(due), existing_fix || with_fix_oversized)
+            }
+            None => (due, with_fix_oversized),
+        };
+        self.pending_followup_apply.set(Some(merged));
+    }
+
+    /// Drain the pending followup apply if its deadline has passed.
+    /// Called from the polling tick. Returns true if work fired.
+    pub fn drain_pending_followup_apply(&mut self) -> bool {
+        let Some((due, with_fix)) = self.pending_followup_apply.get() else {
+            return false;
+        };
+        if std::time::Instant::now() < due {
+            return false;
+        }
+        self.pending_followup_apply.set(None);
+        self.apply_layout();
+        if with_fix {
+            self.fix_oversized_windows();
+        }
+        true
+    }
+
     /// HX-06: query whether a window is in pseudo-tile mode.
     pub fn is_pseudo(&self, wid: WindowId) -> bool {
         self.pseudo_windows.contains(&wid)
@@ -3174,11 +3219,14 @@ impl WmState {
         self.focused_monitor = show_on_monitor;
         self.sync_workspace_visibility();
 
-        // Apply layout with double-apply for cross-monitor moves
+        // Apply layout with deferred second pass for cross-monitor
+        // moves (HX-99-F perf #126). Previously this block ran
+        // `apply_layout(); sleep(50ms); apply_layout(); fix_oversized()`
+        // inline, blocking the runloop and starving the ers border
+        // updater. The deferred path schedules the followup for ~50ms
+        // hence; the polling tick fires it.
         self.apply_layout();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        self.apply_layout();
-        self.fix_oversized_windows();
+        self.schedule_followup_apply(true);
         self.ffm_last_window = None; // Reset FFM state for new workspace
         if let Some(wid) = self.workspaces.get(target_idx).focused {
             self.focus_window(wid);
@@ -3929,11 +3977,9 @@ impl WmState {
             self.focused_monitor = 0;
         }
 
-        // --- Phase 5: Double-apply layout ---
+        // --- Phase 5: Deferred double-apply (HX-99-F perf #126) ---
         self.apply_layout();
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        self.apply_layout();
-        self.fix_oversized_windows();
+        self.schedule_followup_apply(true);
 
         tracing::info!(
             old_count,
@@ -4185,10 +4231,10 @@ impl WmState {
             }
         }
         if added {
+            // HX-99-F perf #126: deferred followup instead of inline
+            // sleep(50ms) + apply + fix_oversized.
             self.apply_layout();
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            self.apply_layout();
-            self.fix_oversized_windows();
+            self.schedule_followup_apply(true);
         }
         self.install_observer_for_app(pid, &ax_app, owner, "");
     }

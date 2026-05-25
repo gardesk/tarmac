@@ -628,6 +628,10 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             // storm once quiet mode expires, so focus settles correctly
             // without the storm being able to drive thousands of warps.
             state.drain_pending_ext_focus();
+            // HX-99-F perf #126: cross-monitor/workspace-switch/monitor-
+            // reconfig paths now defer their second apply_layout to here
+            // instead of blocking the runloop with a 50ms sleep.
+            state.drain_pending_followup_apply();
             // Once a second (timer fires every 50ms), reconcile the
             // registry against the live WindowServer state. This is the
             // safety net that catches windows whose close was missed by
