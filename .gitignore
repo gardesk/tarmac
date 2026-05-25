@@ -11,6 +11,7 @@ target/
 
 # Internal
 docs/
+.docs/
 .fackr/
 .claude/
 CLAUDE.md
