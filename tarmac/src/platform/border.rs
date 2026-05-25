@@ -324,11 +324,13 @@ impl BorderManager {
 
     fn write_cmd(&mut self, args: std::fmt::Arguments<'_>) {
         let Some(stdin) = self.stdin.as_mut() else {
+            tracing::warn!(?args, "border: write_cmd dropped — no stdin pipe");
             return;
         };
         // Both write_fmt and flush can fail if ers died; the
         // health_check watchdog will respawn. Silently drop here.
-        if stdin.write_fmt(args).is_err() {
+        if let Err(e) = stdin.write_fmt(args) {
+            tracing::warn!(?args, err = %e, "border: write_cmd failed — dropping pipe");
             // Pipe broken — discard the writer so subsequent calls
             // don't reattempt. Health check will respawn ers and
             // re-establish a fresh pipe.
@@ -337,7 +339,11 @@ impl BorderManager {
             self.last_move_sent.clear();
             return;
         }
-        let _ = stdin.flush();
+        if let Err(e) = stdin.flush() {
+            tracing::warn!(?args, err = %e, "border: write_cmd flush failed");
+        } else {
+            tracing::trace!(?args, "border: write_cmd ok");
+        }
     }
 }
 
