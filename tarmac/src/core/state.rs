@@ -615,39 +615,50 @@ impl WmState {
             let ws_idx = monitor.active_workspace;
             let ws = self.workspaces.get(ws_idx);
             let screen_rect = self.monitor_rect(mi);
+            // Perf #130: derive both the "show these" (active stack
+            // members + BSP leaves) and "hide these" (non-active stack
+            // members) sets from a single render-geometry traversal
+            // instead of walking the BSP tree twice.
+            //
+            // calculate_geometries emits stack members with the active
+            // member LAST (see tree.rs Stack branch); BSP leaves appear
+            // exactly once with unique rects. So the *last* occurrence
+            // of each Rect in render_geometries is the visible tile;
+            // earlier occurrences sharing a rect are staged-off stack
+            // members.
             let geometries = self.workspace_render_geometries(ws_idx, screen_rect);
-            // Only the active member of each stack lives at the tile rect.
-            // Non-active members get staged off-screen via hide_window so
-            // macOS's per-app global z-order cannot surface a non-active
-            // member above the active one (which happened when stacks
-            // contained windows from different apps and the user focused
-            // a sibling of one of those apps elsewhere — e.g. a Ghostty
-            // member of a Messages-active stack rising to the top of the
-            // tile when the user focused a different Ghostty on another
-            // monitor). focus_geometries returns one entry per visible
-            // tile (active for stacks, the leaf window for BSP leaves), so
-            // the difference vs render geometries is exactly the set of
-            // non-active stack members.
-            let actives = self.workspace_focus_geometries(ws_idx, screen_rect);
-            let active_ids: std::collections::HashSet<super::window::WindowId> =
-                actives.iter().map(|(w, _)| *w).collect();
+            let mut active_ids: std::collections::HashSet<super::window::WindowId> =
+                std::collections::HashSet::with_capacity(geometries.len());
+            let mut seen_rects: Vec<Rect> = Vec::with_capacity(geometries.len());
+            // Walk in reverse so the LAST entry per shared-rect wins.
+            for (wid, rect) in geometries.iter().rev() {
+                let already = seen_rects.iter().any(|r| {
+                    (r.x - rect.x).abs() < 0.5
+                        && (r.y - rect.y).abs() < 0.5
+                        && (r.width - rect.width).abs() < 0.5
+                        && (r.height - rect.height).abs() < 0.5
+                });
+                if !already {
+                    seen_rects.push(*rect);
+                    active_ids.insert(*wid);
+                }
+            }
             tracing::debug!(monitor = mi, workspace = %ws.id, windows = geometries.len(),
                 sr_x = screen_rect.x, sr_y = screen_rect.y, sr_w = screen_rect.width,
                 sr_h = screen_rect.height, "apply_layout");
 
-            for (wid, rect) in &actives {
-                tracing::trace!(
-                    wid,
-                    x = rect.x,
-                    y = rect.y,
-                    w = rect.width,
-                    h = rect.height,
-                    "tile"
-                );
-                self.show_window(*wid, *rect);
-            }
-            for (wid, _) in &geometries {
-                if !active_ids.contains(wid) {
+            for (wid, rect) in &geometries {
+                if active_ids.contains(wid) {
+                    tracing::trace!(
+                        wid,
+                        x = rect.x,
+                        y = rect.y,
+                        w = rect.width,
+                        h = rect.height,
+                        "tile"
+                    );
+                    self.show_window(*wid, *rect);
+                } else {
                     tracing::trace!(wid, "stack non-active hidden off-screen");
                     self.hide_window(*wid);
                 }
