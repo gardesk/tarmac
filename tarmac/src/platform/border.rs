@@ -288,7 +288,13 @@ impl BorderManager {
         });
         if !unchanged {
             self.last_move_sent.insert(wid, rect);
-            self.write_cmd(format_args!("move {wid}\n"));
+            // Perf #135 follow-on: send full target geometry so ers
+            // can snap the border to tarmac's intent without polling
+            // SLS (which lags ~800ms behind tarmac's AX writes).
+            self.write_cmd(format_args!(
+                "move {wid} {} {} {} {}\n",
+                rect.x, rect.y, rect.width, rect.height
+            ));
         }
     }
 
