@@ -1,10 +1,18 @@
 //! Border management via ers subprocess.
-//! ers is a standalone border renderer that handles its own window events,
-//! focus detection, and rendering. Tarmac just spawns and manages the process.
+//! ers runs as a child process; tarmac pushes focus/move/destroy hints
+//! over its stdin (perf #135). ers used to be fully autonomous,
+//! polling SLS on its own cadence, which left borders trailing tarmac's
+//! synchronously-known layout state by up to ~0.5s. The stdin protocol
+//! lets ers act on tarmac's intent immediately and covers AX-driven
+//! moves where SLS doesn't even fire a notification.
 
+use std::collections::HashMap;
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command};
+use std::process::{Child, ChildStdin, Command, Stdio};
 use std::time::{Duration, Instant};
+
+use crate::core::tree::Rect;
 
 /// RGBA color for border configuration.
 #[derive(Debug, Clone, Copy)]
@@ -69,6 +77,17 @@ pub struct BorderManager {
     pub unfocused_color: BorderColor,
     pub radius: f64,
     child: Option<Child>,
+    /// Perf #135: stdin handle for the ers control channel. Tarmac
+    /// writes newline-delimited commands (`focus <wid>`, `move <wid>`,
+    /// `destroy <wid>`); ers parses them and folds into its existing
+    /// event pipeline.
+    stdin: Option<BufWriter<ChildStdin>>,
+    /// Last focus wid sent on the control channel, so `update_border`
+    /// only writes `focus <wid>` when it actually changes.
+    last_focus_sent: Option<u32>,
+    /// Last rect sent for each wid, so duplicate `move <wid>` commands
+    /// (apply_layout re-runs that don't change geometry) get dropped.
+    last_move_sent: HashMap<u32, Rect>,
     /// Timestamps of recent automatic respawns (oldest first). Used to
     /// rate-limit the watchdog so a permanently-broken ers backs off
     /// instead of fork-bombing the system.
@@ -94,6 +113,9 @@ impl BorderManager {
             unfocused_color: BorderColor::from_hex("#2d2d2d"),
             radius: 10.0,
             child: None,
+            stdin: None,
+            last_focus_sent: None,
+            last_move_sent: HashMap::new(),
             recent_restarts: Vec::new(),
             backoff_until: None,
             last_health_check: None,
@@ -137,10 +159,18 @@ impl BorderManager {
             .arg(self.focused_color.hex_string())
             .arg("--inactive")
             .arg(self.unfocused_color.hex_string())
+            .stdin(Stdio::piped())
             .spawn()
         {
-            Ok(child) => {
+            Ok(mut child) => {
+                // Capture stdin for the perf #135 control channel.
+                self.stdin = child.stdin.take().map(BufWriter::new);
                 self.child = Some(child);
+                // The new ers process has no idea what's focused or
+                // where anything is — invalidate our per-wid caches so
+                // the next layout pass re-sends the current state.
+                self.last_focus_sent = None;
+                self.last_move_sent.clear();
             }
             Err(e) => {
                 tracing::warn!(err = %e, ers_bin = ?ers_bin, "failed to spawn ers");
@@ -150,11 +180,16 @@ impl BorderManager {
 
     /// Kill the managed ers process if running.
     pub fn kill(&mut self) {
+        // Drop the stdin writer first so ers sees EOF and exits its
+        // reader thread cleanly.
+        self.stdin = None;
         if let Some(ref mut child) = self.child {
             let _ = child.kill();
             let _ = child.wait();
         }
         self.child = None;
+        self.last_focus_sent = None;
+        self.last_move_sent.clear();
     }
 
     /// Restart ers with current settings (used on config reload). Resets
@@ -235,16 +270,68 @@ impl BorderManager {
         self.spawn();
     }
 
-    // Stub methods for compatibility with existing state.rs calls.
-    // ers handles all of these independently.
-    pub fn update_border(&mut self, _wid: u32, _rect: crate::core::tree::Rect, _focused: bool) {}
-    pub fn remove_border(&mut self, _wid: u32) {}
-    pub fn update_focus(
-        &mut self,
-        _old: Option<u32>,
-        _new: Option<u32>,
-        _get_rect: impl Fn(u32) -> Option<crate::core::tree::Rect>,
-    ) {
+    /// Perf #135: push a `move <wid>` hint to ers so it re-syncs the
+    /// overlay's geometry to match. Dedups against the last sent rect
+    /// — apply_layout re-runs that don't change geometry don't bombard
+    /// the pipe. When `focused` is true and differs from the last
+    /// focus hint we also push `focus <wid>`.
+    pub fn update_border(&mut self, wid: u32, rect: Rect, focused: bool) {
+        if focused {
+            self.send_focus(wid);
+        }
+        let cached = self.last_move_sent.get(&wid).copied();
+        let unchanged = cached.is_some_and(|c| {
+            (c.x - rect.x).abs() < 1.0
+                && (c.y - rect.y).abs() < 1.0
+                && (c.width - rect.width).abs() < 1.0
+                && (c.height - rect.height).abs() < 1.0
+        });
+        if !unchanged {
+            self.last_move_sent.insert(wid, rect);
+            self.write_cmd(format_args!("move {wid}\n"));
+        }
+    }
+
+    /// Tell ers a window is gone.
+    pub fn remove_border(&mut self, wid: u32) {
+        self.last_move_sent.remove(&wid);
+        if self.last_focus_sent == Some(wid) {
+            self.last_focus_sent = None;
+        }
+        self.write_cmd(format_args!("destroy {wid}\n"));
+    }
+
+    /// Tell ers about a focus change. `0` clears focus. Dedups so
+    /// repeated apply_layouts on the same focused window don't spam
+    /// ers; pass-through when it actually changes.
+    pub fn notify_focus(&mut self, wid: u32) {
+        self.send_focus(wid);
+    }
+
+    fn send_focus(&mut self, wid: u32) {
+        if self.last_focus_sent == Some(wid) {
+            return;
+        }
+        self.last_focus_sent = Some(wid);
+        self.write_cmd(format_args!("focus {wid}\n"));
+    }
+
+    fn write_cmd(&mut self, args: std::fmt::Arguments<'_>) {
+        let Some(stdin) = self.stdin.as_mut() else {
+            return;
+        };
+        // Both write_fmt and flush can fail if ers died; the
+        // health_check watchdog will respawn. Silently drop here.
+        if stdin.write_fmt(args).is_err() {
+            // Pipe broken — discard the writer so subsequent calls
+            // don't reattempt. Health check will respawn ers and
+            // re-establish a fresh pipe.
+            self.stdin = None;
+            self.last_focus_sent = None;
+            self.last_move_sent.clear();
+            return;
+        }
+        let _ = stdin.flush();
     }
 }
 

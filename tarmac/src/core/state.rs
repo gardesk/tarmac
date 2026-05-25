@@ -2099,26 +2099,13 @@ impl WmState {
         }
         self.enforce_floating_levels(id);
 
-        // Update border colors on focus change
+        // Perf #135: tell ers about the focus change directly via the
+        // control channel. ers no longer polls get_front_window to find
+        // out — tarmac tells it. Old border updates happen via
+        // update_borders (called from apply_layout); this just delivers
+        // the focus hint.
         if self.borders.is_enabled() && old_focused != Some(id) {
-            // Get rects for old and new focused windows from registry
-            let old_rect = old_focused.and_then(|oid| {
-                self.registry
-                    .get(oid)
-                    .map(|w| Rect::new(w.x, w.y, w.width, w.height))
-            });
-            let new_rect = self
-                .registry
-                .get(id)
-                .map(|w| Rect::new(w.x, w.y, w.width, w.height));
-            if let Some(rect) = old_rect
-                && let Some(oid) = old_focused
-            {
-                self.borders.update_border(oid, rect, false);
-            }
-            if let Some(rect) = new_rect {
-                self.borders.update_border(id, rect, true);
-            }
+            self.borders.notify_focus(id);
         }
 
         tracing::debug!(id, activate_app, "focused window");
