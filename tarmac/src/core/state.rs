@@ -166,6 +166,15 @@ pub struct WmState {
     /// observed in dogfooding). Cleared on show_window and on window
     /// removal so a re-tile after a focus/show correctly re-hides.
     hidden_offscreen: std::cell::RefCell<std::collections::HashSet<WindowId>>,
+    /// HX-99-F perf #128: last AX-applied rect per window. `show_window`
+    /// consults this to skip the ~12-call AX/SLS sequence (size, pos,
+    /// size, alpha asserts, validation reads, EUI toggle) when the
+    /// incoming rect matches the cached rect within 1 px and the window
+    /// wasn't just unhidden. Saves ~70-200 ms per apply_layout call on
+    /// workspaces with 6+ tiles, since most apply_layout passes don't
+    /// actually change any geometry (focus-only changes, redundant
+    /// post-event re-applies). Cleared on window remove.
+    last_applied_rect: std::cell::RefCell<HashMap<WindowId, Rect>>,
     /// HX-99-F perf #126: deferred "second pass" after a cross-monitor /
     /// workspace-switch / monitor-reconfig action. Sites used to do
     /// `apply_layout(); sleep(50ms); apply_layout(); fix_oversized()`
@@ -231,6 +240,7 @@ impl WmState {
             ax_write_last: std::cell::RefCell::new(HashMap::new()),
             pending_show_window: std::cell::RefCell::new(HashMap::new()),
             hidden_offscreen: std::cell::RefCell::new(std::collections::HashSet::new()),
+            last_applied_rect: std::cell::RefCell::new(HashMap::new()),
             pending_followup_apply: std::cell::Cell::new(None),
             rules: Vec::new(),
             active_specials: Vec::new(),
@@ -689,8 +699,11 @@ impl WmState {
             return;
         };
 
-        // No longer off-screen — the safety-net sweep skips visible
-        // wids by consulting this set.
+        // Capture pre-state for the rect-unchanged short circuit
+        // (perf #128). Must happen *before* removing from
+        // hidden_offscreen so we know whether the window was just
+        // unhidden (in which case alpha re-assertion is mandatory).
+        let was_hidden = self.hidden_offscreen.borrow().contains(&wid);
         self.hidden_offscreen.borrow_mut().remove(&wid);
 
         // HX-08: throttle per-window to ~60 Hz. Rapid back-to-back
@@ -716,6 +729,22 @@ impl WmState {
             let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
             let _ = ax_set_position(ax_ref, px, py);
             let _ = crate::platform::skylight::move_window(wid, px, py);
+            return;
+        }
+
+        // Perf #128: skip the full size/pos/size + alpha + EUI sequence
+        // when the rect matches the last-applied rect AND the window
+        // wasn't just unhidden. Most apply_layout passes (focus-only
+        // changes, redundant post-event re-applies) don't actually
+        // change any geometry; this short-circuit saves ~12 FFI calls
+        // per visible tile per pass.
+        if !was_hidden
+            && let Some(cached) = self.last_applied_rect.borrow().get(&wid)
+            && (cached.x - rect.x).abs() < 1.0
+            && (cached.y - rect.y).abs() < 1.0
+            && (cached.width - rect.width).abs() < 1.0
+            && (cached.height - rect.height).abs() < 1.0
+        {
             return;
         }
 
@@ -754,7 +783,12 @@ impl WmState {
         let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 1.0);
         let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
 
-        if let (Ok((ax, ay)), Ok((aw, ah))) = (ax_get_position(ax_ref), ax_get_size(ax_ref)) {
+        // Mismatch diagnostic: two extra AX reads to log a debug
+        // message. Gate behind tracing::enabled! so production builds
+        // don't pay the round-trip cost (perf #128).
+        if tracing::enabled!(tracing::Level::DEBUG)
+            && let (Ok((ax, ay)), Ok((aw, ah))) = (ax_get_position(ax_ref), ax_get_size(ax_ref))
+        {
             let dx = (ax - rect.x).abs();
             let dy = (ay - rect.y).abs();
             let dw = (aw - rect.width).abs();
@@ -781,6 +815,10 @@ impl WmState {
         {
             let _ = ax_set_bool(app, &eui_key, true);
         }
+
+        // Cache the applied rect so the next show_window can short-
+        // circuit if nothing changed (perf #128).
+        self.last_applied_rect.borrow_mut().insert(wid, rect);
     }
 
     /// After layout, check for windows that overflow their tiles.
@@ -3284,6 +3322,10 @@ impl WmState {
         // Mark as offscreen so the apply_layout safety-net sweep skips
         // this wid on subsequent passes until something shows it again.
         self.hidden_offscreen.borrow_mut().insert(wid);
+        // The cached "last applied rect" is no longer accurate — the
+        // window is now parked off-screen. Drop it so the next
+        // show_window re-applies the full sequence (perf #128).
+        self.last_applied_rect.borrow_mut().remove(&wid);
     }
 
     fn hide_window_on_frame(&self, wid: WindowId, hide_frame: Rect, monitor_idx: Option<usize>) {
@@ -4272,6 +4314,7 @@ impl WmState {
         self.ax_write_last.borrow_mut().remove(&id);
         self.pending_show_window.borrow_mut().remove(&id);
         self.hidden_offscreen.borrow_mut().remove(&id);
+        self.last_applied_rect.borrow_mut().remove(&id);
         self.prune_focus_memory_for_window(id);
 
         // Find the workspace containing this window and remove from it
@@ -4345,6 +4388,7 @@ impl WmState {
             self.ax_write_last.borrow_mut().remove(&w.id);
             self.pending_show_window.borrow_mut().remove(&w.id);
             self.hidden_offscreen.borrow_mut().remove(&w.id);
+            self.last_applied_rect.borrow_mut().remove(&w.id);
             self.prune_focus_memory_for_window(w.id);
             // Find the workspace containing this window and remove from it
             if let Some(ws_idx) = self.workspaces.find_window(w.id) {
