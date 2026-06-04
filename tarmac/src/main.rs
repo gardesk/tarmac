@@ -517,6 +517,10 @@ fn process_ipc_command(
                 state.close_focused();
                 Response::ok_empty()
             }
+            "spawn-terminal" => {
+                spawn_terminal();
+                Response::ok_empty()
+            }
             "equalize" => {
                 state.equalize();
                 Response::ok_empty()
