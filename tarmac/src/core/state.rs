@@ -10,7 +10,7 @@ use crate::platform::accessibility::{
     ax_perform_action, ax_set_position, ax_set_size, is_manageable_window,
 };
 use crate::platform::application::{
-    discover_all_windows, discover_applications, enumerate_windows,
+    discover_all_windows, discover_applications, enumerate_windows, get_cg_window_list,
 };
 use crate::platform::display::warp_mouse;
 use crate::platform::observer::{AppObserver, WindowEvent};
@@ -4238,10 +4238,28 @@ impl WmState {
 
     // --- App lifecycle ---
 
-    pub fn on_new_window_detected(&mut self, pid: i32, owner: &str, _wid: u32) {
+    pub fn on_new_window_detected(&mut self, pid: i32, owner: &str, wid: u32) {
         if self.registry.all().any(|w| w.app_pid == pid) && self.observers.contains_key(&pid) {
+            // App is already observed: new windows are normally tiled by the
+            // AX observer's AXWindowCreated handler. Drain queued AX events
+            // first so that fast path gets first crack at this window.
             self.process_events();
-            return;
+            if self.registry.contains(wid as WindowId) {
+                return;
+            }
+            // Backstop: the AXWindowCreated notification was missed (AX is
+            // flaky) or the window wasn't on screen when it fired, so the fast
+            // path didn't adopt it. The poller only ever reports on-screen
+            // wids, so this window is real and must be tiled — otherwise it
+            // stays untracked and floats forever. Fall through to enumerate
+            // this app's windows and adopt the missing one(s); the per-window
+            // registry.contains guard below makes this idempotent, and
+            // install_observer_for_app is a no-op for an already-observed app.
+            tracing::info!(
+                pid,
+                wid,
+                "poller backstop: on-screen window not adopted by AX observer, enumerating"
+            );
         }
 
         // Resolve actual app name from NSRunningApplication (CGWindowList owner is often empty)
@@ -4748,27 +4766,32 @@ impl WmState {
                 let title = ax_get_string(element, "AXTitle").unwrap_or_default();
                 let (x, y) = ax_get_position(element).unwrap_or((0.0, 0.0));
                 let (w, h) = ax_get_size(element).unwrap_or((0.0, 0.0));
-                // Reject phantom windows: zero/tiny size or empty-titled
-                // duplicate from an already-tracked app.
-                if w < 50.0 || h < 50.0 {
+                // Distinguish a real window from an invisible helper window.
+                // Apps like Messages, Codex, WezTerm create AXStandardWindow
+                // elements with valid geometry that never appear on screen.
+                //
+                // Do NOT use AXTitle for this: a legitimate new window — e.g.
+                // a fresh terminal opened with Cmd+N inside an already-tracked
+                // single instance — has an empty AXTitle for the first ~150ms
+                // until its content renders, even though its window is on
+                // screen immediately. AXTitle therefore races window creation
+                // and wrongly rejects real windows. The WindowServer's
+                // on-screen list (CGWindowList) is the reliable, race-free
+                // discriminator: invisible helpers are never in it.
+                //
+                // If the window isn't on screen yet (not composited, or on
+                // another Space), don't reject it permanently — just skip
+                // tiling here. The CGWindowList poller is the backstop and
+                // adopts it via on_new_window_detected once it appears.
+                let on_screen = get_cg_window_list().iter().any(|cg| cg.wid == id);
+                if !on_screen {
                     tracing::debug!(
                         id,
                         app = app_name,
+                        title = %title,
                         w,
                         h,
-                        "skipping phantom window (too small)"
-                    );
-                    return;
-                }
-                // Apps like Messages, Codex, WezTerm create invisible helper
-                // windows with AXStandardWindow subrole and valid sizes but
-                // empty titles. If the app already has a window in the registry,
-                // reject empty-titled new windows as phantoms.
-                if title.is_empty() && self.registry.all().any(|w| w.app_pid == *pid) {
-                    tracing::debug!(
-                        id,
-                        app = app_name,
-                        "skipping phantom window (empty title, app already tracked)"
+                        "AX-created window not on screen yet; deferring to poller backstop"
                     );
                     return;
                 }
