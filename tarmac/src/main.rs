@@ -677,6 +677,9 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             state.refresh_stale_ax_refs();
             if tick.is_multiple_of(20) {
                 state.reconcile_registry_against_window_server();
+                // CF-3: adopt any window orphaned in no workspace (after the
+                // reap above, so a vanished wid isn't re-homed then reaped).
+                state.reconcile_orphaned_windows();
                 // OBS-D2: retry AX notification registrations that failed
                 // while a slow-launch app's AX server was warming up.
                 state.retry_pending_observer_registrations();
