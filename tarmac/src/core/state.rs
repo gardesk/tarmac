@@ -4954,6 +4954,19 @@ impl WmState {
 
         self.monitors = new_monitors;
         self.active_specials = remapped_specials;
+
+        // The off-screen hide park is monitor-relative: a window parked just
+        // beyond the old monitor's edge can land back ON screen when that
+        // monitor grows or a new display extends the desktop. But it's still
+        // flagged `hidden_offscreen`, so both apply_layout (the stack-hide
+        // skip) and enforce_hidden_workspaces (the already-hidden skip) refuse
+        // to re-park it — leaving a stale rogue visible behind other
+        // workspaces, with borders drawn against garbage geometry. Drop both
+        // caches so the sync + apply below re-evaluate every window's hide/show
+        // and geometry fresh against the new monitor layout.
+        self.hidden_offscreen.borrow_mut().clear();
+        self.last_applied_rect.borrow_mut().clear();
+
         self.sync_workspace_visibility();
 
         // FW-8: rescue floats stranded in a detached display's coordinate
