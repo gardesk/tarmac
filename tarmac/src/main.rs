@@ -974,11 +974,23 @@ fn process_ipc_command(
                     .registry
                     .all()
                     .map(|w| {
+                        // Workspace membership + geometry let external tooling
+                        // (e.g. the e2e harness) assert placement and detect
+                        // parked/off-screen windows without a second query.
+                        let workspace = state
+                            .workspaces
+                            .find_window(w.id)
+                            .map(|idx| state.workspaces.get(idx).id.to_string());
                         serde_json::json!({
                             "id": w.id,
                             "app_name": w.app_name,
+                            "app_bundle_id": w.app_bundle_id,
                             "title": w.title,
                             "floating": w.floating,
+                            "minimized": w.minimized,
+                            "workspace": workspace,
+                            "x": w.x, "y": w.y,
+                            "width": w.width, "height": w.height,
                         })
                     })
                     .collect();
