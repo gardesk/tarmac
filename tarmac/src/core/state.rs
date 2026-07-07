@@ -5692,6 +5692,12 @@ impl WmState {
             return;
         }
 
+        // OBS-D5: cap AX round-trip time so one beachballed app can't
+        // freeze the main runloop (hotkeys/IPC/borders) for the ~6s
+        // system default per blocked call. Applies to all synchronous AX
+        // messaging on this app element and its descendants.
+        let _ = unsafe { ax_ref.set_messaging_timeout(1.0) };
+
         let queue = Rc::clone(&self.event_queue);
         let cb_name = name.to_string();
         let cb_bundle = bundle_id.to_string();
