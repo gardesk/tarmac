@@ -386,6 +386,26 @@ impl WmState {
         Rect::new(overlay_x, overlay_y, overlay_w, overlay_h)
     }
 
+    /// FW-8: if a scratchpad overlay is active on the focused monitor and
+    /// `app_pid` already owns a window in it, return that special workspace's
+    /// index — a new window from the same app should join the overlay instead
+    /// of the tiled workspace behind it. `None` during startup restore (the
+    /// session file drives placement) or when no overlay matches.
+    fn overlay_join_target(&self, app_pid: i32) -> Option<usize> {
+        if self.restoring_layout.get() {
+            return None;
+        }
+        let mi = self.focused_monitor;
+        let sidx = self.active_specials.get(mi).copied().flatten()?;
+        let owns = self
+            .workspaces
+            .get(sidx)
+            .all_window_ids()
+            .iter()
+            .any(|wid| self.registry.get(*wid).map(|w| w.app_pid) == Some(app_pid));
+        owns.then_some(sidx)
+    }
+
     /// Active workspace (mutable).
     pub fn active_workspace_mut(&mut self) -> &mut super::workspace::Workspace {
         let idx = self.active_ws_idx();
@@ -2608,6 +2628,13 @@ impl WmState {
                 original_tile_rect: geometry,
             });
             self.drag_threshold_active = false;
+            // FW-8: suppress focus adoption for the duration of the drag.
+            // A float drag sweeps the cursor over other windows; without
+            // this, focus-follows-mouse or an external AXFocusedWindow event
+            // steals focus mid-drag and the border/raise flickers between the
+            // dragged window and whatever it passes over. update_drag refreshes
+            // this while the drag is live (it only refreshes when already set).
+            self.arm_drag_focus_suppression();
             tracing::debug!(id, "move drag started (floating)");
             return;
         }
@@ -2695,6 +2722,9 @@ impl WmState {
             // move drag must not route this resize through the
             // threshold-float branch.
             self.drag_threshold_active = false;
+            // FW-8: suppress focus adoption during the resize, same as the
+            // move drag — the cursor may cross other windows as the frame grows.
+            self.arm_drag_focus_suppression();
             tracing::debug!(id, "resize drag started");
         }
     }
@@ -4013,11 +4043,73 @@ impl WmState {
             return geom;
         }
         let uf = self.monitors[self.focused_monitor.min(self.monitors.len() - 1)].usable_frame;
-        let width = geom.width.clamp(50.0, uf.width);
-        let height = geom.height.clamp(50.0, uf.height);
-        let x = geom.x.clamp(uf.x, uf.x + uf.width - width);
-        let y = geom.y.clamp(uf.y, uf.y + uf.height - height);
-        Rect::new(x, y, width, height)
+        clamp_float_into(geom, uf)
+    }
+
+    /// Resolve the geometry a new float should take. Rule-specified geometry
+    /// is absolute user intent, so FW-8 force-fits it into the target monitor
+    /// frame — a rule with an oversized or off-monitor rect can't otherwise
+    /// spawn an unreachable float. A window's own reported geometry is trusted
+    /// unless it's off every monitor (the unclean-restart park), in which case
+    /// `sanitize_float_geometry` rescues it.
+    fn resolve_float_geometry(
+        &self,
+        rule_geometry: Option<(f64, f64, f64, f64)>,
+        actual: Rect,
+        frame: Rect,
+    ) -> Rect {
+        match rule_geometry {
+            Some((gx, gy, gw, gh)) => clamp_float_into(Rect::new(gx, gy, gw, gh), frame),
+            None => self.sanitize_float_geometry(actual),
+        }
+    }
+
+    /// FW-8: after a display reconfigure, remap any float whose center now
+    /// lands on no monitor (its monitor was detached or moved) into its
+    /// workspace's current target monitor. Floats still on a surviving monitor
+    /// are left untouched. Without this a float parked on a disconnected
+    /// display keeps absolute coordinates pointing into a gone coordinate
+    /// space — invisible, un-hit-testable, and dragging its ghost does nothing.
+    fn remap_floats_after_monitor_change(&mut self) {
+        if self.monitors.is_empty() {
+            return;
+        }
+        for ws_idx in 0..self.workspaces.count() {
+            let target = self
+                .monitor_showing_workspace(ws_idx)
+                .or_else(|| self.preferred_monitor_for_workspace(ws_idx))
+                .map(|mi| self.monitor_rect(mi))
+                .unwrap_or_else(|| self.monitor_rect(0));
+            let remaps: Vec<(WindowId, Rect)> = self
+                .workspaces
+                .get(ws_idx)
+                .floating
+                .iter()
+                .filter(|f| {
+                    let cx = f.geometry.x + f.geometry.width / 2.0;
+                    let cy = f.geometry.y + f.geometry.height / 2.0;
+                    !self
+                        .monitors
+                        .iter()
+                        .any(|m| m.usable_frame.contains_point(cx, cy))
+                })
+                .map(|f| (f.id, clamp_float_into(f.geometry, target)))
+                .collect();
+            for (id, rect) in remaps {
+                tracing::info!(id, ws = ws_idx + 1, "remapping float onto surviving monitor");
+                if let Some(fw) = self
+                    .workspaces
+                    .get_mut(ws_idx)
+                    .floating
+                    .iter_mut()
+                    .find(|f| f.id == id)
+                {
+                    fw.geometry = rect;
+                }
+                self.registry
+                    .update_geometry(id, rect.x, rect.y, rect.width, rect.height);
+            }
+        }
     }
 
     /// Shared bookkeeping for every hide path. A parked wid enters
@@ -4794,6 +4886,10 @@ impl WmState {
         self.active_specials = remapped_specials;
         self.sync_workspace_visibility();
 
+        // FW-8: rescue floats stranded in a detached display's coordinate
+        // space before apply_layout writes their (now off-screen) geometry.
+        self.remap_floats_after_monitor_change();
+
         // Map old focused_monitor through display ID → new index
         if let Some(old_did) = old_focused_display_id {
             if let Some(new_idx) = self.monitors.iter().position(|m| m.id == old_did) {
@@ -5537,11 +5633,7 @@ impl WmState {
                 let special_idx = self.workspaces.special_index(special_name);
                 let sr = self.focused_rect();
                 let float_geom = should_float.then(|| {
-                    self.sanitize_float_geometry(
-                        rule_geometry
-                            .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
-                            .unwrap_or_else(|| Rect::new(x, y, width, height)),
-                    )
+                    self.resolve_float_geometry(rule_geometry, Rect::new(x, y, width, height), sr)
                 });
                 let ws = self.workspaces.get_mut(special_idx);
                 if let Some(geom) = float_geom {
@@ -5571,10 +5663,10 @@ impl WmState {
                     .unwrap_or(self.focused_rect());
 
                 let float_geom = should_float.then(|| {
-                    self.sanitize_float_geometry(
-                        rule_geometry
-                            .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
-                            .unwrap_or_else(|| Rect::new(x, y, width, height)),
+                    self.resolve_float_geometry(
+                        rule_geometry,
+                        Rect::new(x, y, width, height),
+                        target_rect,
                     )
                 });
                 let ws = self.workspaces.get_or_create(target_idx);
@@ -5600,14 +5692,34 @@ impl WmState {
                     }
                 }
             }
+        } else if let Some(sidx) = self.overlay_join_target(app_pid) {
+            // FW-8: a scratchpad overlay is up on the focused monitor and this
+            // new window belongs to an app already in that overlay — join it
+            // there rather than dropping onto the tiled workspace behind it
+            // (e.g. a new terminal window from a scratchpad terminal). The
+            // overlay is visible, so no hide.
+            let overlay_rect = self.special_overlay_rect(sidx, self.focused_monitor);
+            if should_float {
+                let geom = self.resolve_float_geometry(
+                    rule_geometry,
+                    Rect::new(x, y, width, height),
+                    overlay_rect,
+                );
+                let ws = self.workspaces.get_mut(sidx);
+                ws.floating
+                    .push(super::workspace::FloatingWindow { id: *id, geometry: geom });
+                ws.record_focus(*id);
+            } else {
+                let ws = self.workspaces.get_mut(sidx);
+                ws.tree.insert_with_rect(*id, ws.focused, overlay_rect);
+                ws.record_focus(*id);
+            }
+            tracing::info!(id, app_name, special = sidx, "new window joined active scratchpad overlay");
         } else {
             let sr = self.focused_rect();
             if should_float {
-                let geom = self.sanitize_float_geometry(
-                    rule_geometry
-                        .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
-                        .unwrap_or_else(|| Rect::new(x, y, width, height)),
-                );
+                let geom =
+                    self.resolve_float_geometry(rule_geometry, Rect::new(x, y, width, height), sr);
                 let ws = self.active_workspace_mut();
                 ws.floating.push(super::workspace::FloatingWindow {
                     id: *id,
@@ -5914,6 +6026,17 @@ impl WmState {
             }
         }
     }
+}
+
+/// Clamp a float rect's size and position to fit within a monitor's usable
+/// frame. Shared by `sanitize_float_geometry` (off-all-monitors rescue at
+/// discovery) and `remap_floats_after_monitor_change` (display detach).
+fn clamp_float_into(geom: Rect, uf: Rect) -> Rect {
+    let width = geom.width.clamp(50.0, uf.width);
+    let height = geom.height.clamp(50.0, uf.height);
+    let x = geom.x.clamp(uf.x, uf.x + uf.width - width);
+    let y = geom.y.clamp(uf.y, uf.y + uf.height - height);
+    Rect::new(x, y, width, height)
 }
 
 /// Check if a window should automatically float based on its subrole and size.
@@ -7083,6 +7206,106 @@ mod tests {
         // A healthy rect is untouched.
         let healthy = Rect::new(200.0, 200.0, 800.0, 600.0);
         assert_eq!(state.sanitize_float_geometry(healthy), healthy);
+    }
+
+    #[test]
+    fn clamp_float_into_fits_size_and_position() {
+        let frame = Rect::new(0.0, 30.0, 1920.0, 1050.0);
+        // Oversized + off-origin: shrunk to the frame and pulled fully inside.
+        let clamped = clamp_float_into(Rect::new(-500.0, -500.0, 4000.0, 3000.0), frame);
+        assert_eq!((clamped.width, clamped.height), (1920.0, 1050.0));
+        assert_eq!((clamped.x, clamped.y), (0.0, 30.0));
+        // A rect already inside is untouched.
+        let inside = Rect::new(100.0, 100.0, 400.0, 300.0);
+        assert_eq!(clamp_float_into(inside, frame), inside);
+    }
+
+    #[test]
+    fn resolve_float_geometry_clamps_rule_but_trusts_actual() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 30.0, 1920.0, 1050.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let frame = state.monitors[0].usable_frame;
+        let actual = Rect::new(300.0, 300.0, 800.0, 600.0);
+
+        // A rule with an oversized rect is force-fit into the target frame.
+        let ruled = state.resolve_float_geometry(Some((0.0, 0.0, 5000.0, 5000.0)), actual, frame);
+        assert_eq!((ruled.width, ruled.height), (1920.0, 1050.0));
+
+        // No rule → the window's own on-screen geometry is trusted verbatim.
+        assert_eq!(state.resolve_float_geometry(None, actual, frame), actual);
+    }
+
+    #[test]
+    fn remap_floats_rescues_stranded_after_detach() {
+        let mut state = WmState::new();
+        // Only one monitor survives; a float sits where a detached second
+        // monitor used to be (x ~ 2500, off the surviving monitor).
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 30.0, 1920.0, 1050.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.registry.add(tracked_window(1, 100, "Stranded"));
+        state.registry.add(tracked_window(2, 100, "OnScreen"));
+        let ws = state.workspaces.get_mut(0);
+        ws.floating.push(crate::core::workspace::FloatingWindow {
+            id: 1,
+            geometry: Rect::new(2500.0, 100.0, 800.0, 600.0),
+        });
+        let onscreen = Rect::new(200.0, 200.0, 400.0, 300.0);
+        ws.floating.push(crate::core::workspace::FloatingWindow {
+            id: 2,
+            geometry: onscreen,
+        });
+
+        state.remap_floats_after_monitor_change();
+
+        let floats = &state.workspaces.get(0).floating;
+        let stranded = floats.iter().find(|f| f.id == 1).unwrap().geometry;
+        let cx = stranded.x + stranded.width / 2.0;
+        let cy = stranded.y + stranded.height / 2.0;
+        assert!(
+            state.monitors[0].usable_frame.contains_point(cx, cy),
+            "stranded float must be pulled onto the surviving monitor, got {stranded:?}"
+        );
+        // The already-on-screen float is left exactly where it was.
+        assert_eq!(floats.iter().find(|f| f.id == 2).unwrap().geometry, onscreen);
+    }
+
+    #[test]
+    fn overlay_join_target_matches_same_app_only() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 30.0, 1920.0, 1050.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let sidx = state.workspaces.special_index("scratch");
+        state.registry.add(tracked_window(1, 100, "Scratch"));
+        state
+            .workspaces
+            .get_mut(sidx)
+            .tree
+            .insert_with_rect(1, None, Rect::new(0.0, 0.0, 800.0, 600.0));
+        state.active_specials = vec![Some(sidx)];
+
+        // Same app pid as the window already in the overlay → join it.
+        assert_eq!(state.overlay_join_target(100), Some(sidx));
+        // A different app does not get pulled into the scratchpad.
+        assert_eq!(state.overlay_join_target(999), None);
+        // Never route during startup restore.
+        state.restoring_layout.set(true);
+        assert_eq!(state.overlay_join_target(100), None);
     }
 
     /// FW-2: the deferred float restack fires only once its deadline
