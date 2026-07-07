@@ -3418,9 +3418,42 @@ impl WmState {
         if window_under != self.ffm_last_window {
             self.ffm_last_window = window_under;
             if let Some(id) = window_under {
-                self.focus_window(id);
+                // Float raise-suppression: cross-app always-on-top is
+                // impossible with SIP enabled (SLSSetWindowLevel is a no-op
+                // for another app's window — proven; yabai needs a scripting
+                // addition for it). So we keep a float visually on top the
+                // only way we can without raising it above everything on a
+                // timer: by NOT raising the tiled windows *under* it when the
+                // cursor merely passes over them. Focus-follows-mouse still
+                // raises floats (they should come forward on hover) and still
+                // works normally when no float is present; a tile is brought
+                // forward by an explicit click, not a hover. Scratchpad
+                // overlays already restrict FFM to their own windows, so this
+                // only applies to the plain active workspace.
+                let suppress_raise =
+                    special_ws_idx.is_none() && self.ffm_raise_suppressed(id);
+                if suppress_raise {
+                    tracing::debug!(
+                        id,
+                        "FFM raise suppressed: float on workspace stays on top (click to raise tile)"
+                    );
+                } else {
+                    self.focus_window(id);
+                }
             }
         }
+    }
+
+    /// FFM raise-suppression predicate: true when a float is present on the
+    /// active workspace and `hovered` is a tiled window (not itself a float),
+    /// so focus-follows-mouse must not raise the tile above the on-top float.
+    /// Cross-app always-on-top is impossible with SIP enabled, so this is how a
+    /// float is kept visually on top: don't raise the tiles under it on hover.
+    /// The caller additionally skips this when a scratchpad overlay is active
+    /// (its FFM is already scoped to overlay windows).
+    fn ffm_raise_suppressed(&self, hovered: WindowId) -> bool {
+        let ws = self.active_workspace();
+        !ws.floating.is_empty() && !ws.is_floating(hovered)
     }
 
     pub fn toggle_float(&mut self) {
@@ -7376,6 +7409,38 @@ mod tests {
         state.reconcile_orphaned_windows();
 
         assert_eq!(state.workspaces.find_window(5), Some(3));
+    }
+
+    #[test]
+    fn ffm_raise_suppressed_only_for_tiles_when_float_present() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 30.0, 1920.0, 1050.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        // One tiled window, no float yet: FFM raise is never suppressed.
+        state.registry.add(tracked_window(1, 100, "TileA"));
+        state.active_workspace_mut().tree.insert_with_rect(1, None, screen);
+        assert!(!state.ffm_raise_suppressed(1));
+
+        // Add a floating window 2. Now hovering the tiled window 1 is
+        // suppressed, but hovering the float itself is not (floats still raise
+        // on hover so they come forward).
+        state.registry.add(tracked_window(2, 101, "Float"));
+        state.active_workspace_mut().floating.push(
+            crate::core::workspace::FloatingWindow {
+                id: 2,
+                geometry: Rect::new(100.0, 100.0, 400.0, 300.0),
+            },
+        );
+        assert!(state.ffm_raise_suppressed(1), "tile under a float must not raise on hover");
+        assert!(!state.ffm_raise_suppressed(2), "the float itself still raises on hover");
     }
 
     #[test]
