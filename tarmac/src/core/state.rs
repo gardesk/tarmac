@@ -5426,6 +5426,15 @@ impl WmState {
             floating: should_float,
             minimized: false,
         });
+        // OBS-D3: subscribe this specific window to AXUIElementDestroyed so
+        // its close resolves to a wid immediately (see observe_window_destroyed).
+        // The observer normally exists by now — the Created event came through
+        // it, and startup discovery installs observers after this — but the
+        // startup path also re-registers in install_observer_for_app as a
+        // backstop.
+        if let Some(observer) = self.observers.get(&app_pid) {
+            observer.observe_window_destroyed(&ax_ref);
+        }
         self.ax_refs.insert(*id, ax_ref);
 
         // Determine target workspace (rule override or active)
@@ -5784,6 +5793,21 @@ impl WmState {
         match AppObserver::new(pid, ax_ref, callback) {
             Ok(observer) => {
                 tracing::trace!(app = name, pid, "observer installed");
+                // OBS-D3: startup discovery inserts windows before observers
+                // exist, so add_window_to_active's per-window Destroyed
+                // subscription is skipped for them. Re-register here for every
+                // already-known window of this app.
+                let wids: Vec<WindowId> = self
+                    .registry
+                    .all()
+                    .filter(|w| w.app_pid == pid)
+                    .map(|w| w.id)
+                    .collect();
+                for wid in wids {
+                    if let Some(el) = self.ax_refs.get(&wid) {
+                        observer.observe_window_destroyed(el);
+                    }
+                }
                 self.observers.insert(pid, observer);
             }
             Err(e) => {

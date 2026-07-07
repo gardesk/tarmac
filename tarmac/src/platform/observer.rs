@@ -145,6 +145,27 @@ impl AppObserver {
         self.pending.borrow().is_empty()
     }
 
+    /// OBS-D3: register AXUIElementDestroyed on a specific window element,
+    /// in addition to the app-level subscription. The app-level Destroyed
+    /// notification frequently fires with an element that no longer
+    /// CFEquals the ref we retained at creation (macOS hands back a fresh
+    /// invalidated wrapper), so ~all of those events go uncorrelated and
+    /// fall through to the 1Hz CGWindowList reconcile. A per-element
+    /// subscription fires the callback with *this* element, whose identity
+    /// matches the ax_ref we stored — so the wid resolves immediately and
+    /// the tree retiles on close instead of up to a second later. Harmless
+    /// to double up: on_window_closed is idempotent. The registration
+    /// auto-invalidates when the element is destroyed, so there is nothing
+    /// to unregister.
+    pub fn observe_window_destroyed(&self, window_element: &AXUIElement) {
+        try_add_notification(
+            &self._observer,
+            window_element,
+            AX_UI_ELEMENT_DESTROYED,
+            self._callback,
+        );
+    }
+
     /// OBS-D2: retry the notifications that failed to register. Cheap
     /// no-op once fully registered. Call opportunistically (e.g. once a
     /// second from the polling tick) so slow-launch apps stop being
