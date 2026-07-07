@@ -63,6 +63,12 @@ const EXT_FOCUS_STORM_THRESHOLD: usize = 20;
 /// adoption via the polling tick.
 const EXT_FOCUS_QUIET_DURATION: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// How long pid-only external-focus adoption stays suppressed after tarmac
+/// spawns a terminal. Must outlast the spawn script's app activation
+/// (~85ms to the frontmost-app poll) and the window creation it precedes
+/// (~250ms); generous headroom for slow terminal cold starts.
+const SPAWN_ADOPT_SUPPRESS: std::time::Duration = std::time::Duration::from_millis(1000);
+
 /// Central state for the window manager.
 pub struct WmState {
     pub registry: WindowRegistry,
@@ -97,6 +103,16 @@ pub struct WmState {
     /// applied once via the polling tick after quiet expires.
     ext_focus_quiet_until: Option<std::time::Instant>,
     ext_focus_pending_target: Option<WindowId>,
+    /// Armed when tarmac itself spawns a terminal (`Action::SpawnTerminal`).
+    /// The spawn script activates the terminal app (`open -a`), and the
+    /// frontmost-app poll reports that activation ~85ms later as an external
+    /// pid-only focus event — indistinguishable from a real cmd-tab. Adopting
+    /// it resolves to the app's existing window on a *hidden* workspace and
+    /// teleports the user there before the new window is even created
+    /// (~250ms), so the new terminal lands on the wrong workspace. While this
+    /// deadline is armed, pid-only adoptions are dropped; adoptions carrying a
+    /// concrete window id (real clicks / AX focus events) still flow.
+    spawn_adopt_suppress_until: Option<std::time::Instant>,
     drag: Option<DragState>,
     pub focus_follows_mouse: bool,
     pub mouse_follows_focus: bool,
@@ -219,6 +235,7 @@ impl WmState {
             ext_focus_history: VecDeque::new(),
             ext_focus_quiet_until: None,
             ext_focus_pending_target: None,
+            spawn_adopt_suppress_until: None,
             drag: None,
             focus_follows_mouse: true,
             mouse_follows_focus: true,
@@ -2032,8 +2049,34 @@ impl WmState {
         }
     }
 
+    /// Arm suppression of pid-only external-focus adoption around a
+    /// tarmac-initiated terminal spawn. See `spawn_adopt_suppress_until`.
+    pub fn arm_spawn_adopt_suppression(&mut self) {
+        self.spawn_adopt_suppress_until =
+            Some(std::time::Instant::now() + SPAWN_ADOPT_SUPPRESS);
+    }
+
+    fn is_in_spawn_adopt_suppression(&mut self) -> bool {
+        match self.spawn_adopt_suppress_until {
+            Some(until) if std::time::Instant::now() < until => true,
+            Some(_) => {
+                self.spawn_adopt_suppress_until = None;
+                false
+            }
+            None => false,
+        }
+    }
+
     pub fn adopt_external_app_focus(&mut self, pid: i32, requested: Option<WindowId>) {
         if self.is_in_workspace_switch_silence() {
+            return;
+        }
+        // A pid-only event during spawn suppression is the echo of our own
+        // `open -a` activation, not user intent — following it would teleport
+        // to the terminal app's existing window on a hidden workspace and the
+        // about-to-be-created window would land there instead of here.
+        if requested.is_none() && self.is_in_spawn_adopt_suppression() {
+            tracing::debug!(pid, "dropping pid-only adoption during spawn suppression");
             return;
         }
         if self.should_ignore_external_focus(pid, requested) {
@@ -5875,6 +5918,89 @@ mod tests {
         assert_eq!(state.active_specials, vec![None]);
         assert_eq!(state.monitors[0].active_workspace, 1);
         assert_eq!(state.active_workspace().focused, Some(40));
+    }
+
+    /// The ws1-magnet regression: a tarmac-initiated terminal spawn activates
+    /// the terminal app (`open -a`), and the resulting pid-only frontmost
+    /// event must NOT be adopted — otherwise the resolver falls through to
+    /// the app's window on a hidden workspace and teleports the user there
+    /// before the new window exists.
+    #[test]
+    fn spawn_suppression_drops_pid_only_adoption() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        // Ghostty (pid 13) has a window on ws1 only.
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(4));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.record_focus(70);
+        }
+        // User is on empty ws4 (workspace index 1 here).
+        state.monitors[0].active_workspace = 1;
+        state.sync_workspace_visibility();
+
+        state.arm_spawn_adopt_suppression();
+        state.adopt_external_app_focus(13, None);
+
+        // Suppressed: no teleport back to the hidden ws1 window.
+        assert_eq!(state.monitors[0].active_workspace, 1);
+        assert_eq!(state.active_workspace().focused, None);
+
+        // A concrete window id (real click / AX focus event) still flows
+        // during suppression.
+        state.adopt_external_app_focus(13, Some(70));
+        assert_eq!(state.monitors[0].active_workspace, 0);
+        assert_eq!(state.active_workspace().focused, Some(70));
+    }
+
+    /// Once the suppression deadline passes, pid-only adoption resumes
+    /// (genuine cmd-tab-style activations may follow hidden workspaces).
+    #[test]
+    fn spawn_suppression_expires() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(4));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.record_focus(70);
+        }
+        state.monitors[0].active_workspace = 1;
+        state.sync_workspace_visibility();
+
+        // Deadline already in the past.
+        state.spawn_adopt_suppress_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        state.adopt_external_app_focus(13, None);
+
+        // Expired: the activation is adopted and follows to ws1.
+        assert_eq!(state.monitors[0].active_workspace, 0);
+        assert_eq!(state.active_workspace().focused, Some(70));
+        // Lazily cleared on the expiry check.
+        assert!(state.spawn_adopt_suppress_until.is_none());
     }
 
     #[test]

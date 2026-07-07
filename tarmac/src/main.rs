@@ -262,7 +262,10 @@ fn handle_action(action: Action) {
     WM_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             match action {
-                Action::SpawnTerminal => spawn_terminal(),
+                Action::SpawnTerminal => {
+                    state.arm_spawn_adopt_suppression();
+                    spawn_terminal();
+                }
                 Action::CloseWindow => state.close_focused(),
                 Action::Focus(dir) => {
                     state.focus_direction(dir);
@@ -725,6 +728,7 @@ fn process_ipc_command(
                 Response::ok_empty()
             }
             "spawn-terminal" => {
+                state.arm_spawn_adopt_suppression();
                 spawn_terminal();
                 Response::ok_empty()
             }
@@ -788,6 +792,7 @@ fn process_ipc_command(
                 Response::ok_empty()
             }
             "spawn_terminal" => {
+                state.arm_spawn_adopt_suppression();
                 spawn_terminal();
                 Response::ok_empty()
             }
