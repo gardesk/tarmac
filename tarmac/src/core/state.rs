@@ -7,7 +7,7 @@ use objc2_core_foundation::CFRetained;
 
 use crate::platform::accessibility::{
     ax_copy_attribute, ax_get_position, ax_get_size, ax_get_string, ax_get_window_id,
-    ax_perform_action, ax_set_position, ax_set_size, is_manageable_window,
+    ax_get_windows, ax_perform_action, ax_set_position, ax_set_size, is_manageable_window,
 };
 use crate::platform::application::{
     discover_all_windows, discover_applications, enumerate_windows, get_cg_window_list,
@@ -197,6 +197,13 @@ pub struct WmState {
     /// 10× in 6s) otherwise re-adopts and re-activates on every cycle.
     /// Re-adoption of a just-reaped wid is suppressed for a short window.
     recently_reaped: HashMap<WindowId, std::time::Instant>,
+    /// OBS-D4: wids whose AX position/size write just failed — the stored
+    /// ax_ref may be dead (app AX-server restart, fullscreen round-trip,
+    /// Electron re-host) while the WindowServer window survives, which
+    /// otherwise leaves a permanently mis-sized rogue tile. Drained by
+    /// `refresh_stale_ax_refs` from the polling tick (needs &mut to swap
+    /// the ref; show_window is &self).
+    stale_ax_ref_candidates: std::cell::RefCell<std::collections::HashSet<WindowId>>,
     /// FW-2: SLSSetWindowLevel failures are expected on some Tahoe
     /// configurations (leveling other apps' windows); log the degradation
     /// to AXRaise-ordering once, not per call.
@@ -279,6 +286,7 @@ impl WmState {
             hidden_enforce_tick: std::cell::Cell::new(0),
             pending_float_restack: std::cell::Cell::new(None),
             recently_reaped: HashMap::new(),
+            stale_ax_ref_candidates: std::cell::RefCell::new(std::collections::HashSet::new()),
             level_failure_logged: std::cell::Cell::new(false),
             last_applied_rect: std::cell::RefCell::new(HashMap::new()),
             pending_followup_apply: std::cell::Cell::new(None),
@@ -652,6 +660,53 @@ impl WmState {
         }
     }
 
+    /// OBS-D4: for each window whose AX write just failed, try to recover
+    /// a live AX element by re-enumerating its app and re-matching by
+    /// wid. Replace the stored ref on success; if the app no longer owns
+    /// the wid AND the WindowServer no longer shows it, reap it. A
+    /// still-live WindowServer window with no AX match is left for the
+    /// next attempt (transient AX-server churn). Called from the polling
+    /// tick — needs &mut to swap `ax_refs`.
+    pub fn refresh_stale_ax_refs(&mut self) {
+        let candidates: Vec<WindowId> =
+            self.stale_ax_ref_candidates.borrow_mut().drain().collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let live_wids: std::collections::HashSet<u32> =
+            crate::platform::application::get_cg_window_list_all_layers()
+                .into_iter()
+                .map(|info| info.wid)
+                .collect();
+
+        for wid in candidates {
+            // Skip if it was reaped in the meantime.
+            let Some(pid) = self.registry.get(wid).map(|w| w.app_pid) else {
+                continue;
+            };
+            let ax_app = unsafe { AXUIElement::new_application(pid) };
+            let refreshed = ax_get_windows(&ax_app).ok().and_then(|windows| {
+                windows
+                    .into_iter()
+                    .find(|el| ax_get_window_id(el).ok() == Some(wid))
+            });
+            match refreshed {
+                Some(el) => {
+                    tracing::info!(wid, pid, "refreshed stale ax_ref");
+                    self.ax_refs.insert(wid, el);
+                    self.last_applied_rect.borrow_mut().remove(&wid);
+                }
+                None if !live_wids.contains(&wid) && !self.is_window_hidden(wid) => {
+                    tracing::info!(wid, pid, "stale ax_ref + gone from WindowServer — reaping");
+                    self.on_window_closed(wid);
+                }
+                None => {
+                    tracing::debug!(wid, pid, "stale ax_ref unresolved this pass — will retry");
+                }
+            }
+        }
+    }
+
     /// Inflate the user-configured gaps by ers's border width so the
     /// configured value is the *visible* empty space between tiles, not
     /// the gross window-rect-to-window-rect distance. Ers draws border
@@ -960,8 +1015,13 @@ impl WmState {
         let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 1.0);
         let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
 
-        // Size → Position → Size (yabai/AeroSpace order)
-        let _ = ax_set_size(ax_ref, rect.width, rect.height);
+        // Size → Position → Size (yabai/AeroSpace order). OBS-D4: the
+        // first write's result is the liveness probe — an Err here (dead
+        // ax_ref) means every subsequent write no-ops silently, so queue
+        // the wid for a ref refresh on the next tick.
+        if ax_set_size(ax_ref, rect.width, rect.height).is_err() {
+            self.stale_ax_ref_candidates.borrow_mut().insert(wid);
+        }
         let _ = ax_set_position(ax_ref, rect.x, rect.y);
         let _ = ax_set_size(ax_ref, rect.width, rect.height);
         // Some apps silently ignore AX-set-position (observed: windows that

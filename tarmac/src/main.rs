@@ -659,6 +659,10 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             // both the AX Destroyed notification and the workspace
             // polling — otherwise a stale wid in the BSP tree leaves an
             // empty tile that the surviving sibling won't fill.
+            // OBS-D4: recover or reap windows whose AX write just failed
+            // (dead ax_ref). Runs every tick — the candidate set is empty
+            // in the steady state, so this is free unless something broke.
+            state.refresh_stale_ax_refs();
             if tick.is_multiple_of(20) {
                 state.reconcile_registry_against_window_server();
                 // OBS-D2: retry AX notification registrations that failed
