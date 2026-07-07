@@ -4811,6 +4811,19 @@ impl WmState {
         let mut added = false;
         for w in &windows {
             if !self.registry.contains(w.id) {
+                // enumerate_windows is on-screen-filtered, so anything
+                // unregistered here is genuinely new and visible on the
+                // current Space — active-workspace adoption is correct.
+                // Windows beyond the poller-reported wid are co-adopted;
+                // log them so a surprise mass adoption is traceable.
+                if w.id != wid as WindowId {
+                    tracing::debug!(
+                        wid = w.id,
+                        reported = wid,
+                        app = %w.app_name,
+                        "backstop co-adopting additional on-screen window"
+                    );
+                }
                 self.add_window_to_active(
                     &w.id,
                     w.app_pid,
