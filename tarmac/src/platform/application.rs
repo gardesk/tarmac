@@ -97,6 +97,13 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
     let ax_window_count = ax_windows.len();
     tracing::trace!(app = %app.name, ax_window_count, "raw AX windows");
 
+    // WindowServer's on-screen list is the phantom discriminator, same as
+    // the AX-created path: invisible helper windows are never composited.
+    // AXTitle is NOT usable for this — a fresh window's title is empty for
+    // its first ~150ms, and some real windows never gain one.
+    let on_screen_wids: std::collections::HashSet<u32> =
+        get_cg_window_list().iter().map(|cg| cg.wid).collect();
+
     let mut result = Vec::new();
     for ax_win in ax_windows {
         if !is_manageable_window(&ax_win) {
@@ -123,10 +130,11 @@ pub fn enumerate_windows(app: &AppInfo) -> Vec<WindowInfo> {
             continue;
         }
 
-        // Skip empty-titled windows when the app has multiple AX windows.
-        // The real window has a title; phantoms (helpers, popovers) don't.
-        if title.is_empty() && ax_window_count > 1 {
-            tracing::debug!(id, app = %app.name, "skipping phantom window (empty title, multi-window app)");
+        // Skip windows not currently composited on screen: invisible
+        // helpers stay out permanently; a window on another Space or not
+        // yet composited is picked up by a later poll once it appears.
+        if !on_screen_wids.contains(&id) {
+            tracing::debug!(id, app = %app.name, title = %title, "skipping window not in on-screen list");
             continue;
         }
 
