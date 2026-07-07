@@ -4872,6 +4872,9 @@ impl WmState {
         self.hidden_offscreen.borrow_mut().remove(&id);
         self.last_applied_rect.borrow_mut().remove(&id);
         self.prune_focus_memory_for_window(id);
+        // Purge from every focus history BEFORE the pop_focus fixup below
+        // so a dead wid can't be resurrected as the next focus target.
+        self.workspaces.purge_focus_history(id);
 
         // Find the workspace containing this window and remove from it
         let mut new_focus: Option<(usize, WindowId)> = None;
@@ -4946,6 +4949,10 @@ impl WmState {
             self.hidden_offscreen.borrow_mut().remove(&w.id);
             self.last_applied_rect.borrow_mut().remove(&w.id);
             self.prune_focus_memory_for_window(w.id);
+            // Purge before the pop_focus fixup below — a terminated app's
+            // sibling window in the same history would otherwise be
+            // resurrected as the next focus target.
+            self.workspaces.purge_focus_history(w.id);
             // Find the workspace containing this window and remove from it
             if let Some(ws_idx) = self.workspaces.find_window(w.id) {
                 let ws = self.workspaces.get_mut(ws_idx);

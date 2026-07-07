@@ -285,6 +285,16 @@ impl WorkspaceManager {
         Self { workspaces }
     }
 
+    /// Purge a dead window from every workspace's focus history. Must run
+    /// BEFORE any pop_focus fixup — pop_focus takes focus_history.last()
+    /// verbatim and would otherwise resurrect a dead wid (e.g. a sibling
+    /// window of the same terminated app).
+    pub fn purge_focus_history(&mut self, wid: WindowId) {
+        for ws in &mut self.workspaces {
+            ws.focus_history.retain(|id| *id != wid);
+        }
+    }
+
     pub fn get(&self, idx: usize) -> &Workspace {
         &self.workspaces[idx]
     }
