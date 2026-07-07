@@ -618,6 +618,14 @@ fn install_polling_timer() {
     }
 }
 
+// INVARIANT (OBS re-entrancy): this timer fires on the main runloop and
+// borrows WM_STATE below. It is re-entrancy-safe ONLY because nothing
+// pumps the runloop while WM_STATE is borrowed. The single nested-runloop
+// site in the crate (NSAlert runModal in ui/settings.rs) runs from an
+// AppKit target-action handler, outside any WM_STATE.with. If you ever
+// pump the runloop (run a modal, spin CFRunLoop, await on the main
+// thread) inside a WM_STATE.with closure, this callback can re-enter and
+// panic on the already-held RefCell borrow.
 unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
     use std::sync::atomic::{AtomicU32, Ordering};
     static TICK: AtomicU32 = AtomicU32::new(0);
