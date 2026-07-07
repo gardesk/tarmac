@@ -193,18 +193,26 @@ tarmac_kill() {
   sleep 2
 }
 
-# Open n throwaway windows via TextEdit documents (deterministic, always
-# manageable). Waits for the daemon to register them.
+# Open n throwaway windows as TextEdit documents (deterministic, always
+# manageable). Uses `open -a <app> <file>` rather than AppleScript: osascript
+# launched from an sshd session cannot send Apple events to the auto-login Aqua
+# session and hangs, whereas `open` hands off through LaunchServices to that
+# session and returns immediately. Distinct files open distinct windows.
 open_windows() { # open_windows <n>
   local n="$1" i
   for i in $(seq 1 "$n"); do
-    _run "osascript -e 'tell application \"TextEdit\" to make new document' >/dev/null 2>&1 || true"
+    _run "printf 'e2e window %s\n' '$i' > /tmp/tarmac-e2e-win-$i.txt && \
+          open -a TextEdit /tmp/tarmac-e2e-win-$i.txt"
     sleep 1
   done
   sleep 2
 }
 
+# Force-quit TextEdit and remove the scratch files. Blunt (no save prompt) by
+# design — the guest is disposable. In local mode this will close any TextEdit
+# the developer has open, which is why local mode is documented as
+# run-when-nothing-else-is-active.
 close_all_textedit() {
-  _run "osascript -e 'tell application \"TextEdit\" to quit saving no' >/dev/null 2>&1 || true"
+  _run "pkill -9 -x TextEdit >/dev/null 2>&1; rm -f /tmp/tarmac-e2e-win-*.txt || true"
   sleep 2
 }
