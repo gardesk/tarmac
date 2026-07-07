@@ -3492,6 +3492,18 @@ impl WmState {
         tracing::info!("restored all windows for shutdown");
     }
 
+    /// FW-3: carry a float's rect across workspaces/monitors — preserve
+    /// its size, keep its offset relative to the source anchor, and clamp
+    /// into the target. The old behavior replaced the rect with a
+    /// hardcoded 800x600 at (+50,+50).
+    fn carry_float_geometry(geom: Rect, source: Rect, target: Rect) -> Rect {
+        let width = geom.width.min(target.width);
+        let height = geom.height.min(target.height);
+        let x = (target.x + (geom.x - source.x)).clamp(target.x, target.x + target.width - width);
+        let y = (target.y + (geom.y - source.y)).clamp(target.y, target.y + target.height - height);
+        Rect::new(x, y, width, height)
+    }
+
     /// Clamp a float rect into a monitor's usable frame when its center
     /// is not on any monitor. Discovery after an unclean shutdown reads
     /// the off-screen hide park as the window's geometry; storing it
@@ -3892,6 +3904,13 @@ impl WmState {
         if current_idx == special_idx {
             return; // Already on this special workspace
         }
+        let float_geom = self
+            .workspaces
+            .get(current_idx)
+            .floating
+            .iter()
+            .find(|f| f.id == focused)
+            .map(|f| f.geometry);
 
         // Remove from current workspace
         let current_ws = self.workspaces.get_mut(current_idx);
@@ -3916,7 +3935,9 @@ impl WmState {
         if was_floating {
             special_ws.floating.push(super::workspace::FloatingWindow {
                 id: focused,
-                geometry: Rect::new(sr.x + 50.0, sr.y + 50.0, 800.0, 600.0),
+                geometry: float_geom
+                    .map(|g| Self::carry_float_geometry(g, sr, sr))
+                    .unwrap_or(Rect::new(sr.x + 50.0, sr.y + 50.0, 800.0, 600.0)),
             });
         } else {
             special_ws
@@ -4050,6 +4071,17 @@ impl WmState {
             Some(idx) => idx,
             None => return,
         };
+        let float_geom = self
+            .workspaces
+            .get(current_idx)
+            .floating
+            .iter()
+            .find(|f| f.id == focused)
+            .map(|f| f.geometry);
+        let source_rect = self
+            .monitor_showing_workspace(current_idx)
+            .map(|mi| self.monitor_rect(mi))
+            .unwrap_or(target_rect);
 
         // Remove from current workspace
         let current_ws = self.workspaces.get_mut(current_idx);
@@ -4076,12 +4108,14 @@ impl WmState {
         if was_floating {
             target.floating.push(super::workspace::FloatingWindow {
                 id: focused,
-                geometry: super::tree::Rect::new(
-                    target_rect.x + 50.0,
-                    target_rect.y + 50.0,
-                    800.0,
-                    600.0,
-                ),
+                geometry: float_geom
+                    .map(|g| Self::carry_float_geometry(g, source_rect, target_rect))
+                    .unwrap_or(super::tree::Rect::new(
+                        target_rect.x + 50.0,
+                        target_rect.y + 50.0,
+                        800.0,
+                        600.0,
+                    )),
             });
         } else {
             target
@@ -4311,6 +4345,17 @@ impl WmState {
         if target_idx == current_idx {
             return;
         }
+        let float_geom = self
+            .workspaces
+            .get(current_idx)
+            .floating
+            .iter()
+            .find(|f| f.id == focused)
+            .map(|f| f.geometry);
+        let source_rect = self
+            .monitor_showing_workspace(current_idx)
+            .map(|mi| self.monitor_rect(mi))
+            .unwrap_or_else(|| self.focused_rect());
 
         // If removing from a special workspace, dismiss the overlay
         let mi = self.focused_monitor;
@@ -4363,12 +4408,25 @@ impl WmState {
         if was_floating {
             target_ws.floating.push(super::workspace::FloatingWindow {
                 id: focused,
-                geometry: Rect::new(target_rect.x + 50.0, target_rect.y + 50.0, 800.0, 600.0),
+                geometry: float_geom
+                    .map(|g| Self::carry_float_geometry(g, source_rect, target_rect))
+                    .unwrap_or(Rect::new(
+                        target_rect.x + 50.0,
+                        target_rect.y + 50.0,
+                        800.0,
+                        600.0,
+                    )),
             });
         } else {
             target_ws
                 .tree
                 .insert_with_rect(focused, target_ws.focused, target_rect);
+            // FW-2: a window leaving a scratchpad carries FLOATING level;
+            // tiled on a regular workspace it must not ride on top.
+            crate::platform::skylight::set_window_level(
+                focused,
+                crate::platform::skylight::K_CG_NORMAL_WINDOW_LEVEL,
+            );
         }
         target_ws.record_focus(focused);
 
@@ -6428,6 +6486,62 @@ mod tests {
             .set(Some(std::time::Instant::now() - std::time::Duration::from_millis(1)));
         state.drain_pending_float_restack();
         assert!(state.pending_float_restack.get().is_none());
+    }
+
+    /// FW-3: moving a float to another workspace must preserve its
+    /// geometry (it used to become 800x600 at target+50,+50).
+    #[test]
+    fn move_to_workspace_preserves_float_geometry() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+
+        let float_rect = Rect::new(300.0, 200.0, 555.0, 444.0);
+        state.registry.add(tracked_window(70, 13, "Preview"));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.floating.push(crate::core::workspace::FloatingWindow {
+                id: 70,
+                geometry: float_rect,
+            });
+            ws.record_focus(70);
+        }
+
+        state.move_to_workspace(&WorkspaceTarget::Numbered(2));
+
+        let target_idx = state.workspaces.find_window(70).expect("moved");
+        let fw = state
+            .workspaces
+            .get(target_idx)
+            .floating
+            .iter()
+            .find(|f| f.id == 70)
+            .expect("still floating");
+        assert_eq!(fw.geometry, float_rect, "same monitor -> same rect");
+    }
+
+    /// FW-3: carry keeps size and relative offset, clamping into the
+    /// target monitor.
+    #[test]
+    fn carry_float_geometry_translates_and_clamps() {
+        // Cross-monitor: relative offset preserved.
+        let source = Rect::new(0.0, 0.0, 1920.0, 1080.0);
+        let target = Rect::new(1920.0, 0.0, 1920.0, 1080.0);
+        let geom = Rect::new(300.0, 200.0, 555.0, 444.0);
+        let carried = WmState::carry_float_geometry(geom, source, target);
+        assert_eq!(carried, Rect::new(2220.0, 200.0, 555.0, 444.0));
+
+        // Target smaller than the float: size shrinks, position clamps.
+        let small = Rect::new(0.0, 0.0, 400.0, 300.0);
+        let clamped = WmState::carry_float_geometry(geom, source, small);
+        assert!(clamped.width <= 400.0 && clamped.height <= 300.0);
+        assert!(clamped.x >= small.x && clamped.y >= small.y);
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
