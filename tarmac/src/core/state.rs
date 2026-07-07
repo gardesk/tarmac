@@ -185,6 +185,13 @@ pub struct WmState {
     /// Tick counter for `enforce_hidden_workspaces`: most ticks skip
     /// already-parked wids; every ~20th does a full re-assert pass.
     hidden_enforce_tick: std::cell::Cell<u32>,
+    /// FW-2: deadline for re-asserting float stacking order after an
+    /// asynchronous cross-app activation. See drain_pending_float_restack.
+    pending_float_restack: std::cell::Cell<Option<std::time::Instant>>,
+    /// FW-2: SLSSetWindowLevel failures are expected on some Tahoe
+    /// configurations (leveling other apps' windows); log the degradation
+    /// to AXRaise-ordering once, not per call.
+    level_failure_logged: std::cell::Cell<bool>,
     /// HX-99-F perf #128: last AX-applied rect per window. `show_window`
     /// consults this to skip the ~12-call AX/SLS sequence (size, pos,
     /// size, alpha asserts, validation reads, EUI toggle) when the
@@ -261,6 +268,8 @@ impl WmState {
             pending_show_window: std::cell::RefCell::new(HashMap::new()),
             hidden_offscreen: std::cell::RefCell::new(std::collections::HashSet::new()),
             hidden_enforce_tick: std::cell::Cell::new(0),
+            pending_float_restack: std::cell::Cell::new(None),
+            level_failure_logged: std::cell::Cell::new(false),
             last_applied_rect: std::cell::RefCell::new(HashMap::new()),
             pending_followup_apply: std::cell::Cell::new(None),
             rules: Vec::new(),
@@ -621,6 +630,24 @@ impl WmState {
             self.handle_event(&queued.event, &queued.app_name, &queued.app_bundle);
         }
         self.enforce_hidden_workspaces();
+        self.drain_pending_float_restack();
+    }
+
+    /// FW-2: cross-app activation (NSRunningApplication.activate) is
+    /// asynchronous — macOS reorders the activated app's windows above
+    /// our synchronous float restack a few runloop turns later, sinking
+    /// floats behind the newly focused tile. focus_window_impl arms this
+    /// deadline whenever it activates an app; once it passes, re-assert
+    /// float order.
+    fn drain_pending_float_restack(&self) {
+        let Some(due) = self.pending_float_restack.get() else {
+            return;
+        };
+        if std::time::Instant::now() < due {
+            return;
+        }
+        self.pending_float_restack.set(None);
+        self.restack_floating_windows(self.active_ws_idx());
     }
 
     // --- Layout ---
@@ -2141,6 +2168,12 @@ impl WmState {
                     let _ =
                         crate::platform::accessibility::ax_set_bool(&app_ref, &frontmost_key, true);
                     crate::platform::application::activate_app(pid);
+                    // FW-2: the activation lands asynchronously and reorders
+                    // the app's windows above any floats we restack now.
+                    // Re-assert float order once it has settled.
+                    self.pending_float_restack.set(Some(
+                        std::time::Instant::now() + std::time::Duration::from_millis(200),
+                    ));
                 }
                 let _ = ax_perform_action(ax_ref, "AXRaise");
                 let main_key = objc2_core_foundation::CFString::from_static_str("AXMain");
@@ -2516,6 +2549,12 @@ impl WmState {
                 }
                 ws.record_focus(wid);
                 self.prune_focus_memory_for_window(wid);
+                // FW-2: the drag floated this window at FLOATING level;
+                // back in the tree it must not ride above normal windows.
+                crate::platform::skylight::set_window_level(
+                    wid,
+                    crate::platform::skylight::K_CG_NORMAL_WINDOW_LEVEL,
+                );
                 self.apply_layout();
                 self.fix_oversized_windows();
                 self.focus_window(wid);
@@ -2633,6 +2672,11 @@ impl WmState {
                 }
                 ws.record_focus(wid);
                 self.prune_focus_memory_for_window(wid);
+                // FW-2: same level reset as the end_drag retile branch.
+                crate::platform::skylight::set_window_level(
+                    wid,
+                    crate::platform::skylight::K_CG_NORMAL_WINDOW_LEVEL,
+                );
                 self.apply_layout();
                 self.fix_oversized_windows();
                 self.focus_window(wid);
@@ -2662,7 +2706,17 @@ impl WmState {
 
         let ws = self.workspaces.get(ws_idx);
         for fw in &ws.floating {
-            set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL);
+            if !set_window_level(fw.id, K_CG_FLOATING_WINDOW_LEVEL)
+                && !self.level_failure_logged.replace(true)
+            {
+                // Leveling other apps' windows can fail on Tahoe; float
+                // always-on-top then rests entirely on the AXRaise ordering
+                // below (and the deferred post-activation restack).
+                tracing::error!(
+                    wid = fw.id,
+                    "SLSSetWindowLevel unavailable — float on-top degrades to raise ordering"
+                );
+            }
             if let Some(ax_ref) = self.ax_refs.get(&fw.id) {
                 let _ = ax_perform_action(ax_ref, "AXRaise");
             }
@@ -6346,6 +6400,34 @@ mod tests {
         // A healthy rect is untouched.
         let healthy = Rect::new(200.0, 200.0, 800.0, 600.0);
         assert_eq!(state.sanitize_float_geometry(healthy), healthy);
+    }
+
+    /// FW-2: the deferred float restack fires only once its deadline
+    /// passes, then disarms.
+    #[test]
+    fn pending_float_restack_drains_on_deadline() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+
+        // Future deadline: stays armed.
+        let future = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        state.pending_float_restack.set(Some(future));
+        state.drain_pending_float_restack();
+        assert_eq!(state.pending_float_restack.get(), Some(future));
+
+        // Past deadline: fires and disarms.
+        state
+            .pending_float_restack
+            .set(Some(std::time::Instant::now() - std::time::Duration::from_millis(1)));
+        state.drain_pending_float_restack();
+        assert!(state.pending_float_restack.get().is_none());
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
