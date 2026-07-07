@@ -1396,7 +1396,7 @@ impl Node {
             Node::Stack {
                 windows,
                 active,
-                previous: _,
+                previous,
             } if windows.contains(&window) => {
                 let Some(idx) = windows.iter().position(|w| *w == window) else {
                     return false;
@@ -1417,6 +1417,10 @@ impl Node {
                     return true;
                 }
                 windows.remove(idx);
+                // The window now lives outside the stack; scrub it from the
+                // restore tree too or a later unstack resurrects it as a
+                // duplicate leaf (same pattern as Node::remove).
+                previous.remove(window);
                 if *active >= windows.len() {
                     *active = windows.len() - 1;
                 } else if idx < *active {
@@ -2442,6 +2446,33 @@ mod tests {
         tree.insert_with_rect(2, Some(1), SCREEN);
         // Window 1 is not in any stack.
         assert!(!tree.split_active_from_stack(1));
+    }
+
+    /// Splitting a member out of a 3+ stack must also scrub it from the
+    /// stack's `previous` restore tree — otherwise a later unstack
+    /// resurrects the split-out window as a duplicate leaf.
+    #[test]
+    fn split_active_from_stack_scrubs_previous_tree() {
+        let mut tree = Node::empty();
+        tree.insert_with_rect(1, None, SCREEN);
+        tree.insert_with_rect(2, Some(1), SCREEN);
+        tree.insert_with_rect(3, Some(2), SCREEN);
+        assert!(tree.merge_into_neighbor(2, 1)); // Stack[1,2]
+        assert!(tree.merge_into_neighbor(3, 1)); // Stack[1,2,3], previous extended with 3
+
+        assert!(tree.split_active_from_stack(3)); // Internal(Stack[1,2], Leaf 3)
+
+        // Restore the remaining stack's previous layout.
+        assert!(tree.unstack(1));
+
+        let ids: Vec<_> = tree
+            .calculate_geometries(SCREEN)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let count_3 = ids.iter().filter(|&&id| id == 3).count();
+        assert_eq!(count_3, 1, "window 3 duplicated after unstack: {ids:?}");
+        assert_eq!(ids.len(), 3, "expected exactly windows 1,2,3: {ids:?}");
     }
 
     // --- HX-02 resize / set_parent_ratio tests ---
