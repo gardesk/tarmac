@@ -182,6 +182,9 @@ pub struct WmState {
     /// observed in dogfooding). Cleared on show_window and on window
     /// removal so a re-tile after a focus/show correctly re-hides.
     hidden_offscreen: std::cell::RefCell<std::collections::HashSet<WindowId>>,
+    /// Tick counter for `enforce_hidden_workspaces`: most ticks skip
+    /// already-parked wids; every ~20th does a full re-assert pass.
+    hidden_enforce_tick: std::cell::Cell<u32>,
     /// HX-99-F perf #128: last AX-applied rect per window. `show_window`
     /// consults this to skip the ~12-call AX/SLS sequence (size, pos,
     /// size, alpha asserts, validation reads, EUI toggle) when the
@@ -257,6 +260,7 @@ impl WmState {
             ax_write_last: std::cell::RefCell::new(HashMap::new()),
             pending_show_window: std::cell::RefCell::new(HashMap::new()),
             hidden_offscreen: std::cell::RefCell::new(std::collections::HashSet::new()),
+            hidden_enforce_tick: std::cell::Cell::new(0),
             last_applied_rect: std::cell::RefCell::new(HashMap::new()),
             pending_followup_apply: std::cell::Cell::new(None),
             rules: Vec::new(),
@@ -3474,11 +3478,25 @@ impl WmState {
     }
 
     fn enforce_hidden_workspaces(&self) {
+        // Skipping already-parked wids turns this from ~N blocking AX
+        // writes per 50ms tick (N = hidden windows; ~300 writes/sec with
+        // 15) into a no-op in the steady state. hidden_offscreen only
+        // contains wids whose park actually landed (see hide_window), so
+        // failed hides keep retrying every tick. Apps can still move
+        // themselves back on screen behind our bookkeeping, so every ~20th
+        // tick (~1s) runs a full re-assert pass ignoring the skip.
+        let tick = self.hidden_enforce_tick.get();
+        self.hidden_enforce_tick.set(tick.wrapping_add(1));
+        let full_pass = tick.is_multiple_of(20);
+
         for ws_idx in 0..self.workspaces.count() {
             if self.workspace_is_effectively_visible(ws_idx) {
                 continue;
             }
             for wid in self.workspaces.get(ws_idx).all_window_ids() {
+                if !full_pass && self.hidden_offscreen.borrow().contains(&wid) {
+                    continue;
+                }
                 self.hide_window(wid);
             }
         }
@@ -5990,6 +6008,50 @@ mod tests {
         state.adopt_external_app_focus(13, Some(70));
         assert_eq!(state.monitors[0].active_workspace, 0);
         assert_eq!(state.active_workspace().focused, Some(70));
+    }
+
+    /// Steady-state ticks must skip wids already parked off-screen (the
+    /// 50ms AX/SLS write storm), while the periodic full pass re-asserts
+    /// them. `last_applied_rect` is the observable: hide_window always
+    /// clears it, skips leave it untouched.
+    #[test]
+    fn enforce_hidden_skips_parked_wids_until_full_pass() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+        {
+            let ws = state.workspaces.get_mut(1);
+            ws.tree.insert_with_rect(70, None, screen);
+        }
+        // ws2 (index 1) is hidden; workspace 1 (index 0) is active.
+        state.sync_workspace_visibility();
+
+        state.hidden_offscreen.borrow_mut().insert(70);
+        state
+            .last_applied_rect
+            .borrow_mut()
+            .insert(70, Rect::new(0.0, 0.0, 100.0, 100.0));
+
+        // Non-full-pass tick: parked wid is skipped entirely.
+        state.hidden_enforce_tick.set(1);
+        state.enforce_hidden_workspaces();
+        assert!(state.last_applied_rect.borrow().contains_key(&70));
+
+        // Full-pass tick (multiple of 20): hide re-asserted.
+        state.hidden_enforce_tick.set(20);
+        state.enforce_hidden_workspaces();
+        assert!(!state.last_applied_rect.borrow().contains_key(&70));
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
