@@ -3349,7 +3349,8 @@ impl WmState {
         let hide_frame = self.monitors[monitor_idx].frame;
         let ws = self.workspaces.get(ws_idx);
         for wid in ws.all_window_ids() {
-            self.hide_window_on_frame(wid, hide_frame, Some(monitor_idx));
+            let parked = self.hide_window_on_frame(wid, hide_frame, Some(monitor_idx));
+            self.record_hidden(wid, parked);
         }
     }
 
@@ -3360,7 +3361,27 @@ impl WmState {
         for wid in ws.all_window_ids() {
             let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 0.0);
             let _ = crate::platform::skylight::set_window_group_alpha(wid, 0.0);
+            // Alpha-parked counts as hidden for show-side purposes: the
+            // next show_window must run the full sequence (which restores
+            // alpha) rather than short-circuit on an unchanged rect.
+            self.record_hidden(wid, true);
         }
+    }
+
+    /// Shared bookkeeping for every hide path. A parked wid enters
+    /// hidden_offscreen (the safety net and enforcement tick may skip it);
+    /// a failed park is left out so enforcement keeps retrying. The cached
+    /// last-applied rect is dropped either way — the perf #128 show-side
+    /// short-circuit must never trust a hidden window's rect, and the
+    /// alpha restore lives beyond that short-circuit.
+    fn record_hidden(&self, wid: WindowId, parked: bool) {
+        if parked {
+            self.hidden_offscreen.borrow_mut().insert(wid);
+        } else {
+            tracing::warn!(wid, "hide position write failed via AX and SkyLight");
+            self.hidden_offscreen.borrow_mut().remove(&wid);
+        }
+        self.last_applied_rect.borrow_mut().remove(&wid);
     }
 
     /// Hide a single window using its workspace's monitor affinity.
@@ -6052,6 +6073,49 @@ mod tests {
         state.hidden_enforce_tick.set(20);
         state.enforce_hidden_workspaces();
         assert!(!state.last_applied_rect.borrow().contains_key(&70));
+    }
+
+    /// Switch-away must invalidate the perf #128 show-side cache: the
+    /// displaced workspace's windows are parked off-screen, so their
+    /// cached last-applied rects are stale. Before this bookkeeping,
+    /// switching back short-circuited show_window (rect "unchanged") and
+    /// the returned-to workspace stayed blank and transparent.
+    #[test]
+    fn switch_away_invalidates_show_cache_for_displaced_windows() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.record_focus(70);
+        }
+        state.sync_workspace_visibility();
+
+        // Simulate a prior apply_layout having shown the window.
+        state
+            .last_applied_rect
+            .borrow_mut()
+            .insert(70, Rect::new(0.0, 33.0, 1920.0, 1047.0));
+
+        state.switch_workspace(&WorkspaceTarget::Numbered(2));
+
+        assert!(
+            !state.last_applied_rect.borrow().contains_key(&70),
+            "displaced window's cached rect must be dropped on hide"
+        );
+        assert!(
+            state.hidden_offscreen.borrow().contains(&70),
+            "displaced window must be tracked as parked off-screen"
+        );
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
