@@ -302,6 +302,55 @@ impl WmState {
         self.active_workspace().focused
     }
 
+    /// FW-4: the workspace effective_focused's window lives on — the
+    /// active special overlay when one is up and holds focus, else the
+    /// active workspace. Actions that mutate "the focused window's
+    /// workspace" must use this, not active_ws_idx, or they operate on
+    /// the workspace *behind* the overlay.
+    fn effective_ws_idx(&self) -> usize {
+        let mi = self.focused_monitor;
+        if mi < self.active_specials.len()
+            && let Some(special_idx) = self.active_specials[mi]
+            && self.workspaces.get(special_idx).focused.is_some()
+        {
+            return special_idx;
+        }
+        self.active_ws_idx()
+    }
+
+    /// FW-4: the overlay rect an active special workspace occupies on
+    /// monitor `mi` — same formula toggle_special and mouse_moved use
+    /// (fractional size + position from SpecialWorkspaceConfig).
+    fn special_overlay_rect(&self, special_idx: usize, mi: usize) -> Rect {
+        let sr = self.monitor_rect(mi);
+        let special_name = match &self.workspaces.get(special_idx).id {
+            super::workspace::WorkspaceId::Special(name) => name.clone(),
+            _ => String::new(),
+        };
+        let cfg = self
+            .special_configs
+            .iter()
+            .find(|c| c.name == special_name)
+            .cloned()
+            .unwrap_or_else(|| {
+                crate::config::lua::SpecialWorkspaceConfig::default_for(&special_name)
+            });
+        let overlay_w = sr.width * cfg.width;
+        let overlay_h = sr.height * cfg.height;
+        let (overlay_x, overlay_y) = match cfg.position.as_str() {
+            "top" => (sr.x + (sr.width - overlay_w) / 2.0, sr.y),
+            "bottom" => (
+                sr.x + (sr.width - overlay_w) / 2.0,
+                sr.y + sr.height - overlay_h,
+            ),
+            _ => (
+                sr.x + (sr.width - overlay_w) / 2.0,
+                sr.y + (sr.height - overlay_h) / 2.0,
+            ),
+        };
+        Rect::new(overlay_x, overlay_y, overlay_w, overlay_h)
+    }
+
     /// Active workspace (mutable).
     pub fn active_workspace_mut(&mut self) -> &mut super::workspace::Workspace {
         let idx = self.active_ws_idx();
@@ -724,6 +773,35 @@ impl WmState {
                 self.show_window(fw.id, fw.geometry);
             }
             self.restack_floating_windows(ws_idx);
+
+            // FW-4: an active scratchpad overlay on this monitor is laid
+            // out too — apply_layout previously ignored overlays entirely,
+            // so their windows were never repositioned and the underlying
+            // workspace's floats were restacked above them.
+            if mi < self.active_specials.len()
+                && let Some(special_idx) = self.active_specials[mi]
+            {
+                let overlay_rect = self.special_overlay_rect(special_idx, mi);
+                let (gi, go) = self.effective_gaps(special_idx);
+                let sws = self.workspaces.get(special_idx);
+                let overlay_geoms =
+                    sws.tree
+                        .calculate_geometries_with_gaps(overlay_rect, gi, go, true);
+                for (wid, rect) in &overlay_geoms {
+                    self.show_window(*wid, *rect);
+                    crate::platform::skylight::set_window_level(
+                        *wid,
+                        crate::platform::skylight::K_CG_FLOATING_WINDOW_LEVEL,
+                    );
+                    if let Some(ax_ref) = self.ax_refs.get(wid) {
+                        let _ = ax_perform_action(ax_ref, "AXRaise");
+                    }
+                }
+                for fw in &sws.floating {
+                    self.show_window(fw.id, fw.geometry);
+                }
+                self.restack_floating_windows(special_idx);
+            }
         }
 
         // Perf #135 wiring: push the freshly-applied geometry to ers
@@ -760,6 +838,24 @@ impl WmState {
             for fw in &ws.floating {
                 self.borders
                     .update_border(fw.id, fw.geometry, focused == Some(fw.id));
+            }
+
+            // FW-4: overlay windows get border geometry too.
+            if mi < self.active_specials.len()
+                && let Some(special_idx) = self.active_specials[mi]
+            {
+                let overlay_rect = self.special_overlay_rect(special_idx, mi);
+                let sws = self.workspaces.get(special_idx);
+                let overlay_geoms = self.workspace_focus_geometries(special_idx, overlay_rect);
+                let overlay_focused = sws.focused;
+                for (wid, rect) in &overlay_geoms {
+                    self.borders
+                        .update_border(*wid, *rect, overlay_focused == Some(*wid));
+                }
+                for fw in &sws.floating {
+                    self.borders
+                        .update_border(fw.id, fw.geometry, overlay_focused == Some(fw.id));
+                }
             }
         }
     }
@@ -1188,7 +1284,11 @@ impl WmState {
         // other workspaces) per layout pass. The hidden_offscreen set
         // is maintained by hide_window / show_window.
         for ws_idx in 0..self.workspaces.count() {
-            if self.monitor_showing_workspace(ws_idx).is_some() {
+            // FW-4: workspace_is_effectively_visible, not
+            // monitor_showing_workspace — special overlays are visible via
+            // active_specials, and this sweep used to hide every window of
+            // a scratchpad the moment anything else triggered it.
+            if self.workspace_is_effectively_visible(ws_idx) {
                 continue; // Visible workspace — windows should be shown
             }
             let wids = self.workspaces.get(ws_idx).all_window_ids();
@@ -2222,17 +2322,36 @@ impl WmState {
 
     /// Start a move drag on a floating window (Cmd+LeftClick).
     pub fn begin_move_drag(&mut self, x: f64, y: f64) {
-        // Floating-window drag (existing behavior): cursor hits a
-        // floating tile → start an immediate-AX drag.
-        let floating_hit = self
-            .active_workspace()
-            .floating
-            .iter()
-            .rev()
-            .find(|fw| fw.geometry.contains_point(x, y))
-            .map(|fw| (fw.id, fw.geometry));
-        if let Some((id, geometry)) = floating_hit {
-            let ws_idx = self.active_ws_idx();
+        // FW-4: with a scratchpad up its windows are on top — a drag
+        // starting on one must grab it, not the tile hidden underneath.
+        let mi = self.focused_monitor;
+        let float_source = {
+            let mut source = None;
+            if mi < self.active_specials.len()
+                && let Some(special_idx) = self.active_specials[mi]
+                && let Some(hit) = self
+                    .workspaces
+                    .get(special_idx)
+                    .floating
+                    .iter()
+                    .rev()
+                    .find(|fw| fw.geometry.contains_point(x, y))
+            {
+                source = Some((special_idx, hit.id, hit.geometry));
+            }
+            if source.is_none()
+                && let Some(hit) = self
+                    .active_workspace()
+                    .floating
+                    .iter()
+                    .rev()
+                    .find(|fw| fw.geometry.contains_point(x, y))
+            {
+                source = Some((self.active_ws_idx(), hit.id, hit.geometry));
+            }
+            source
+        };
+        if let Some((ws_idx, id, geometry)) = float_source {
             self.drag = Some(DragState {
                 window_id: id,
                 mode: DragMode::Move,
@@ -2243,6 +2362,16 @@ impl WmState {
             });
             self.drag_threshold_active = false;
             tracing::debug!(id, "move drag started (floating)");
+            return;
+        }
+        // FW-4: a drag starting anywhere else while an overlay window is
+        // under the cursor (tiled scratchpad window) must not yank the
+        // hidden-behind tile out of the underlying tree.
+        if mi < self.active_specials.len()
+            && let Some(special_idx) = self.active_specials[mi]
+            && self.workspace_hit_test(special_idx, x, y).is_some()
+        {
+            tracing::debug!("move drag on tiled scratchpad window ignored");
             return;
         }
         // HX-08: tiled-window drag scaffolding. Check the tiled
@@ -2277,15 +2406,36 @@ impl WmState {
 
     /// Start a resize drag on a floating window (Cmd+RightClick).
     pub fn begin_resize_drag(&mut self, x: f64, y: f64) {
-        let hit = self
-            .active_workspace()
-            .floating
-            .iter()
-            .rev()
-            .find(|fw| fw.geometry.contains_point(x, y))
-            .map(|fw| (fw.id, fw.geometry));
-        if let Some((id, geometry)) = hit {
-            let ws_idx = self.active_ws_idx();
+        // FW-4: overlay floats are on top — check them before the
+        // underlying workspace's floats (same scoping as begin_move_drag).
+        let mi = self.focused_monitor;
+        let hit = {
+            let mut source = None;
+            if mi < self.active_specials.len()
+                && let Some(special_idx) = self.active_specials[mi]
+                && let Some(fw) = self
+                    .workspaces
+                    .get(special_idx)
+                    .floating
+                    .iter()
+                    .rev()
+                    .find(|fw| fw.geometry.contains_point(x, y))
+            {
+                source = Some((special_idx, fw.id, fw.geometry));
+            }
+            if source.is_none()
+                && let Some(fw) = self
+                    .active_workspace()
+                    .floating
+                    .iter()
+                    .rev()
+                    .find(|fw| fw.geometry.contains_point(x, y))
+            {
+                source = Some((self.active_ws_idx(), fw.id, fw.geometry));
+            }
+            source
+        };
+        if let Some((ws_idx, id, geometry)) = hit {
             self.drag = Some(DragState {
                 window_id: id,
                 mode: DragMode::Resize,
@@ -2294,6 +2444,10 @@ impl WmState {
                 original_workspace: ws_idx,
                 original_tile_rect: geometry,
             });
+            // FW-7 hardening: a stale threshold flag from an interleaved
+            // move drag must not route this resize through the
+            // threshold-float branch.
+            self.drag_threshold_active = false;
             tracing::debug!(id, "resize drag started");
         }
     }
@@ -2908,17 +3062,21 @@ impl WmState {
     }
 
     pub fn toggle_float(&mut self) {
-        let focused = match self.active_workspace().focused {
+        // FW-4: operate on the overlay's window when a scratchpad is up,
+        // not the window hidden behind it.
+        let ws_idx = self.effective_ws_idx();
+        let focused = match self.workspaces.get(ws_idx).focused {
             Some(f) => f,
             None => return,
         };
         let sr = self.focused_rect();
-        if self.active_workspace_mut().toggle_float(focused, sr) {
+        if self.workspaces.get_mut(ws_idx).toggle_float(focused, sr) {
             self.apply_layout();
-            if self.active_workspace().is_floating(focused) {
+            if self.workspaces.get(ws_idx).is_floating(focused) {
                 // Position at stored geometry
                 if let Some(fw) = self
-                    .active_workspace()
+                    .workspaces
+                    .get(ws_idx)
                     .floating
                     .iter()
                     .find(|f| f.id == focused)
@@ -3276,26 +3434,25 @@ impl WmState {
     }
 
     pub fn click_to_focus(&mut self, x: f64, y: f64) {
-        let ws = self.active_workspace();
+        // FW-4: with a scratchpad overlay up, its windows are visually on
+        // top — hit-test the overlay first, same scoping as mouse_moved.
+        // Clicks that miss every overlay window fall through to the
+        // underlying workspace (the overlay doesn't cover the screen).
+        let mi = self.focused_monitor;
+        if mi < self.active_specials.len()
+            && let Some(special_idx) = self.active_specials[mi]
+        {
+            let special_hit = self.workspace_hit_test(special_idx, x, y);
+            if let Some(id) = special_hit {
+                self.ffm_last_window = Some(id);
+                if self.workspaces.get(special_idx).focused != Some(id) {
+                    self.focus_window(id);
+                }
+                return;
+            }
+        }
 
-        // Check floating first
-        let floating_hit = ws
-            .floating
-            .iter()
-            .rev()
-            .find(|fw| fw.geometry.contains_point(x, y))
-            .map(|fw| fw.id);
-
-        let id = if let Some(fid) = floating_hit {
-            Some(fid)
-        } else {
-            let geoms = self.workspace_render_geometries(self.active_ws_idx(), self.focused_rect());
-            geoms
-                .iter()
-                .rev()
-                .find(|(_, rect)| rect.contains_point(x, y))
-                .map(|(id, _)| *id)
-        };
+        let id = self.workspace_hit_test(self.active_ws_idx(), x, y);
 
         if let Some(id) = id {
             // Sync FFM tracker so mouse_moved doesn't re-trigger on the same window
@@ -3304,6 +3461,30 @@ impl WmState {
                 self.focus_window(id);
             }
         }
+    }
+
+    /// Topmost-first hit test of one workspace: floats (visually on top)
+    /// before tiles.
+    fn workspace_hit_test(&self, ws_idx: usize, x: f64, y: f64) -> Option<WindowId> {
+        let ws = self.workspaces.get(ws_idx);
+        let floating_hit = ws
+            .floating
+            .iter()
+            .rev()
+            .find(|fw| fw.geometry.contains_point(x, y))
+            .map(|fw| fw.id);
+        if floating_hit.is_some() {
+            return floating_hit;
+        }
+        let anchor = self
+            .monitor_showing_workspace(ws_idx)
+            .map(|mi| self.monitor_rect(mi))
+            .unwrap_or_else(|| self.focused_rect());
+        self.workspace_render_geometries(ws_idx, anchor)
+            .iter()
+            .rev()
+            .find(|(_, rect)| rect.contains_point(x, y))
+            .map(|(id, _)| *id)
     }
 
     // --- Workspace operations ---
@@ -3894,12 +4075,14 @@ impl WmState {
     /// If the special workspace is currently visible, the window appears there.
     /// If hidden, the window disappears.
     pub fn move_to_special(&mut self, name: &str) {
-        let focused = match self.active_workspace().focused {
+        // FW-4: with a scratchpad up, move ITS focused window, not the
+        // one hidden behind the overlay.
+        let current_idx = self.effective_ws_idx();
+        let focused = match self.workspaces.get(current_idx).focused {
             Some(f) => f,
             None => return,
         };
 
-        let current_idx = self.active_ws_idx();
         let special_idx = self.workspaces.special_index(name);
         if current_idx == special_idx {
             return; // Already on this special workspace
@@ -6542,6 +6725,52 @@ mod tests {
         let clamped = WmState::carry_float_geometry(geom, source, small);
         assert!(clamped.width <= 400.0 && clamped.height <= 300.0);
         assert!(clamped.x >= small.x && clamped.y >= small.y);
+    }
+
+    /// FW-4: with a scratchpad overlay up, clicks hit-test the overlay's
+    /// windows first; clicks that miss fall through to the underlying
+    /// workspace.
+    #[test]
+    fn click_to_focus_prefers_special_overlay() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        // Underlying tile fills the workspace.
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.record_focus(70);
+        }
+        // Scratchpad float in the middle of the screen.
+        let special_idx = state.workspaces.special_index("term");
+        state.registry.add(tracked_window(80, 14, "Notes"));
+        {
+            let ws = state.workspaces.get_mut(special_idx);
+            ws.floating.push(crate::core::workspace::FloatingWindow {
+                id: 80,
+                geometry: Rect::new(700.0, 400.0, 500.0, 300.0),
+            });
+            ws.record_focus(80);
+        }
+        state.active_specials = vec![Some(special_idx)];
+        state.sync_workspace_visibility();
+
+        // Click inside the overlay float: overlay window wins.
+        state.workspaces.get_mut(special_idx).focused = None;
+        state.click_to_focus(800.0, 500.0);
+        assert_eq!(state.workspaces.get(special_idx).focused, Some(80));
+
+        // Click outside the overlay: falls through to the underlying tile.
+        state.click_to_focus(100.0, 100.0);
+        assert_eq!(state.active_workspace().focused, Some(70));
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
