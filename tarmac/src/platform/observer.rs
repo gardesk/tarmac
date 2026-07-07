@@ -59,10 +59,26 @@ pub enum WindowEvent {
 /// Type-erased callback storage.
 type EventCallback = Box<dyn Fn(WindowEvent)>;
 
+/// The app-element notifications an observer registers. Kept as a const
+/// so `Drop` can unregister exactly what `new` registered.
+const APP_NOTIFICATIONS: [&str; 8] = [
+    AX_WINDOW_CREATED,
+    AX_UI_ELEMENT_DESTROYED,
+    AX_FOCUSED_WINDOW_CHANGED,
+    AX_WINDOW_MOVED,
+    AX_WINDOW_RESIZED,
+    AX_TITLE_CHANGED,
+    AX_WINDOW_MINIATURIZED,
+    AX_WINDOW_DEMINIATURIZED,
+];
+
 /// An AXObserver for a single application.
 pub struct AppObserver {
     pid: i32,
     _observer: ManuallyDrop<CFRetained<AXObserver>>,
+    /// The app element the notifications are registered on — retained so
+    /// `Drop` can unregister them (AXObserverRemoveNotification needs it).
+    app_element: CFRetained<AXUIElement>,
     _callback: *mut EventCallback,
 }
 
@@ -91,18 +107,7 @@ impl AppObserver {
             unsafe { CFRetained::from_raw(NonNull::new(observer_ptr).expect("non-null observer")) };
 
         // Subscribe to all notification types on the app element
-        let notifications = [
-            AX_WINDOW_CREATED,
-            AX_UI_ELEMENT_DESTROYED,
-            AX_FOCUSED_WINDOW_CHANGED,
-            AX_WINDOW_MOVED,
-            AX_WINDOW_RESIZED,
-            AX_TITLE_CHANGED,
-            AX_WINDOW_MINIATURIZED,
-            AX_WINDOW_DEMINIATURIZED,
-        ];
-
-        for notif in notifications {
+        for notif in APP_NOTIFICATIONS {
             let notif_str = CFString::from_static_str(notif);
             let err = unsafe {
                 observer.add_notification(app_element, &notif_str, callback_ptr as *mut c_void)
@@ -124,6 +129,7 @@ impl AppObserver {
         Ok(Self {
             pid,
             _observer: ManuallyDrop::new(observer),
+            app_element: unsafe { CFRetained::retain(NonNull::from(app_element)) },
             _callback: callback_ptr,
         })
     }
@@ -131,7 +137,30 @@ impl AppObserver {
 
 impl Drop for AppObserver {
     fn drop(&mut self) {
+        // Order matters: detach the runloop source and unregister every
+        // notification BEFORE freeing the callback box. Otherwise an
+        // AXUIElementDestroyed burst already queued on the observer's
+        // mach port (apps emit one right before their pid disappears)
+        // can fire observer_callback against the freed box — a UAF — and
+        // the retained runloop source leaks one per terminated app.
         unsafe {
+            // Remove the source from whatever runloop new() added it to.
+            // Observers are created and dropped on the main runloop
+            // thread, so current() is the same runloop.
+            let source = self._observer.run_loop_source();
+            if let Some(run_loop) = CFRunLoop::current() {
+                let mode: &CFRunLoopMode =
+                    kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes");
+                run_loop.remove_source(Some(source.as_ref()), Some(mode));
+            }
+
+            for notif in APP_NOTIFICATIONS {
+                let notif_str = CFString::from_static_str(notif);
+                let _ = self
+                    ._observer
+                    .remove_notification(&self.app_element, &notif_str);
+            }
+
             ManuallyDrop::drop(&mut self._observer);
             let _ = Box::from_raw(self._callback);
         }
