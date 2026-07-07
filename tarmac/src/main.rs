@@ -126,6 +126,9 @@ fn main() {
         tarmac::platform::border::BorderColor::from_hex(&config.settings.border_color_unfocused);
     state.borders.radius = config.settings.border_radius;
     state.borders.spawn();
+    // #19: load the previous run's window→workspace layout so discovery can
+    // restore it instead of piling every window onto the active workspace.
+    state.load_restore_session();
     state.discover_and_observe();
     WM_STATE.with(|s| *s.borrow_mut() = Some(state));
 
@@ -356,6 +359,8 @@ fn handle_action(action: Action) {
                 Action::Reload => unreachable!("handled above"),
                 Action::Exit => {
                     tracing::info!("exit requested");
+                    // #19: flush the layout so the next start restores it.
+                    state.persist_session_if_changed();
                     cleanup_socket();
                     std::process::exit(0);
                 }
@@ -635,6 +640,8 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
         tracing::info!("shutdown requested — restoring windows before exit");
         WM_STATE.with(|s| {
             if let Some(state) = s.borrow().as_ref() {
+                // #19: flush the layout first so the next start restores it.
+                state.persist_session_if_changed();
                 state.restore_all_windows_for_shutdown();
             }
         });
@@ -668,6 +675,13 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
                 // OBS-D2: retry AX notification registrations that failed
                 // while a slow-launch app's AX server was warming up.
                 state.retry_pending_observer_registrations();
+            }
+            // #19: periodically persist the layout (~10s) as the crash/SIGKILL
+            // safety net — the graceful-shutdown flush covers clean exits, this
+            // covers everything else. The change check makes a stable layout a
+            // cheap no-op.
+            if tick.is_multiple_of(200) {
+                state.persist_session_if_changed();
             }
         }
     });
