@@ -1622,7 +1622,11 @@ impl WmState {
         // insert_with_rect_options puts new_window as the right child of
         // the new split. Swap children when focal-side / force_split
         // says focused should be the first (left/top) child instead.
-        if focused_should_be_first {
+        // When the target leaf was a stack member the insert MERGED
+        // focused into that stack (group semantics, à la Hyprland) — no
+        // new split exists, and swap_parent_children would flip the
+        // whole stack subtree with an unrelated sibling. Skip it.
+        if focused_should_be_first && !self.active_workspace().tree.is_stack_member(focused) {
             self.active_workspace_mut()
                 .tree
                 .swap_parent_children(focused);

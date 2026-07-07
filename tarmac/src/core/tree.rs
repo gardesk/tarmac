@@ -336,6 +336,17 @@ impl Node {
         }
     }
 
+    /// True when `window` is currently a member of a Stack node.
+    pub fn is_stack_member(&self, window: WindowId) -> bool {
+        match self {
+            Node::Stack { windows, .. } => windows.contains(&window),
+            Node::Internal { left, right, .. } => {
+                left.is_stack_member(window) || right.is_stack_member(window)
+            }
+            _ => false,
+        }
+    }
+
     /// Remove a window from the tree, collapsing empty internal nodes.
     pub fn remove(&mut self, window: WindowId) -> bool {
         match self {
