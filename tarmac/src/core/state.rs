@@ -3393,6 +3393,76 @@ impl WmState {
         }
     }
 
+    /// Best-effort restore of every managed window before the daemon
+    /// exits: alpha back to 1 and every window moved to its model
+    /// geometry. Without this, windows parked off-screen at exit are
+    /// re-discovered at the park position on the next boot — the FW-1
+    /// restart geometry poisoning (623 consecutive show-mismatch events
+    /// logged 2026-05-19).
+    pub fn restore_all_windows_for_shutdown(&self) {
+        if self.monitors.is_empty() {
+            return;
+        }
+        for ws_idx in 0..self.workspaces.count() {
+            let mi = self
+                .monitor_showing_workspace(ws_idx)
+                .or_else(|| {
+                    self.workspaces
+                        .get(ws_idx)
+                        .last_monitor
+                        .filter(|&mi| mi < self.monitors.len())
+                })
+                .unwrap_or(self.focused_monitor.min(self.monitors.len() - 1));
+            let anchor = self.monitors[mi].usable_frame;
+
+            let ws = self.workspaces.get(ws_idx);
+            let mut targets: Vec<(WindowId, Rect)> = ws.tree.calculate_geometries(anchor);
+            targets.extend(
+                ws.floating
+                    .iter()
+                    .map(|f| (f.id, self.sanitize_float_geometry(f.geometry))),
+            );
+
+            for (wid, rect) in targets {
+                let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 1.0);
+                let _ = crate::platform::skylight::set_window_group_alpha(wid, 1.0);
+                let ax_moved = self
+                    .ax_refs
+                    .get(&wid)
+                    .is_some_and(|ax_ref| ax_set_position(ax_ref, rect.x, rect.y).is_ok());
+                if !ax_moved {
+                    let _ = crate::platform::skylight::move_window(wid, rect.x, rect.y);
+                }
+            }
+        }
+        tracing::info!("restored all windows for shutdown");
+    }
+
+    /// Clamp a float rect into a monitor's usable frame when its center
+    /// is not on any monitor. Discovery after an unclean shutdown reads
+    /// the off-screen hide park as the window's geometry; storing it
+    /// verbatim poisons hit-tests, borders, and drag pickup (FW-1).
+    fn sanitize_float_geometry(&self, geom: Rect) -> Rect {
+        if self.monitors.is_empty() {
+            return geom;
+        }
+        let cx = geom.x + geom.width / 2.0;
+        let cy = geom.y + geom.height / 2.0;
+        if self
+            .monitors
+            .iter()
+            .any(|m| m.usable_frame.contains_point(cx, cy))
+        {
+            return geom;
+        }
+        let uf = self.monitors[self.focused_monitor.min(self.monitors.len() - 1)].usable_frame;
+        let width = geom.width.clamp(50.0, uf.width);
+        let height = geom.height.clamp(50.0, uf.height);
+        let x = geom.x.clamp(uf.x, uf.x + uf.width - width);
+        let y = geom.y.clamp(uf.y, uf.y + uf.height - height);
+        Rect::new(x, y, width, height)
+    }
+
     /// Shared bookkeeping for every hide path. A parked wid enters
     /// hidden_offscreen (the safety net and enforcement tick may skip it);
     /// a failed park is left out so enforcement keeps retrying. The cached
@@ -4778,11 +4848,15 @@ impl WmState {
                 // Special workspace rule — send directly to scratchpad
                 let special_idx = self.workspaces.special_index(special_name);
                 let sr = self.focused_rect();
+                let float_geom = should_float.then(|| {
+                    self.sanitize_float_geometry(
+                        rule_geometry
+                            .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
+                            .unwrap_or_else(|| Rect::new(x, y, width, height)),
+                    )
+                });
                 let ws = self.workspaces.get_mut(special_idx);
-                if should_float {
-                    let geom = rule_geometry
-                        .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
-                        .unwrap_or_else(|| Rect::new(x, y, width, height));
+                if let Some(geom) = float_geom {
                     ws.floating.push(super::workspace::FloatingWindow {
                         id: *id,
                         geometry: geom,
@@ -4808,11 +4882,15 @@ impl WmState {
                     .map(|mi| self.monitor_rect(mi))
                     .unwrap_or(self.focused_rect());
 
+                let float_geom = should_float.then(|| {
+                    self.sanitize_float_geometry(
+                        rule_geometry
+                            .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
+                            .unwrap_or_else(|| Rect::new(x, y, width, height)),
+                    )
+                });
                 let ws = self.workspaces.get_or_create(target_idx);
-                if should_float {
-                    let geom = rule_geometry
-                        .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
-                        .unwrap_or_else(|| Rect::new(x, y, width, height));
+                if let Some(geom) = float_geom {
                     ws.floating.push(super::workspace::FloatingWindow {
                         id: *id,
                         geometry: geom,
@@ -4831,9 +4909,11 @@ impl WmState {
         } else {
             let sr = self.focused_rect();
             if should_float {
-                let geom = rule_geometry
-                    .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
-                    .unwrap_or_else(|| Rect::new(x, y, width, height));
+                let geom = self.sanitize_float_geometry(
+                    rule_geometry
+                        .map(|(gx, gy, gw, gh)| Rect::new(gx, gy, gw, gh))
+                        .unwrap_or_else(|| Rect::new(x, y, width, height)),
+                );
                 let ws = self.active_workspace_mut();
                 ws.floating.push(super::workspace::FloatingWindow {
                     id: *id,
@@ -6235,6 +6315,37 @@ mod tests {
             "deferred storm target must not bypass switch silence"
         );
         assert_eq!(state.active_workspace().focused, None);
+    }
+
+    /// FW-1: a float whose geometry is the off-screen hide park (as read
+    /// by discovery after an unclean shutdown, e.g. y=6117 on a 1329-tall
+    /// display) must be clamped back into a monitor's usable frame.
+    /// On-screen geometry passes through untouched.
+    #[test]
+    fn sanitize_float_geometry_clamps_offscreen_rects() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 2056.0, 1329.0),
+            usable_frame: Rect::new(0.0, 39.0, 2056.0, 1290.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+
+        // The logged poison rect: parked below the monitor bottom.
+        let poisoned = Rect::new(1727.0, 6117.0, 800.0, 600.0);
+        let fixed = state.sanitize_float_geometry(poisoned);
+        let cx = fixed.x + fixed.width / 2.0;
+        let cy = fixed.y + fixed.height / 2.0;
+        assert!(
+            state.monitors[0].usable_frame.contains_point(cx, cy),
+            "clamped rect center must be on-screen, got {fixed:?}"
+        );
+        assert_eq!((fixed.width, fixed.height), (800.0, 600.0));
+
+        // A healthy rect is untouched.
+        let healthy = Rect::new(200.0, 200.0, 800.0, 600.0);
+        assert_eq!(state.sanitize_float_geometry(healthy), healthy);
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
