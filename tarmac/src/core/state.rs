@@ -755,7 +755,11 @@ impl WmState {
                         "tile"
                     );
                     self.show_window(*wid, *rect);
-                } else {
+                } else if !self.hidden_offscreen.borrow().contains(wid) {
+                    // Skip members already staged off — re-parking every
+                    // pass cost O(members) blocking AX round-trips per
+                    // stack cycle (~90ms observed). show_window unmarks
+                    // on promotion, so promoted members re-stage cleanly.
                     tracing::trace!(wid, "stack non-active hidden off-screen");
                     self.hide_window(*wid);
                 }
@@ -3793,8 +3797,15 @@ impl WmState {
         hide_frame: Rect,
         monitor_idx: Option<usize>,
     ) -> bool {
-        let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 0.0);
-        let _ = crate::platform::skylight::set_window_group_alpha(wid, 0.0);
+        // The AX park deliberately leaves a 1px sliver on-screen (macOS
+        // clamps the write); alpha is what actually makes the window
+        // invisible. If both alpha calls fail, that sliver shows — worth
+        // a log line since the calls' results were silently dropped.
+        let alpha_ok = crate::platform::skylight::set_window_group_system_alpha(wid, 0.0)
+            | crate::platform::skylight::set_window_group_alpha(wid, 0.0);
+        if !alpha_ok {
+            tracing::debug!(wid, "both SLS alpha hides failed; 1px park sliver may show");
+        }
 
         let ax_ref = self.ax_refs.get(&wid);
         let width = ax_ref
