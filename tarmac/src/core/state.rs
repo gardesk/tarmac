@@ -3365,17 +3365,32 @@ impl WmState {
     /// y well below the monitor bottom so macOS clamps it just off-screen.
     fn hide_window(&self, wid: WindowId) {
         let (hide_frame, monitor_idx) = self.hide_anchor_frame(wid);
-        self.hide_window_on_frame(wid, hide_frame, monitor_idx);
+        let parked = self.hide_window_on_frame(wid, hide_frame, monitor_idx);
         // Mark as offscreen so the apply_layout safety-net sweep skips
         // this wid on subsequent passes until something shows it again.
-        self.hidden_offscreen.borrow_mut().insert(wid);
+        // Only a hide whose position write actually landed counts —
+        // otherwise the enforcement tick must keep retrying, or the
+        // window survives on screen as a rogue.
+        if parked {
+            self.hidden_offscreen.borrow_mut().insert(wid);
+        } else {
+            tracing::warn!(wid, "hide position write failed via AX and SkyLight");
+            self.hidden_offscreen.borrow_mut().remove(&wid);
+        }
         // The cached "last applied rect" is no longer accurate — the
         // window is now parked off-screen. Drop it so the next
         // show_window re-applies the full sequence (perf #128).
         self.last_applied_rect.borrow_mut().remove(&wid);
     }
 
-    fn hide_window_on_frame(&self, wid: WindowId, hide_frame: Rect, monitor_idx: Option<usize>) {
+    /// Returns true when the off-screen position write landed (via AX or
+    /// the SkyLight fallback). Alpha calls are best-effort either way.
+    fn hide_window_on_frame(
+        &self,
+        wid: WindowId,
+        hide_frame: Rect,
+        monitor_idx: Option<usize>,
+    ) -> bool {
         let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 0.0);
         let _ = crate::platform::skylight::set_window_group_alpha(wid, 0.0);
 
@@ -3403,15 +3418,27 @@ impl WmState {
             );
         }
 
-        if let Some(ax_ref) = ax_ref {
-            let _ = ax_set_position(ax_ref, hide_x, hide_y);
+        let parked = if let Some(ax_ref) = ax_ref {
+            if ax_set_position(ax_ref, hide_x, hide_y).is_ok() {
+                true
+            } else {
+                // A stale AX element (app hung/died, or the ref was
+                // invalidated without a correlated Destroyed event) fails
+                // this write on every enforcement tick — forever. Park the
+                // window at the WindowServer level instead so a dead AX ref
+                // can't leave a rogue window on screen.
+                tracing::debug!(wid, "AX hide failed; falling back to SkyLight move");
+                crate::platform::skylight::move_window(wid, hide_x, hide_y)
+            }
         } else {
-            let _ = crate::platform::skylight::move_window(wid, hide_x, hide_y);
-        }
+            crate::platform::skylight::move_window(wid, hide_x, hide_y)
+        };
 
         // Reassert opacity after the move in case the app redraws itself.
         let _ = crate::platform::skylight::set_window_group_alpha(wid, 0.0);
         let _ = crate::platform::skylight::set_window_group_system_alpha(wid, 0.0);
+
+        parked
     }
 
     fn hide_anchor_frame(&self, wid: WindowId) -> (Rect, Option<usize>) {
