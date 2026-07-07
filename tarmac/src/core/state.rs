@@ -2046,10 +2046,15 @@ impl WmState {
         self.ext_focus_history.clear();
         if let Some(target) = self.ext_focus_pending_target.take() {
             tracing::debug!(target, "ext focus quiet expired — applying deferred target");
-            // Re-enter adoption; rate_limit_external_focus will see a fresh
-            // history and proceed normally. If the storm is ongoing it'll
-            // re-arm quiet on the very next AX event.
-            self.adopt_external_focus(target);
+            // Re-enter through the full guard funnel (workspace-switch
+            // silence, internal-focus shadowing, candidate revalidation) —
+            // the deferred target is a snapshot from mid-storm and may be
+            // stale by the time quiet expires. rate_limit_external_focus
+            // sees a fresh history; an ongoing storm re-arms quiet on the
+            // next AX event.
+            if let Some(pid) = self.registry.get(target).map(|w| w.app_pid) {
+                self.adopt_external_app_focus(pid, Some(target));
+            }
         }
     }
 
@@ -2083,6 +2088,15 @@ impl WmState {
             tracing::debug!(pid, "dropping pid-only adoption during spawn suppression");
             return;
         }
+        // A pid-only event (frontmost-app poll) doesn't say WHICH window;
+        // the focus-history fallback can pick the wrong sibling. Ask the
+        // app itself which window is focused and use it when it maps to a
+        // window we manage.
+        let requested = requested.or_else(|| {
+            crate::platform::accessibility::ax_get_focused_window_id(pid)
+                .map(|wid| wid as WindowId)
+                .filter(|wid| self.registry.contains(*wid))
+        });
         if self.should_ignore_external_focus(pid, requested) {
             return;
         }
@@ -6178,6 +6192,49 @@ mod tests {
             state.hidden_offscreen.borrow().contains(&70),
             "drained show for a hidden workspace must not unmark the park"
         );
+    }
+
+    /// A storm target deferred into quiet mode must re-enter through the
+    /// full guard funnel when drained — not bypass workspace-switch
+    /// silence and yank the user back right after they switched away.
+    #[test]
+    fn drain_pending_ext_focus_respects_switch_silence() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        state
+            .workspaces
+            .get_or_create_target(&WorkspaceTarget::Numbered(2));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.record_focus(70);
+        }
+        // User is on ws2; the storm target lives on hidden ws1.
+        state.monitors[0].active_workspace = 1;
+        state.sync_workspace_visibility();
+
+        state.ext_focus_quiet_until =
+            Some(std::time::Instant::now() - std::time::Duration::from_millis(1));
+        state.ext_focus_pending_target = Some(70);
+        state.workspace_switch_silence_until =
+            Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
+
+        state.drain_pending_ext_focus();
+
+        assert_eq!(
+            state.monitors[0].active_workspace, 1,
+            "deferred storm target must not bypass switch silence"
+        );
+        assert_eq!(state.active_workspace().focused, None);
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes

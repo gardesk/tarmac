@@ -42,6 +42,17 @@ fn check(err: AXError) -> AxResult<()> {
     }
 }
 
+/// Ask an app which of its windows is currently focused: the CGWindowID
+/// behind the app element's AXFocusedWindow attribute, if any.
+pub fn ax_get_focused_window_id(pid: i32) -> Option<CGWindowID> {
+    let app = unsafe { AXUIElement::new_application(pid) };
+    let attr = CFString::from_static_str("AXFocusedWindow");
+    let value = ax_copy_attribute(&app, &attr).ok()?;
+    let win_ptr = &*value as *const CFType as *const AXUIElement;
+    let win = unsafe { &*win_ptr };
+    ax_get_window_id(win).ok()
+}
+
 /// Get a single attribute value from an AXUIElement.
 pub fn ax_copy_attribute(element: &AXUIElement, attr: &CFString) -> AxResult<CFRetained<CFType>> {
     let mut value: *const CFType = ptr::null();
