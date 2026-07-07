@@ -234,6 +234,20 @@ pub struct WmState {
     pub workspace_defs: Vec<WorkspaceDefinition>,
     /// Border overlay manager for focused/unfocused window borders.
     pub borders: crate::platform::border::BorderManager,
+    /// #19: layout remembered from the previous run, loaded at startup and
+    /// consumed during discovery to place pre-existing windows back on their
+    /// workspaces instead of piling them onto the active one. Empty after a
+    /// clean install or once every entry has been matched.
+    restore_session: RefCell<crate::config::session::Session>,
+    /// Serialized form of the session last written to disk — lets the periodic
+    /// flush skip the write (and the disk churn) when nothing has moved.
+    last_session_json: RefCell<Option<String>>,
+    /// #19: true only while `discover_and_observe` is placing pre-existing
+    /// windows. Tells `add_window_to_active` to consult `restore_session` for a
+    /// remembered workspace, and to suppress the `switch_workspace` side effect
+    /// of the workspace-routing path (bulk restore must not thrash the active
+    /// workspace as each window lands).
+    restoring_layout: std::cell::Cell<bool>,
 }
 
 impl Default for WmState {
@@ -295,6 +309,9 @@ impl WmState {
             special_configs: Vec::new(),
             workspace_defs: crate::config::lua::default_workspace_definitions(),
             borders: crate::platform::border::BorderManager::new(),
+            restore_session: RefCell::new(crate::config::session::Session::default()),
+            last_session_json: RefCell::new(None),
+            restoring_layout: std::cell::Cell::new(false),
         }
     }
 
@@ -565,6 +582,10 @@ impl WmState {
         // their original monitor — visible to the user as windows
         // that are reachable via stack-cycle but never join the tile.
         let original_focused = self.focused_monitor;
+        // #19: place pre-existing windows on their remembered workspace when a
+        // saved layout exists; add_window_to_active reads restore_session while
+        // this flag is set. Cleared unconditionally after the loop.
+        self.restoring_layout.set(true);
         for w in &windows {
             let cx = w.x + w.width / 2.0;
             let cy = w.y + w.height / 2.0;
@@ -586,6 +607,7 @@ impl WmState {
                 w.ax_ref.clone(),
             );
         }
+        self.restoring_layout.set(false);
         self.focused_monitor = original_focused;
 
         tracing::info!(
@@ -658,6 +680,64 @@ impl WmState {
             tracing::info!(wid, "reconcile: window vanished from WindowServer, reaping");
             self.on_window_closed(wid);
         }
+    }
+
+    /// #19: capture the current window→workspace layout for persistence.
+    /// Only windows with a bundle id are recorded — an empty bundle can't be
+    /// matched back on restore, so storing it is dead weight. Windows in no
+    /// workspace (transient, mid-reap) are skipped.
+    fn snapshot_session(&self) -> crate::config::session::Session {
+        use crate::config::session::{Session, SessionEntry};
+        let mut entries = Vec::new();
+        for w in self.registry.all() {
+            if w.app_bundle_id.is_empty() {
+                continue;
+            }
+            let Some(ws_idx) = self.workspaces.find_window(w.id) else {
+                continue;
+            };
+            entries.push(SessionEntry {
+                bundle_id: w.app_bundle_id.clone(),
+                title: w.title.clone(),
+                workspace: self.workspaces.get(ws_idx).id.to_string(),
+            });
+        }
+        Session { entries }
+    }
+
+    /// #19: write the session to disk if it changed since the last write.
+    /// Called periodically from the poll tick and once on shutdown; the
+    /// change check keeps the periodic path from churning the disk while the
+    /// layout is stable. Best-effort — a write failure is logged, not fatal.
+    pub fn persist_session_if_changed(&self) {
+        let Some(path) = crate::config::session::Session::default_path() else {
+            return;
+        };
+        let session = self.snapshot_session();
+        let Ok(json) = serde_json::to_string(&session) else {
+            return;
+        };
+        if self.last_session_json.borrow().as_deref() == Some(json.as_str()) {
+            return;
+        }
+        match session.save(&path) {
+            Ok(()) => *self.last_session_json.borrow_mut() = Some(json),
+            Err(e) => tracing::warn!(err = %e, "failed to persist session"),
+        }
+    }
+
+    /// #19: load the previous run's layout so discovery can restore it. Called
+    /// before `discover_and_observe`. A missing file yields an empty session
+    /// and discovery falls back to its default active-workspace placement.
+    pub fn load_restore_session(&self) {
+        let Some(path) = crate::config::session::Session::default_path() else {
+            return;
+        };
+        let session = crate::config::session::Session::load(&path);
+        if !session.is_empty() {
+            tracing::info!(entries = session.entries.len(), "loaded remembered layout");
+        }
+        *self.restore_session.borrow_mut() = session;
     }
 
     /// OBS-D4: for each window whose AX write just failed, try to recover
@@ -5391,6 +5471,19 @@ impl WmState {
             }
         }
 
+        // #19: during startup restore, a remembered workspace stands in for a
+        // rule-assigned one when no rule already claimed this window. An
+        // explicit rule always wins over the remembered layout.
+        if rule_workspace.is_none() && self.restoring_layout.get() {
+            rule_workspace = self
+                .restore_session
+                .borrow_mut()
+                .take_match(app_bundle_id, title);
+            if let Some(ref ws) = rule_workspace {
+                tracing::info!(id = *id, app_name, workspace = %ws, "restoring window to remembered workspace");
+            }
+        }
+
         // FW-7: AX subrole/AXModal probes are unreliable for windows not
         // currently composited on screen — after a crash/force-kill (no
         // shutdown restore ran) discovery reads windows parked off-screen
@@ -5498,7 +5591,13 @@ impl WmState {
 
                 if !is_active {
                     self.hide_window(*id);
-                    self.switch_workspace(&target);
+                    // #19: a real rule follows the user to the assigned
+                    // workspace; bulk restore must not — it would thrash the
+                    // active workspace to whichever window landed last. Park
+                    // the window hidden and leave the active workspace put.
+                    if !self.restoring_layout.get() {
+                        self.switch_workspace(&target);
+                    }
                 }
             }
         } else {
@@ -8269,6 +8368,78 @@ mod tests {
         ws.tree.insert_with_rect(2, Some(1), screen);
         ws.tree.insert_with_rect(3, Some(2), screen);
         state
+    }
+
+    #[test]
+    fn snapshot_session_records_workspace_per_window() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        // ws0: a tiled window.
+        state.registry.add(tracked_window(1, 100, "Alpha"));
+        state
+            .workspaces
+            .get_mut(0)
+            .tree
+            .insert_with_rect(1, None, screen);
+
+        // ws1: a floating window.
+        state.registry.add(tracked_window(2, 101, "Beta"));
+        state
+            .workspaces
+            .get_or_create(1)
+            .floating
+            .push(crate::core::workspace::FloatingWindow {
+                id: 2,
+                geometry: Rect::new(10.0, 10.0, 200.0, 200.0),
+            });
+
+        // A special (scratchpad) workspace.
+        let sp = state.workspaces.special_index("scratch");
+        state.registry.add(tracked_window(3, 102, "Gamma"));
+        state
+            .workspaces
+            .get_mut(sp)
+            .tree
+            .insert_with_rect(3, None, screen);
+
+        // A window with no bundle id — unmatchable on restore, must be skipped.
+        let mut helper = tracked_window(4, 103, "Helper");
+        helper.app_bundle_id = String::new();
+        state.registry.add(helper);
+        state
+            .workspaces
+            .get_mut(0)
+            .tree
+            .insert_with_rect(4, Some(1), screen);
+
+        let ws0_id = state.workspaces.get(0).id.to_string();
+        let ws1_id = state.workspaces.get(1).id.to_string();
+        let sp_id = state.workspaces.get(sp).id.to_string();
+
+        let session = state.snapshot_session();
+        let ws_of = |title: &str| {
+            session
+                .entries
+                .iter()
+                .find(|e| e.title == title)
+                .map(|e| e.workspace.clone())
+        };
+
+        assert_eq!(ws_of("Alpha 1").as_deref(), Some(ws0_id.as_str()));
+        assert_eq!(ws_of("Beta 2").as_deref(), Some(ws1_id.as_str()));
+        assert_eq!(ws_of("Gamma 3").as_deref(), Some(sp_id.as_str()));
+        assert_eq!(sp_id, "special:scratch");
+        // The empty-bundle window is skipped; only the other three appear.
+        assert!(session.entries.iter().all(|e| e.title != "Helper 4"));
+        assert_eq!(session.entries.len(), 3);
     }
 
     #[test]
