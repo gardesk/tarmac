@@ -5361,10 +5361,11 @@ impl WmState {
                     h,
                     element.clone(),
                 );
+                // Perf #126 parity: defer the settle-pass to the runloop
+                // tick instead of blocking the AX event handler for 50ms
+                // (the poller path was deferred; this one was missed).
                 self.apply_layout();
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                self.apply_layout();
-                self.fix_oversized_windows();
+                self.schedule_followup_apply(true);
             }
             WindowEvent::Destroyed { element, .. } => {
                 // _AXUIElementGetWindow frequently returns kAXErrorInvalidUIElement
