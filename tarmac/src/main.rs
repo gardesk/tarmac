@@ -623,6 +623,16 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
     static TICK: AtomicU32 = AtomicU32::new(0);
     let tick = TICK.fetch_add(1, Ordering::Relaxed);
 
+    if SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+        tracing::info!("shutdown requested — restoring windows before exit");
+        WM_STATE.with(|s| {
+            if let Some(state) = s.borrow().as_ref() {
+                state.restore_all_windows_for_shutdown();
+            }
+        });
+        std::process::exit(0);
+    }
+
     WM_STATE.with(|s| {
         if let Some(state) = s.borrow_mut().as_mut() {
             state.process_events();
@@ -1155,10 +1165,22 @@ fn init_config_dir() {
     }
 }
 
+/// Set when SIGINT/SIGTERM arrives. The signal handler runs on a
+/// background thread and must not touch WM_STATE; the polling timer
+/// notices the flag on the main thread, restores windows (FW-1 restart
+/// poisoning: exiting with windows parked off-screen poisons the next
+/// boot's discovery geometry), and exits.
+static SHUTDOWN_REQUESTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn install_signal_handlers() {
     if let Err(e) = ctrlc::set_handler(|| {
+        use std::sync::atomic::Ordering;
+        // Second signal (stuck AX call, wedged runloop): exit immediately.
+        if SHUTDOWN_REQUESTED.swap(true, Ordering::SeqCst) {
+            std::process::exit(1);
+        }
         cleanup_socket();
-        std::process::exit(0);
     }) {
         tracing::warn!("failed to set ctrl-c handler: {}", e);
     }
