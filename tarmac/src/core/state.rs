@@ -862,6 +862,14 @@ impl WmState {
                 }
             }
         }
+
+        // Switching to an empty workspace leaves no focused window — tell
+        // ers to drop the focused border instead of leaving a ghost ring
+        // at the previous window's position (dedup in notify_focus makes
+        // the repeat sends free).
+        if self.effective_focused().is_none() {
+            self.borders.notify_focus(0);
+        }
     }
 
     fn show_window(&self, wid: WindowId, rect: Rect) {
