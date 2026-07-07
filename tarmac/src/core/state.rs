@@ -69,6 +69,10 @@ const EXT_FOCUS_QUIET_DURATION: std::time::Duration = std::time::Duration::from_
 /// (~250ms); generous headroom for slow terminal cold starts.
 const SPAWN_ADOPT_SUPPRESS: std::time::Duration = std::time::Duration::from_millis(1000);
 
+/// FW-7: how long a just-reaped wid is barred from re-adoption, to break
+/// detect→float→activate→disappear→re-detect dialog-flicker storms.
+const DIALOG_REAP_COOLDOWN: std::time::Duration = std::time::Duration::from_millis(600);
+
 /// Central state for the window manager.
 pub struct WmState {
     pub registry: WindowRegistry,
@@ -188,6 +192,11 @@ pub struct WmState {
     /// FW-2: deadline for re-asserting float stacking order after an
     /// asynchronous cross-app activation. See drain_pending_float_restack.
     pending_float_restack: std::cell::Cell<Option<std::time::Instant>>,
+    /// FW-7: wid -> time it was last reaped. A flickering system dialog
+    /// (detect -> float -> activate -> disappear -> re-detect, observed
+    /// 10× in 6s) otherwise re-adopts and re-activates on every cycle.
+    /// Re-adoption of a just-reaped wid is suppressed for a short window.
+    recently_reaped: HashMap<WindowId, std::time::Instant>,
     /// FW-2: SLSSetWindowLevel failures are expected on some Tahoe
     /// configurations (leveling other apps' windows); log the degradation
     /// to AXRaise-ordering once, not per call.
@@ -269,6 +278,7 @@ impl WmState {
             hidden_offscreen: std::cell::RefCell::new(std::collections::HashSet::new()),
             hidden_enforce_tick: std::cell::Cell::new(0),
             pending_float_restack: std::cell::Cell::new(None),
+            recently_reaped: HashMap::new(),
             level_failure_logged: std::cell::Cell::new(false),
             last_applied_rect: std::cell::RefCell::new(HashMap::new()),
             pending_followup_apply: std::cell::Cell::new(None),
@@ -3139,12 +3149,15 @@ impl WmState {
             };
             let overlay_rect = Rect::new(overlay_x, overlay_y, overlay_w, overlay_h);
 
-            // Check floating windows on special workspace
+            // Check floating windows on special workspace (skip minimized)
             let floating_hit = ws
                 .floating
                 .iter()
                 .rev()
-                .find(|fw| fw.geometry.contains_point(x, y))
+                .find(|fw| {
+                    fw.geometry.contains_point(x, y)
+                        && !self.registry.get(fw.id).is_some_and(|w| w.minimized)
+                })
                 .map(|fw| fw.id);
 
             if floating_hit.is_some() {
@@ -3168,11 +3181,15 @@ impl WmState {
             let ws = self.active_workspace();
 
             // Check floating windows first -- they're visually on top
+            // (skip minimized: geometry present but not on screen).
             let floating_under = ws
                 .floating
                 .iter()
                 .rev()
-                .find(|fw| fw.geometry.contains_point(x, y))
+                .find(|fw| {
+                    fw.geometry.contains_point(x, y)
+                        && !self.registry.get(fw.id).is_some_and(|w| w.minimized)
+                })
                 .map(|fw| fw.id);
 
             if floating_under.is_some() {
@@ -3615,11 +3632,16 @@ impl WmState {
     /// before tiles.
     fn workspace_hit_test(&self, ws_idx: usize, x: f64, y: f64) -> Option<WindowId> {
         let ws = self.workspaces.get(ws_idx);
+        // FW-7: a minimized float keeps its geometry but isn't on screen —
+        // skip it so it doesn't steal clicks/hover for an invisible window.
         let floating_hit = ws
             .floating
             .iter()
             .rev()
-            .find(|fw| fw.geometry.contains_point(x, y))
+            .find(|fw| {
+                fw.geometry.contains_point(x, y)
+                    && !self.registry.get(fw.id).is_some_and(|w| w.minimized)
+            })
             .map(|fw| fw.id);
         if floating_hit.is_some() {
             return floating_hit;
@@ -4999,6 +5021,10 @@ impl WmState {
             return false;
         }
         tracing::info!(id, "window closed -> retiling");
+        // FW-7: stamp the reap time so a flickering dialog that instantly
+        // reappears under the same wid isn't re-adopted every cycle.
+        self.recently_reaped
+            .insert(id, std::time::Instant::now());
         self.borders.remove_border(id);
         self.registry.remove(id);
         self.ax_refs.remove(&id);
@@ -5265,6 +5291,17 @@ impl WmState {
             return;
         }
 
+        // FW-7: suppress re-adoption of a just-reaped wid — a flickering
+        // system dialog otherwise re-floats and re-activates every cycle
+        // (10× in 6s observed). Prune expired entries as we go.
+        let now = std::time::Instant::now();
+        self.recently_reaped
+            .retain(|_, t| now.duration_since(*t) < DIALOG_REAP_COOLDOWN);
+        if self.recently_reaped.contains_key(id) {
+            tracing::debug!(id, app_name, "skipping re-adoption of recently-reaped window (churn guard)");
+            return;
+        }
+
         tracing::debug!(
             id,
             app_name,
@@ -5293,7 +5330,25 @@ impl WmState {
             }
         }
 
-        let should_float = rule_float.unwrap_or_else(|| should_auto_float(subrole, &ax_ref));
+        // FW-7: AX subrole/AXModal probes are unreliable for windows not
+        // currently composited on screen — after a crash/force-kill (no
+        // shutdown restore ran) discovery reads windows parked off-screen
+        // and the same window flips AXStandardWindow <-> AXDialog across
+        // restarts, converting tiled windows into floats. Only trust the
+        // auto-float probe for on-screen windows; an explicit rule always
+        // wins. Off-screen windows default to tiled (a wrongly-tiled
+        // window is visible and manageable; a wrongly-floated one drifts).
+        let should_float = rule_float.unwrap_or_else(|| {
+            let on_screen = crate::platform::application::get_cg_window_list()
+                .iter()
+                .any(|cg| cg.wid == *id);
+            if on_screen {
+                should_auto_float(subrole, &ax_ref)
+            } else {
+                tracing::debug!(id = *id, subrole, "distrusting auto-float probe: window off-screen");
+                false
+            }
+        });
 
         self.registry.add(WindowState {
             id: *id,
@@ -7051,6 +7106,44 @@ mod tests {
             !state.registry.get(70).unwrap().floating,
             "registry flag must follow floating -> tiled"
         );
+    }
+
+    /// FW-7: a just-reaped wid is barred from re-adoption for the
+    /// cooldown, breaking dialog-flicker churn.
+    #[test]
+    fn recently_reaped_window_is_not_readopted() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+
+        // Simulate a fresh reap.
+        state.recently_reaped.insert(90, std::time::Instant::now());
+        let ax = unsafe { AXUIElement::new_application(1) };
+        state.add_window_to_active(
+            &90, 1, "Keychain Access", "", "Alert", "AXWindow", "AXDialog", 100.0, 100.0, 400.0,
+            300.0, ax.clone(),
+        );
+        assert!(
+            state.workspaces.find_window(90).is_none(),
+            "recently-reaped wid must not be re-adopted"
+        );
+
+        // After the cooldown expires, adoption proceeds.
+        state.recently_reaped.insert(
+            90,
+            std::time::Instant::now() - std::time::Duration::from_secs(2),
+        );
+        state.add_window_to_active(
+            &90, 1, "Keychain Access", "", "Alert", "AXWindow", "AXStandardWindow", 100.0, 100.0,
+            400.0, 300.0, ax,
+        );
+        assert!(state.workspaces.find_window(90).is_some());
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
