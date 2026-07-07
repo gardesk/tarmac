@@ -3082,6 +3082,17 @@ impl WmState {
         let pending: Vec<(WindowId, Rect)> =
             self.pending_show_window.borrow_mut().drain().collect();
         for (wid, rect) in pending {
+            // Belt-and-braces against resurrecting hidden windows: the
+            // queued rect predates any workspace switch that happened
+            // between throttle and drain.
+            let visible = self
+                .workspaces
+                .find_window(wid)
+                .is_none_or(|ws_idx| self.workspace_is_effectively_visible(ws_idx));
+            if !visible {
+                tracing::trace!(wid, "dropping pending show for hidden workspace");
+                continue;
+            }
             self.show_window(wid, rect);
         }
     }
@@ -3382,6 +3393,9 @@ impl WmState {
             self.hidden_offscreen.borrow_mut().remove(&wid);
         }
         self.last_applied_rect.borrow_mut().remove(&wid);
+        // A show throttled before this hide must not be drained afterwards —
+        // it would resurrect the just-hidden window on screen.
+        self.pending_show_window.borrow_mut().remove(&wid);
     }
 
     /// Hide a single window using its workspace's monitor affinity.
@@ -6115,6 +6129,54 @@ mod tests {
         assert!(
             state.hidden_offscreen.borrow().contains(&70),
             "displaced window must be tracked as parked off-screen"
+        );
+    }
+
+    /// A show throttled before a workspace switch must not be drained
+    /// after it — that resurrected windows of the just-hidden workspace
+    /// on screen (transient rogue-window flash).
+    #[test]
+    fn hide_purges_pending_show_and_drain_skips_hidden_workspaces() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.record_focus(70);
+        }
+        state.sync_workspace_visibility();
+
+        // A throttled show is queued, then the workspace is switched away
+        // (hide path runs record_hidden).
+        state
+            .pending_show_window
+            .borrow_mut()
+            .insert(70, Rect::new(0.0, 33.0, 960.0, 1047.0));
+        state.switch_workspace(&WorkspaceTarget::Numbered(2));
+        assert!(
+            !state.pending_show_window.borrow().contains_key(&70),
+            "hide must purge the queued show"
+        );
+
+        // Even if a queued entry survives (hide path that bypasses
+        // record_hidden), the drain itself must skip hidden workspaces.
+        state
+            .pending_show_window
+            .borrow_mut()
+            .insert(70, Rect::new(0.0, 33.0, 960.0, 1047.0));
+        state.drain_pending_show_window();
+        assert!(
+            state.hidden_offscreen.borrow().contains(&70),
+            "drained show for a hidden workspace must not unmark the park"
         );
     }
 
