@@ -702,6 +702,35 @@ impl WmState {
         }
     }
 
+    /// CF-3: re-home any registry window that ended up in no workspace at all.
+    /// Such an orphan is invisible to every hide/layout path — it sits on
+    /// screen behind whatever workspace is active and never moves, and clicking
+    /// it drives external-focus adoption. Every insertion path is guarded, so
+    /// this should never fire; it's a structural backstop against a malformed
+    /// rule/session string or a future refactor leaking one. Adopting the
+    /// orphan into the active workspace turns a permanent rogue into a managed
+    /// tile. Runs after the WindowServer reap so a just-vanished wid isn't
+    /// re-adopted a tick before it's reaped.
+    pub fn reconcile_orphaned_windows(&mut self) {
+        let orphans: Vec<WindowId> = self
+            .registry
+            .all()
+            .map(|w| w.id)
+            .filter(|&wid| self.workspaces.find_window(wid).is_none())
+            .collect();
+        if orphans.is_empty() {
+            return;
+        }
+        let sr = self.focused_rect();
+        for wid in orphans {
+            tracing::warn!(wid, "orphaned window in no workspace — adopting into active");
+            let ws = self.active_workspace_mut();
+            ws.tree.insert_with_rect(wid, ws.focused, sr);
+            ws.record_focus(wid);
+        }
+        self.apply_layout();
+    }
+
     /// #19: capture the current window→workspace layout for persistence.
     /// Only windows with a bundle id are recorded — an empty bundle can't be
     /// matched back on restore, so storing it is dead weight. Windows in no
@@ -3018,6 +3047,14 @@ impl WmState {
                     ws.tree.swap_parent_children(wid);
                 }
                 ws.record_focus(wid);
+                // CF-2: a cross-workspace relocate (multi-monitor, or a hotkey
+                // workspace switch mid-drag) leaves the source workspace's
+                // focused/focus_history pointing at a window that now lives
+                // here. Scrub it so a later switch back doesn't focus_window a
+                // window on another workspace (spurious teleport).
+                if source_ws != target_ws {
+                    self.workspaces.get_mut(source_ws).forget_focus(wid);
+                }
                 self.prune_focus_memory_for_window(wid);
                 self.sync_registry_floating(wid, false);
                 // FW-2: the drag floated this window at FLOATING level;
@@ -5691,6 +5728,22 @@ impl WmState {
                         self.switch_workspace(&target);
                     }
                 }
+            } else {
+                // CF-3: an unparseable workspace string (malformed gar.rule or
+                // a corrupted session entry) must NOT fall through — the window
+                // is already in the registry + ax_refs, so skipping placement
+                // orphans it in no workspace: invisible to every hide path and
+                // a permanent on-screen rogue. Fall back to the active
+                // workspace's tree so it stays managed.
+                tracing::warn!(
+                    id,
+                    workspace = %ws_str,
+                    "unparseable workspace target; placing in active workspace"
+                );
+                let sr = self.focused_rect();
+                let ws = self.active_workspace_mut();
+                ws.tree.insert_with_rect(*id, ws.focused, sr);
+                ws.record_focus(*id);
             }
         } else if let Some(sidx) = self.overlay_join_target(app_pid) {
             // FW-8: a scratchpad overlay is up on the focused monitor and this
@@ -7278,6 +7331,51 @@ mod tests {
         );
         // The already-on-screen float is left exactly where it was.
         assert_eq!(floats.iter().find(|f| f.id == 2).unwrap().geometry, onscreen);
+    }
+
+    #[test]
+    fn reconcile_orphaned_windows_adopts_into_active() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 30.0, 1920.0, 1050.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        // A window in the registry but in no workspace tree/floating list.
+        state.registry.add(tracked_window(7, 100, "Orphan"));
+        assert!(state.workspaces.find_window(7).is_none());
+
+        state.reconcile_orphaned_windows();
+
+        // Adopted into the active workspace and no longer an orphan.
+        assert_eq!(state.workspaces.find_window(7), Some(state.active_ws_idx()));
+    }
+
+    #[test]
+    fn reconcile_orphaned_windows_leaves_placed_windows_alone() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 1,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 30.0, 1920.0, 1050.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        // A window already placed on workspace index 3 must not be pulled out.
+        state.registry.add(tracked_window(5, 100, "Placed"));
+        state
+            .workspaces
+            .get_mut(3)
+            .tree
+            .insert_with_rect(5, None, Rect::new(0.0, 0.0, 800.0, 600.0));
+
+        state.reconcile_orphaned_windows();
+
+        assert_eq!(state.workspaces.find_window(5), Some(3));
     }
 
     #[test]
