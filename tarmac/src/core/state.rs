@@ -1342,6 +1342,21 @@ impl WmState {
             return;
         }
 
+        // FW-5: a focused float is invisible to the BSP machinery below
+        // (dead arrow keys, or spurious monitor jumps). Do a directional
+        // nearest-center scan over the combined float + tile geometry.
+        if let Some(from) = focused
+            && self.active_workspace().is_floating(from)
+        {
+            let ws_idx = self.active_ws_idx();
+            if let Some(next) = self.directional_neighbor_with_floats(ws_idx, from, direction, sr)
+            {
+                self.focus_window(next);
+                self.sync_mouse_after_focus(ws_idx, next);
+            }
+            return;
+        }
+
         // Try intra-workspace navigation first (only if we have a focused window)
         if let Some(from) = focused {
             let geoms = self.workspace_focus_geometries(self.active_ws_idx(), sr);
@@ -1637,6 +1652,53 @@ impl WmState {
         self.sync_mouse_after_focus(ws_idx, focused);
     }
 
+    /// FW-5: directional focus candidate over the union of a workspace's
+    /// tiles and floats — nearest window center strictly in `direction`
+    /// from the focused window's center.
+    fn directional_neighbor_with_floats(
+        &self,
+        ws_idx: usize,
+        from: WindowId,
+        direction: super::tree::Direction,
+        sr: Rect,
+    ) -> Option<WindowId> {
+        use super::tree::Direction;
+
+        let ws = self.workspaces.get(ws_idx);
+        let from_rect = ws
+            .floating
+            .iter()
+            .find(|f| f.id == from)
+            .map(|f| f.geometry)
+            .or_else(|| ws.tree.geometry_for(from, sr))?;
+        let fc = (
+            from_rect.x + from_rect.width / 2.0,
+            from_rect.y + from_rect.height / 2.0,
+        );
+
+        let mut candidates: Vec<(WindowId, Rect)> = self.workspace_focus_geometries(ws_idx, sr);
+        let ws = self.workspaces.get(ws_idx);
+        candidates.extend(ws.floating.iter().map(|f| (f.id, f.geometry)));
+
+        candidates
+            .into_iter()
+            .filter(|(id, _)| *id != from)
+            .filter(|(_, r)| {
+                let c = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+                match direction {
+                    Direction::Left => c.0 < fc.0 - 1.0,
+                    Direction::Right => c.0 > fc.0 + 1.0,
+                    Direction::Up => c.1 < fc.1 - 1.0,
+                    Direction::Down => c.1 > fc.1 + 1.0,
+                }
+            })
+            .min_by_key(|(_, r)| {
+                let c = (r.x + r.width / 2.0, r.y + r.height / 2.0);
+                (((c.0 - fc.0).powi(2) + (c.1 - fc.1).powi(2)) * 100.0) as i64
+            })
+            .map(|(id, _)| id)
+    }
+
     pub fn swap_direction(&mut self, direction: super::tree::Direction) {
         use super::tree::Direction;
 
@@ -1645,6 +1707,15 @@ impl WmState {
             Some(f) => f,
             None => return,
         };
+        // FW-5: a float is never in the tree geometries, so the logic
+        // below sees at_edge=false, finds no adjacent tile, and falls
+        // through to the monitor fallback — teleporting the float to
+        // another monitor on a plain mod+shift+arrow. Swaps are a tiled
+        // concept; no-op for floats.
+        if ws.is_floating(focused) {
+            tracing::debug!(focused, ?direction, "swap: focused window is floating — no-op");
+            return;
+        }
         let sr = self.focused_rect();
 
         if matches!(direction, Direction::Left | Direction::Right)
@@ -6847,6 +6918,56 @@ mod tests {
         // Click outside the overlay: falls through to the underlying tile.
         state.click_to_focus(100.0, 100.0);
         assert_eq!(state.active_workspace().focused, Some(70));
+    }
+
+    /// FW-5: directional focus works from a floating window (they are
+    /// invisible to the BSP machinery) and swaps from a float are no-ops
+    /// instead of cross-monitor teleports.
+    #[test]
+    fn directional_focus_from_float_reaches_tiles_and_floats() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        let screen = state.monitors[0].usable_frame;
+
+        // Tile fills the left; float A on the right; float B below A.
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        state.registry.add(tracked_window(80, 14, "Preview"));
+        state.registry.add(tracked_window(81, 14, "Preview"));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.floating.push(crate::core::workspace::FloatingWindow {
+                id: 80,
+                geometry: Rect::new(1400.0, 100.0, 400.0, 300.0),
+            });
+            ws.floating.push(crate::core::workspace::FloatingWindow {
+                id: 81,
+                geometry: Rect::new(1400.0, 600.0, 400.0, 300.0),
+            });
+            ws.record_focus(80);
+        }
+
+        // Left from float A: the tile.
+        state.focus_direction(super::super::tree::Direction::Left);
+        assert_eq!(state.active_workspace().focused, Some(70));
+
+        // From float A downward: float B.
+        state.active_workspace_mut().record_focus(80);
+        state.focus_direction(super::super::tree::Direction::Down);
+        assert_eq!(state.active_workspace().focused, Some(81));
+
+        // Swap from a float: no-op, no monitor teleport, still floating.
+        state.active_workspace_mut().record_focus(80);
+        state.swap_direction(super::super::tree::Direction::Left);
+        assert!(state.active_workspace().is_floating(80));
+        assert_eq!(state.workspaces.find_window(80), Some(0));
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
