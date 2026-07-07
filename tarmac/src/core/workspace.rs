@@ -224,8 +224,18 @@ impl Workspace {
         self.floating.iter().any(|f| f.id == id)
     }
 
-    /// Toggle a window between tiled and floating.
-    pub fn toggle_float(&mut self, id: WindowId, screen_rect: super::tree::Rect) -> bool {
+    /// Toggle a window between tiled and floating. `float_geom` is the
+    /// rect to float at (the caller's gap-aware rendered rect — the
+    /// un-gapped tree geometry makes the window visibly jump/overlap on
+    /// toggle); when None, falls back to the un-gapped tree rect, then
+    /// to a screen-relative default (absolute coordinates land on the
+    /// wrong display for monitors at negative origins).
+    pub fn toggle_float(
+        &mut self,
+        id: WindowId,
+        screen_rect: super::tree::Rect,
+        float_geom: Option<super::tree::Rect>,
+    ) -> bool {
         if let Some(idx) = self.floating.iter().position(|f| f.id == id) {
             // Floating → tiled
             self.floating.remove(idx);
@@ -233,12 +243,20 @@ impl Workspace {
             true
         } else if self.tree.contains(id) {
             // Tiled → floating
-            let geoms = self.tree.calculate_geometries(screen_rect);
-            let geometry = geoms
-                .iter()
-                .find(|(w, _)| *w == id)
-                .map(|(_, r)| *r)
-                .unwrap_or(super::tree::Rect::new(100.0, 100.0, 800.0, 600.0));
+            let geometry = float_geom
+                .or_else(|| {
+                    self.tree
+                        .calculate_geometries(screen_rect)
+                        .iter()
+                        .find(|(w, _)| *w == id)
+                        .map(|(_, r)| *r)
+                })
+                .unwrap_or(super::tree::Rect::new(
+                    screen_rect.x + 100.0,
+                    screen_rect.y + 100.0,
+                    800.0_f64.min(screen_rect.width),
+                    600.0_f64.min(screen_rect.height),
+                ));
             self.tree.remove(id);
             self.floating.push(FloatingWindow { id, geometry });
             true
@@ -429,7 +447,7 @@ mod tests {
         ws.tree.insert_with_rect(2, Some(1), SCREEN);
         ws.focused = Some(2);
 
-        assert!(ws.toggle_float(2, SCREEN));
+        assert!(ws.toggle_float(2, SCREEN, None));
         assert!(!ws.tree.contains(2));
         assert!(ws.is_floating(2));
     }
@@ -439,8 +457,8 @@ mod tests {
         let mut ws = Workspace::new(WorkspaceId::Numbered(1));
         ws.tree.insert_with_rect(1, None, SCREEN);
         ws.tree.insert_with_rect(2, Some(1), SCREEN);
-        ws.toggle_float(2, SCREEN);
-        ws.toggle_float(2, SCREEN);
+        ws.toggle_float(2, SCREEN, None);
+        ws.toggle_float(2, SCREEN, None);
         assert!(!ws.is_floating(2));
         assert!(ws.tree.contains(2));
     }
@@ -450,7 +468,7 @@ mod tests {
         let mut ws = Workspace::new(WorkspaceId::Numbered(1));
         ws.tree.insert_with_rect(1, None, SCREEN);
         ws.tree.insert_with_rect(2, Some(1), SCREEN);
-        ws.toggle_float(2, SCREEN);
+        ws.toggle_float(2, SCREEN, None);
         let mut ids = ws.all_window_ids();
         ids.sort();
         assert_eq!(ids, vec![1, 2]);

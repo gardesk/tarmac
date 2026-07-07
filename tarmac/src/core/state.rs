@@ -1652,6 +1652,16 @@ impl WmState {
         self.sync_mouse_after_focus(ws_idx, focused);
     }
 
+    /// FW-6: the registry's `floating` flag was write-once (set at add
+    /// time) while the workspace float lists were the live truth —
+    /// `tarmacctl get-windows` reported stale values forever. Every
+    /// float/unfloat transition syncs it here.
+    fn sync_registry_floating(&mut self, wid: WindowId, floating: bool) {
+        if let Some(w) = self.registry.get_mut(wid) {
+            w.floating = floating;
+        }
+    }
+
     /// FW-5: directional focus candidate over the union of a workspace's
     /// tiles and floats — nearest window center strictly in `direction`
     /// from the focused window's center.
@@ -2565,14 +2575,21 @@ impl WmState {
         let new_geom = super::tree::Rect::new(new_x, new_y, new_w, new_h);
 
         // Pull the window out of the source workspace's tree and add
-        // to its floating list.
+        // to its floating list. FW-7: guard against double entry — a
+        // stale threshold flag could route an already-floating window
+        // here, and duplicates persist (end_drag removes only the first).
         let source_ws = drag.original_workspace;
         let ws = self.workspaces.get_mut(source_ws);
         ws.tree.remove(wid);
-        ws.floating.push(super::workspace::FloatingWindow {
-            id: wid,
-            geometry: new_geom,
-        });
+        if ws.is_floating(wid) {
+            tracing::warn!(wid, "float_window_for_drag: already floating — skipping push");
+        } else {
+            ws.floating.push(super::workspace::FloatingWindow {
+                id: wid,
+                geometry: new_geom,
+            });
+        }
+        self.sync_registry_floating(wid, true);
 
         // The DragState's geometry is referenced by update_drag to
         // derive new positions from cursor deltas. Anchor it to the
@@ -2822,6 +2839,7 @@ impl WmState {
                 }
                 ws.record_focus(wid);
                 self.prune_focus_memory_for_window(wid);
+                self.sync_registry_floating(wid, false);
                 // FW-2: the drag floated this window at FLOATING level;
                 // back in the tree it must not ride above normal windows.
                 crate::platform::skylight::set_window_level(
@@ -2945,6 +2963,7 @@ impl WmState {
                 }
                 ws.record_focus(wid);
                 self.prune_focus_memory_for_window(wid);
+                self.sync_registry_floating(wid, false);
                 // FW-2: same level reset as the end_drag retile branch.
                 crate::platform::skylight::set_window_level(
                     wid,
@@ -3189,7 +3208,17 @@ impl WmState {
             None => return,
         };
         let sr = self.focused_rect();
-        if self.workspaces.get_mut(ws_idx).toggle_float(focused, sr) {
+        // FW-6: float at the gap-aware rendered rect, not the raw tree
+        // rect — otherwise the window visibly grows into the gaps on
+        // toggle.
+        let float_geom = self
+            .workspace_focus_geometries(ws_idx, sr)
+            .iter()
+            .find(|(w, _)| *w == focused)
+            .map(|(_, r)| *r);
+        if self.workspaces.get_mut(ws_idx).toggle_float(focused, sr, float_geom) {
+            let now_floating = self.workspaces.get(ws_idx).is_floating(focused);
+            self.sync_registry_floating(focused, now_floating);
             self.apply_layout();
             if self.workspaces.get(ws_idx).is_floating(focused) {
                 // Position at stored geometry
@@ -6968,6 +6997,60 @@ mod tests {
         state.swap_direction(super::super::tree::Direction::Left);
         assert!(state.active_workspace().is_floating(80));
         assert_eq!(state.workspaces.find_window(80), Some(0));
+    }
+
+    /// FW-6: the registry `floating` flag must track the workspace float
+    /// state through toggles (it was write-once, so IPC lied forever),
+    /// and the float geometry must be the gap-aware rendered rect.
+    #[test]
+    fn toggle_float_syncs_registry_and_uses_gapped_geometry() {
+        let mut state = WmState::new();
+        state.monitors = vec![Monitor {
+            id: 42,
+            frame: Rect::new(0.0, 0.0, 1920.0, 1080.0),
+            usable_frame: Rect::new(0.0, 33.0, 1920.0, 1047.0),
+            is_primary: true,
+            active_workspace: 0,
+        }];
+        state.sync_workspace_visibility();
+        state.gap_inner = 8.0;
+        state.gap_outer = 8.0;
+        let screen = state.monitors[0].usable_frame;
+
+        state.registry.add(tracked_window(70, 13, "Ghostty"));
+        {
+            let ws = state.workspaces.get_mut(0);
+            ws.tree.insert_with_rect(70, None, screen);
+            ws.record_focus(70);
+        }
+        assert!(!state.registry.get(70).unwrap().floating);
+
+        state.toggle_float();
+        assert!(state.active_workspace().is_floating(70));
+        assert!(
+            state.registry.get(70).unwrap().floating,
+            "registry flag must follow tiled -> floating"
+        );
+        // Gap-aware rect: inset from the raw screen rect by the outer gap
+        // (plus border inflation), never equal to the un-gapped rect.
+        let fw = state
+            .active_workspace()
+            .floating
+            .iter()
+            .find(|f| f.id == 70)
+            .unwrap();
+        assert!(
+            fw.geometry.x > screen.x && fw.geometry.y > screen.y,
+            "float geometry must be the gapped rendered rect, got {:?}",
+            fw.geometry
+        );
+
+        state.toggle_float();
+        assert!(!state.active_workspace().is_floating(70));
+        assert!(
+            !state.registry.get(70).unwrap().floating,
+            "registry flag must follow floating -> tiled"
+        );
     }
 
     /// Once the suppression deadline passes, pid-only adoption resumes
