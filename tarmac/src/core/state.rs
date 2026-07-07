@@ -4943,11 +4943,12 @@ impl WmState {
 
         // Resolve actual app name from NSRunningApplication (CGWindowList owner is often empty)
         let resolved_name = resolve_app_name(pid).unwrap_or_else(|| owner.to_string());
+        let resolved_bundle = resolve_app_bundle_id(pid).unwrap_or_default();
         tracing::info!(pid, app = %resolved_name, "new window detected, enumerating");
         let ax_app = unsafe { AXUIElement::new_application(pid) };
         let app_info = crate::platform::application::AppInfo {
             pid,
-            bundle_id: String::new(),
+            bundle_id: resolved_bundle.clone(),
             name: resolved_name,
             ax_ref: ax_app.clone(),
         };
@@ -4992,7 +4993,7 @@ impl WmState {
             self.apply_layout();
             self.schedule_followup_apply(true);
         }
-        self.install_observer_for_app(pid, &ax_app, owner, "");
+        self.install_observer_for_app(pid, &ax_app, owner, &resolved_bundle);
     }
 
     /// Returns true if the window was actually reaped, false if the call was
@@ -5755,6 +5756,16 @@ fn resolve_app_name(pid: i32) -> Option<String> {
     use objc2_app_kit::NSRunningApplication;
     let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
     app.localizedName().map(|n| n.to_string())
+}
+
+/// OBS-D6: the bundle id for a pid. Poller-installed observers passed an
+/// empty bundle id, so every window later adopted via that app's fast
+/// path had `app_bundle_id = ""` and gar.rule bundle matches silently
+/// failed for any app launched after startup.
+fn resolve_app_bundle_id(pid: i32) -> Option<String> {
+    use objc2_app_kit::NSRunningApplication;
+    let app = NSRunningApplication::runningApplicationWithProcessIdentifier(pid)?;
+    app.bundleIdentifier().map(|b| b.to_string())
 }
 
 fn hide_target_for_frame(
