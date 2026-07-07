@@ -661,6 +661,9 @@ unsafe extern "C" fn poll_timer_callback(_timer: *const c_void) {
             // empty tile that the surviving sibling won't fill.
             if tick.is_multiple_of(20) {
                 state.reconcile_registry_against_window_server();
+                // OBS-D2: retry AX notification registrations that failed
+                // while a slow-launch app's AX server was warming up.
+                state.retry_pending_observer_registrations();
             }
         }
     });

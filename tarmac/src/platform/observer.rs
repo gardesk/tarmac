@@ -80,6 +80,11 @@ pub struct AppObserver {
     /// `Drop` can unregister them (AXObserverRemoveNotification needs it).
     app_element: CFRetained<AXUIElement>,
     _callback: *mut EventCallback,
+    /// OBS-D2: notifications whose registration failed (slow-launch apps
+    /// like Electron return kAXErrorCannotComplete while their AX server
+    /// warms up). Retried by `retry_pending`; an app with unregistered
+    /// notifications is otherwise silently poller-only forever.
+    pending: std::cell::RefCell<Vec<&'static str>>,
 }
 
 impl AppObserver {
@@ -106,16 +111,16 @@ impl AppObserver {
         let observer =
             unsafe { CFRetained::from_raw(NonNull::new(observer_ptr).expect("non-null observer")) };
 
-        // Subscribe to all notification types on the app element
+        // Subscribe to all notification types on the app element,
+        // collecting any that fail so they can be retried.
+        let mut pending: Vec<&'static str> = Vec::new();
         for notif in APP_NOTIFICATIONS {
-            let notif_str = CFString::from_static_str(notif);
-            let err = unsafe {
-                observer.add_notification(app_element, &notif_str, callback_ptr as *mut c_void)
-            };
-            if err != AXError(0) && err != AXError(-25708) {
-                // -25708 = notificationAlreadyRegistered, ignore
-                tracing::trace!(pid, notif, err = ?err, "failed to add notification");
+            if !try_add_notification(&observer, app_element, notif, callback_ptr) {
+                pending.push(notif);
             }
+        }
+        if !pending.is_empty() {
+            tracing::debug!(pid, ?pending, "some AX notifications not yet registered — will retry");
         }
 
         // Add to current run loop
@@ -131,8 +136,45 @@ impl AppObserver {
             _observer: ManuallyDrop::new(observer),
             app_element: unsafe { CFRetained::retain(NonNull::from(app_element)) },
             _callback: callback_ptr,
+            pending: std::cell::RefCell::new(pending),
         })
     }
+
+    /// True when every notification is registered (nothing pending).
+    pub fn is_fully_registered(&self) -> bool {
+        self.pending.borrow().is_empty()
+    }
+
+    /// OBS-D2: retry the notifications that failed to register. Cheap
+    /// no-op once fully registered. Call opportunistically (e.g. once a
+    /// second from the polling tick) so slow-launch apps stop being
+    /// poller-only once their AX server is ready.
+    pub fn retry_pending(&self) {
+        if self.pending.borrow().is_empty() {
+            return;
+        }
+        let mut pending = self.pending.borrow_mut();
+        pending.retain(|notif| {
+            !try_add_notification(&self._observer, &self.app_element, notif, self._callback)
+        });
+        if pending.is_empty() {
+            tracing::debug!(pid = self.pid, "all AX notifications now registered");
+        }
+    }
+}
+
+/// Register one notification; returns true on success (or already
+/// registered). -25708 = notificationAlreadyRegistered.
+fn try_add_notification(
+    observer: &AXObserver,
+    app_element: &AXUIElement,
+    notif: &'static str,
+    callback_ptr: *mut EventCallback,
+) -> bool {
+    let notif_str = CFString::from_static_str(notif);
+    let err =
+        unsafe { observer.add_notification(app_element, &notif_str, callback_ptr as *mut c_void) };
+    err == AXError(0) || err == AXError(-25708)
 }
 
 impl Drop for AppObserver {

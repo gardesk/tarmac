@@ -5682,6 +5682,17 @@ impl WmState {
         }
     }
 
+    /// OBS-D2: retry notification registrations that failed at observer
+    /// install (slow-launch apps warm up their AX server late). Called
+    /// from the polling tick; cheap no-op for fully-registered observers.
+    pub fn retry_pending_observer_registrations(&self) {
+        for observer in self.observers.values() {
+            if !observer.is_fully_registered() {
+                observer.retry_pending();
+            }
+        }
+    }
+
     fn install_observer_for_app(
         &mut self,
         pid: i32,
