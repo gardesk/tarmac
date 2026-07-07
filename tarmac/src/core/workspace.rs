@@ -287,6 +287,18 @@ impl Workspace {
         self.focused = self.focus_history.last().copied();
         self.focused
     }
+
+    /// Drop a window from this workspace's focus bookkeeping (history and the
+    /// `focused` pointer), falling `focused` back to the next most-recent
+    /// entry. Used when a window *leaves* this workspace (e.g. a cross-
+    /// workspace drag-relocate) so a later switch here doesn't focus a window
+    /// that now lives on another workspace.
+    pub fn forget_focus(&mut self, wid: WindowId) {
+        self.focus_history.retain(|id| *id != wid);
+        if self.focused == Some(wid) {
+            self.focused = self.focus_history.last().copied();
+        }
+    }
 }
 
 /// Manages all workspaces (flat vec, index 0 = workspace 1).
@@ -405,6 +417,25 @@ mod tests {
         assert_eq!(mgr.count(), 10);
         assert_eq!(mgr.get(0).id, WorkspaceId::Numbered(1));
         assert_eq!(mgr.get(9).id, WorkspaceId::Numbered(10));
+    }
+
+    #[test]
+    fn forget_focus_scrubs_history_and_falls_back() {
+        let mut ws = Workspace::new(WorkspaceId::Numbered(1));
+        ws.record_focus(1);
+        ws.record_focus(2);
+        ws.record_focus(3);
+        assert_eq!(ws.focused, Some(3));
+
+        // Forgetting the focused window falls back to the prior entry.
+        ws.forget_focus(3);
+        assert_eq!(ws.focused, Some(2));
+        assert!(!ws.focus_history.contains(&3));
+
+        // Forgetting a non-focused window leaves `focused` untouched.
+        ws.forget_focus(1);
+        assert_eq!(ws.focused, Some(2));
+        assert!(!ws.focus_history.contains(&1));
     }
 
     #[test]
