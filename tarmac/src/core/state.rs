@@ -2574,24 +2574,53 @@ impl WmState {
                 if let Some(ax_ref) = self.ax_refs.get(&drag.window_id) {
                     let _ = ax_set_position(ax_ref, new_x, new_y);
                 }
+
+                // Perf #135 / FW-8: push the drag geometry to ers directly —
+                // this path writes AX without apply_layout, so without a
+                // hint the border trails the window at SLS-poll latency.
+                let focused = self.effective_focused() == Some(drag.window_id);
+                self.borders.update_border(
+                    drag.window_id,
+                    Rect::new(
+                        new_x,
+                        new_y,
+                        drag.start_geometry.width,
+                        drag.start_geometry.height,
+                    ),
+                    focused,
+                );
             }
             DragMode::Resize => {
                 let new_w = (drag.start_geometry.width + dx).max(200.0);
                 let new_h = (drag.start_geometry.height + dy).max(100.0);
 
-                if let Some(fw) = self
-                    .active_workspace_mut()
-                    .floating
-                    .iter_mut()
-                    .find(|f| f.id == drag.window_id)
-                {
-                    fw.geometry.width = new_w;
-                    fw.geometry.height = new_h;
+                // FW-8: update the model across all workspaces like Move
+                // does — the drag may have started on a scratchpad or the
+                // active workspace may have changed mid-drag.
+                let ws_count = self.workspaces.count();
+                for idx in 0..ws_count {
+                    let ws = self.workspaces.get_mut(idx);
+                    if let Some(fw) = ws.floating.iter_mut().find(|f| f.id == drag.window_id) {
+                        fw.geometry.width = new_w;
+                        fw.geometry.height = new_h;
+                    }
                 }
 
                 if let Some(ax_ref) = self.ax_refs.get(&drag.window_id) {
                     let _ = ax_set_size(ax_ref, new_w, new_h);
                 }
+
+                let focused = self.effective_focused() == Some(drag.window_id);
+                self.borders.update_border(
+                    drag.window_id,
+                    Rect::new(
+                        drag.start_geometry.x,
+                        drag.start_geometry.y,
+                        new_w,
+                        new_h,
+                    ),
+                    focused,
+                );
             }
         }
     }
@@ -2608,6 +2637,9 @@ impl WmState {
         self.drag_suppress_focus_until = None;
 
         if drag.mode != DragMode::TiledRelocate {
+            // FW-8: settle the border at the final rect — plain float
+            // drags return without an apply_layout.
+            self.update_borders();
             tracing::debug!(id = drag.window_id, ?drag.mode, "drag ended");
             return;
         }
