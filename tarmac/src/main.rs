@@ -85,13 +85,18 @@ fn main() {
     init_config_dir();
     install_signal_handlers();
 
-    // Load Lua config
-    // Use ~/.config/tarmac/init.lua (XDG-style, matching gar)
-    let config_path = dirs::home_dir()
-        .unwrap_or_default()
-        .join(".config")
-        .join("tarmac")
-        .join("init.lua");
+    // Load Lua config. $TARMAC_CONFIG overrides the default path (used by the
+    // e2e harness to point a test daemon at a fixed config); otherwise
+    // ~/.config/tarmac/init.lua (XDG-style, matching gar).
+    let config_path = std::env::var_os("TARMAC_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_default()
+                .join(".config")
+                .join("tarmac")
+                .join("init.lua")
+        });
     generate_default_config_if_missing(&config_path);
     let config = load_runtime_config(&config_path);
     tracing::info!(
