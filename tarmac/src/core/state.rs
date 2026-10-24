@@ -723,7 +723,10 @@ impl WmState {
         }
         let sr = self.focused_rect();
         for wid in orphans {
-            tracing::warn!(wid, "orphaned window in no workspace — adopting into active");
+            tracing::warn!(
+                wid,
+                "orphaned window in no workspace — adopting into active"
+            );
             let ws = self.active_workspace_mut();
             ws.tree.insert_with_rect(wid, ws.focused, sr);
             ws.record_focus(wid);
@@ -797,8 +800,7 @@ impl WmState {
     /// next attempt (transient AX-server churn). Called from the polling
     /// tick — needs &mut to swap `ax_refs`.
     pub fn refresh_stale_ax_refs(&mut self) {
-        let candidates: Vec<WindowId> =
-            self.stale_ax_ref_candidates.borrow_mut().drain().collect();
+        let candidates: Vec<WindowId> = self.stale_ax_ref_candidates.borrow_mut().drain().collect();
         if candidates.is_empty() {
             return;
         }
@@ -1260,11 +1262,7 @@ impl WmState {
             let Some((overflow_wid, overflow_rect)) = worst else {
                 continue;
             };
-            let active = self
-                .workspaces
-                .get(ws_idx)
-                .focused
-                .unwrap_or(*overflow_wid);
+            let active = self.workspaces.get(ws_idx).focused.unwrap_or(*overflow_wid);
             let min_w = overflow_rect.width;
             let min_h = overflow_rect.height;
 
@@ -1548,8 +1546,7 @@ impl WmState {
             && self.active_workspace().is_floating(from)
         {
             let ws_idx = self.active_ws_idx();
-            if let Some(next) = self.directional_neighbor_with_floats(ws_idx, from, direction, sr)
-            {
+            if let Some(next) = self.directional_neighbor_with_floats(ws_idx, from, direction, sr) {
                 self.focus_window(next);
                 self.sync_mouse_after_focus(ws_idx, next);
             }
@@ -1716,9 +1713,16 @@ impl WmState {
         tracing::debug!(
             focused,
             ?direction,
-            src_x = src_rect.x, src_y = src_rect.y, src_w = src_rect.width, src_h = src_rect.height,
-            focal_x = focal.0, focal_y = focal.1,
-            sr_x = sr.x, sr_y = sr.y, sr_w = sr.width, sr_h = sr.height,
+            src_x = src_rect.x,
+            src_y = src_rect.y,
+            src_w = src_rect.width,
+            src_h = src_rect.height,
+            focal_x = focal.0,
+            focal_y = focal.1,
+            sr_x = sr.x,
+            sr_y = sr.y,
+            sr_w = sr.width,
+            sr_h = sr.height,
             "move: computed focal"
         );
 
@@ -1728,7 +1732,8 @@ impl WmState {
             // adjacent monitor when fallback is enabled.
             if !self.window_direction_monitor_fallback || self.monitors.len() <= 1 {
                 tracing::debug!(
-                    focused, ?direction,
+                    focused,
+                    ?direction,
                     "move: focal off-rect, no monitor fallback (disabled or single display)"
                 );
                 return;
@@ -1754,11 +1759,19 @@ impl WmState {
             .tree
             .find_leaf_at_point(sr, focal.0, focal.1);
         let Some(target_wid) = target else {
-            tracing::debug!(focused, ?direction, "move: focal resolved to no leaf — no-op");
+            tracing::debug!(
+                focused,
+                ?direction,
+                "move: focal resolved to no leaf — no-op"
+            );
             return;
         };
         if target_wid == focused {
-            tracing::debug!(focused, ?direction, "move: focal resolved back to focused tile — no-op");
+            tracing::debug!(
+                focused,
+                ?direction,
+                "move: focal resolved back to focused tile — no-op"
+            );
             return;
         }
 
@@ -1819,9 +1832,12 @@ impl WmState {
             target_wid = post_target_wid,
             ?direction,
             ?split_axis,
-            tw = target_rect.width, th = target_rect.height,
-            tx = target_rect.x, ty = target_rect.y,
-            focal_x = focal.0, focal_y = focal.1,
+            tw = target_rect.width,
+            th = target_rect.height,
+            tx = target_rect.x,
+            ty = target_rect.y,
+            focal_x = focal.0,
+            focal_y = focal.1,
             focused_first = focused_should_be_first,
             "move: inserting via Hyprland-style split"
         );
@@ -1922,7 +1938,11 @@ impl WmState {
         // another monitor on a plain mod+shift+arrow. Swaps are a tiled
         // concept; no-op for floats.
         if ws.is_floating(focused) {
-            tracing::debug!(focused, ?direction, "swap: focused window is floating — no-op");
+            tracing::debug!(
+                focused,
+                ?direction,
+                "swap: focused window is floating — no-op"
+            );
             return;
         }
         let sr = self.focused_rect();
@@ -2484,8 +2504,7 @@ impl WmState {
     /// Arm suppression of pid-only external-focus adoption around a
     /// tarmac-initiated terminal spawn. See `spawn_adopt_suppress_until`.
     pub fn arm_spawn_adopt_suppression(&mut self) {
-        self.spawn_adopt_suppress_until =
-            Some(std::time::Instant::now() + SPAWN_ADOPT_SUPPRESS);
+        self.spawn_adopt_suppress_until = Some(std::time::Instant::now() + SPAWN_ADOPT_SUPPRESS);
     }
 
     fn is_in_spawn_adopt_suppression(&mut self) -> bool {
@@ -2791,7 +2810,10 @@ impl WmState {
         let ws = self.workspaces.get_mut(source_ws);
         ws.tree.remove(wid);
         if ws.is_floating(wid) {
-            tracing::warn!(wid, "float_window_for_drag: already floating — skipping push");
+            tracing::warn!(
+                wid,
+                "float_window_for_drag: already floating — skipping push"
+            );
         } else {
             ws.floating.push(super::workspace::FloatingWindow {
                 id: wid,
@@ -2926,12 +2948,7 @@ impl WmState {
                 let focused = self.effective_focused() == Some(drag.window_id);
                 self.borders.update_border(
                     drag.window_id,
-                    Rect::new(
-                        drag.start_geometry.x,
-                        drag.start_geometry.y,
-                        new_w,
-                        new_h,
-                    ),
+                    Rect::new(drag.start_geometry.x, drag.start_geometry.y, new_w, new_h),
                     focused,
                 );
             }
@@ -3430,8 +3447,7 @@ impl WmState {
                 // forward by an explicit click, not a hover. Scratchpad
                 // overlays already restrict FFM to their own windows, so this
                 // only applies to the plain active workspace.
-                let suppress_raise =
-                    special_ws_idx.is_none() && self.ffm_raise_suppressed(id);
+                let suppress_raise = special_ws_idx.is_none() && self.ffm_raise_suppressed(id);
                 if suppress_raise {
                     tracing::debug!(
                         id,
@@ -3473,7 +3489,11 @@ impl WmState {
             .iter()
             .find(|(w, _)| *w == focused)
             .map(|(_, r)| *r);
-        if self.workspaces.get_mut(ws_idx).toggle_float(focused, sr, float_geom) {
+        if self
+            .workspaces
+            .get_mut(ws_idx)
+            .toggle_float(focused, sr, float_geom)
+        {
             let now_floating = self.workspaces.get(ws_idx).is_floating(focused);
             self.sync_registry_floating(focused, now_floating);
             self.apply_layout();
@@ -4166,7 +4186,11 @@ impl WmState {
                 .map(|f| (f.id, clamp_float_into(f.geometry, target)))
                 .collect();
             for (id, rect) in remaps {
-                tracing::info!(id, ws = ws_idx + 1, "remapping float onto surviving monitor");
+                tracing::info!(
+                    id,
+                    ws = ws_idx + 1,
+                    "remapping float onto surviving monitor"
+                );
                 if let Some(fw) = self
                     .workspaces
                     .get_mut(ws_idx)
@@ -5343,8 +5367,7 @@ impl WmState {
         tracing::info!(id, "window closed -> retiling");
         // FW-7: stamp the reap time so a flickering dialog that instantly
         // reappears under the same wid isn't re-adopted every cycle.
-        self.recently_reaped
-            .insert(id, std::time::Instant::now());
+        self.recently_reaped.insert(id, std::time::Instant::now());
         self.borders.remove_border(id);
         self.registry.remove(id);
         self.ax_refs.remove(&id);
@@ -5510,7 +5533,9 @@ impl WmState {
                 .last_cursor
                 .or_else(|| focused_rect.map(|r| r.center()))
                 .unwrap_or_else(|| sr.center()),
-            "active" => focused_rect.map(|r| r.center()).unwrap_or_else(|| sr.center()),
+            "active" => focused_rect
+                .map(|r| r.center())
+                .unwrap_or_else(|| sr.center()),
             _ => cursor_in_workspace
                 .or_else(|| focused_rect.map(|r| r.center()))
                 .unwrap_or_else(|| sr.center()),
@@ -5548,7 +5573,9 @@ impl WmState {
                 // follow_mouse (default) — need a target rect to know
                 // which side the cursor is on. Without one, fall back
                 // to "right" (no swap).
-                let Some(rect) = target_rect else { return false };
+                let Some(rect) = target_rect else {
+                    return false;
+                };
                 let split = split_override.unwrap_or_else(|| {
                     super::tree::Node::smart_split_direction_with_multiplier(&rect, multiplier)
                 });
@@ -5618,7 +5645,11 @@ impl WmState {
         self.recently_reaped
             .retain(|_, t| now.duration_since(*t) < DIALOG_REAP_COOLDOWN);
         if self.recently_reaped.contains_key(id) {
-            tracing::debug!(id, app_name, "skipping re-adoption of recently-reaped window (churn guard)");
+            tracing::debug!(
+                id,
+                app_name,
+                "skipping re-adoption of recently-reaped window (churn guard)"
+            );
             return;
         }
 
@@ -5678,7 +5709,11 @@ impl WmState {
             if on_screen {
                 should_auto_float(subrole, &ax_ref)
             } else {
-                tracing::debug!(id = *id, subrole, "distrusting auto-float probe: window off-screen");
+                tracing::debug!(
+                    id = *id,
+                    subrole,
+                    "distrusting auto-float probe: window off-screen"
+                );
                 false
             }
         });
@@ -5805,15 +5840,22 @@ impl WmState {
                     overlay_rect,
                 );
                 let ws = self.workspaces.get_mut(sidx);
-                ws.floating
-                    .push(super::workspace::FloatingWindow { id: *id, geometry: geom });
+                ws.floating.push(super::workspace::FloatingWindow {
+                    id: *id,
+                    geometry: geom,
+                });
                 ws.record_focus(*id);
             } else {
                 let ws = self.workspaces.get_mut(sidx);
                 ws.tree.insert_with_rect(*id, ws.focused, overlay_rect);
                 ws.record_focus(*id);
             }
-            tracing::info!(id, app_name, special = sidx, "new window joined active scratchpad overlay");
+            tracing::info!(
+                id,
+                app_name,
+                special = sidx,
+                "new window joined active scratchpad overlay"
+            );
         } else {
             let sr = self.focused_rect();
             if should_float {
@@ -7376,7 +7418,10 @@ mod tests {
             "stranded float must be pulled onto the surviving monitor, got {stranded:?}"
         );
         // The already-on-screen float is left exactly where it was.
-        assert_eq!(floats.iter().find(|f| f.id == 2).unwrap().geometry, onscreen);
+        assert_eq!(
+            floats.iter().find(|f| f.id == 2).unwrap().geometry,
+            onscreen
+        );
     }
 
     #[test]
@@ -7413,11 +7458,11 @@ mod tests {
         state.sync_workspace_visibility();
         // A window already placed on workspace index 3 must not be pulled out.
         state.registry.add(tracked_window(5, 100, "Placed"));
-        state
-            .workspaces
-            .get_mut(3)
-            .tree
-            .insert_with_rect(5, None, Rect::new(0.0, 0.0, 800.0, 600.0));
+        state.workspaces.get_mut(3).tree.insert_with_rect(
+            5,
+            None,
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+        );
 
         state.reconcile_orphaned_windows();
 
@@ -7439,21 +7484,31 @@ mod tests {
 
         // One tiled window, no float yet: FFM raise is never suppressed.
         state.registry.add(tracked_window(1, 100, "TileA"));
-        state.active_workspace_mut().tree.insert_with_rect(1, None, screen);
+        state
+            .active_workspace_mut()
+            .tree
+            .insert_with_rect(1, None, screen);
         assert!(!state.ffm_raise_suppressed(1));
 
         // Add a floating window 2. Now hovering the tiled window 1 is
         // suppressed, but hovering the float itself is not (floats still raise
         // on hover so they come forward).
         state.registry.add(tracked_window(2, 101, "Float"));
-        state.active_workspace_mut().floating.push(
-            crate::core::workspace::FloatingWindow {
+        state
+            .active_workspace_mut()
+            .floating
+            .push(crate::core::workspace::FloatingWindow {
                 id: 2,
                 geometry: Rect::new(100.0, 100.0, 400.0, 300.0),
-            },
+            });
+        assert!(
+            state.ffm_raise_suppressed(1),
+            "tile under a float must not raise on hover"
         );
-        assert!(state.ffm_raise_suppressed(1), "tile under a float must not raise on hover");
-        assert!(!state.ffm_raise_suppressed(2), "the float itself still raises on hover");
+        assert!(
+            !state.ffm_raise_suppressed(2),
+            "the float itself still raises on hover"
+        );
     }
 
     #[test]
@@ -7468,11 +7523,11 @@ mod tests {
         }];
         let sidx = state.workspaces.special_index("scratch");
         state.registry.add(tracked_window(1, 100, "Scratch"));
-        state
-            .workspaces
-            .get_mut(sidx)
-            .tree
-            .insert_with_rect(1, None, Rect::new(0.0, 0.0, 800.0, 600.0));
+        state.workspaces.get_mut(sidx).tree.insert_with_rect(
+            1,
+            None,
+            Rect::new(0.0, 0.0, 800.0, 600.0),
+        );
         state.active_specials = vec![Some(sidx)];
 
         // Same app pid as the window already in the overlay → join it.
@@ -7505,9 +7560,9 @@ mod tests {
         assert_eq!(state.pending_float_restack.get(), Some(future));
 
         // Past deadline: fires and disarms.
-        state
-            .pending_float_restack
-            .set(Some(std::time::Instant::now() - std::time::Duration::from_millis(1)));
+        state.pending_float_restack.set(Some(
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        ));
         state.drain_pending_float_restack();
         assert!(state.pending_float_restack.get().is_none());
     }
@@ -7736,8 +7791,18 @@ mod tests {
         state.recently_reaped.insert(90, std::time::Instant::now());
         let ax = unsafe { AXUIElement::new_application(1) };
         state.add_window_to_active(
-            &90, 1, "Keychain Access", "", "Alert", "AXWindow", "AXDialog", 100.0, 100.0, 400.0,
-            300.0, ax.clone(),
+            &90,
+            1,
+            "Keychain Access",
+            "",
+            "Alert",
+            "AXWindow",
+            "AXDialog",
+            100.0,
+            100.0,
+            400.0,
+            300.0,
+            ax.clone(),
         );
         assert!(
             state.workspaces.find_window(90).is_none(),
@@ -7750,8 +7815,18 @@ mod tests {
             std::time::Instant::now() - std::time::Duration::from_secs(2),
         );
         state.add_window_to_active(
-            &90, 1, "Keychain Access", "", "Alert", "AXWindow", "AXStandardWindow", 100.0, 100.0,
-            400.0, 300.0, ax,
+            &90,
+            1,
+            "Keychain Access",
+            "",
+            "Alert",
+            "AXWindow",
+            "AXStandardWindow",
+            100.0,
+            100.0,
+            400.0,
+            300.0,
+            ax,
         );
         assert!(state.workspaces.find_window(90).is_some());
     }
@@ -8020,11 +8095,11 @@ mod tests {
         // PID -1 cannot exist as a real process; NSRunningApplication lookup
         // returns nil, so app_is_hidden falls through to false.
         state.registry.add(tracked_window(7777, -1, "Ghost"));
-        state
-            .workspaces
-            .get_mut(0)
-            .tree
-            .insert_with_rect(7777, None, state.monitors[0].usable_frame);
+        state.workspaces.get_mut(0).tree.insert_with_rect(
+            7777,
+            None,
+            state.monitors[0].usable_frame,
+        );
 
         assert!(state.on_window_closed(7777));
         assert!(!state.registry.contains(7777));
@@ -8517,12 +8592,7 @@ mod tests {
         let rect = super::super::tree::Rect::new(0.0, 0.0, 1000.0, 800.0);
         // Vertical split (smart with default multiplier on wide rect).
         // Cursor at x=200 → left half → swap.
-        let swap = state.should_swap_for_force_split(
-            (200.0, 400.0),
-            Some(rect),
-            None,
-            1.0,
-        );
+        let swap = state.should_swap_for_force_split((200.0, 400.0), Some(rect), None, 1.0);
         assert!(swap, "cursor on left half should swap (new becomes left)");
     }
 
@@ -8532,12 +8602,7 @@ mod tests {
         state.force_split = "follow_mouse".to_string();
         let rect = super::super::tree::Rect::new(0.0, 0.0, 1000.0, 800.0);
         // Cursor at x=800 → right half → no swap (new stays on right).
-        let swap = state.should_swap_for_force_split(
-            (800.0, 400.0),
-            Some(rect),
-            None,
-            1.0,
-        );
+        let swap = state.should_swap_for_force_split((800.0, 400.0), Some(rect), None, 1.0);
         assert!(!swap);
     }
 
@@ -8548,12 +8613,7 @@ mod tests {
         // Tall rect → smart split = Horizontal.
         let rect = super::super::tree::Rect::new(0.0, 0.0, 500.0, 1000.0);
         // Cursor at y=200 → top half → swap (new becomes top).
-        let swap = state.should_swap_for_force_split(
-            (250.0, 200.0),
-            Some(rect),
-            None,
-            1.0,
-        );
+        let swap = state.should_swap_for_force_split((250.0, 200.0), Some(rect), None, 1.0);
         assert!(swap);
     }
 
@@ -8571,12 +8631,7 @@ mod tests {
         state.force_split = "left".to_string();
         let rect = super::super::tree::Rect::new(0.0, 0.0, 1000.0, 800.0);
         // Right-half cursor would normally not swap, but force_split=left forces it.
-        let swap = state.should_swap_for_force_split(
-            (800.0, 400.0),
-            Some(rect),
-            None,
-            1.0,
-        );
+        let swap = state.should_swap_for_force_split((800.0, 400.0), Some(rect), None, 1.0);
         assert!(swap);
     }
 
@@ -8587,12 +8642,7 @@ mod tests {
         let rect = super::super::tree::Rect::new(0.0, 0.0, 1000.0, 800.0);
         // Left-half cursor would normally swap (under follow_mouse), but
         // force_split=right keeps default.
-        let swap = state.should_swap_for_force_split(
-            (200.0, 400.0),
-            Some(rect),
-            None,
-            1.0,
-        );
+        let swap = state.should_swap_for_force_split((200.0, 400.0), Some(rect), None, 1.0);
         assert!(!swap);
     }
 

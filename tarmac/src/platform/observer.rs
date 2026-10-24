@@ -120,7 +120,11 @@ impl AppObserver {
             }
         }
         if !pending.is_empty() {
-            tracing::debug!(pid, ?pending, "some AX notifications not yet registered — will retry");
+            tracing::debug!(
+                pid,
+                ?pending,
+                "some AX notifications not yet registered — will retry"
+            );
         }
 
         // Add to current run loop
@@ -212,8 +216,7 @@ impl Drop for AppObserver {
             // thread, so current() is the same runloop.
             let source = self._observer.run_loop_source();
             if let Some(run_loop) = CFRunLoop::current() {
-                let mode: &CFRunLoopMode =
-                    kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes");
+                let mode: &CFRunLoopMode = kCFRunLoopCommonModes.expect("kCFRunLoopCommonModes");
                 run_loop.remove_source(Some(source.as_ref()), Some(mode));
             }
 

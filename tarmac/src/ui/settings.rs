@@ -1469,8 +1469,7 @@ impl SettingsWindow {
             window_direction_monitor_fallback_checkbox: general
                 .window_direction_monitor_fallback_checkbox,
             preserve_split_checkbox: general.preserve_split_checkbox,
-            permanent_direction_override_checkbox: general
-                .permanent_direction_override_checkbox,
+            permanent_direction_override_checkbox: general.permanent_direction_override_checkbox,
             split_axis_popup: general.split_axis_popup,
             force_split_popup: general.force_split_popup,
             focal_point_source_popup: general.focal_point_source_popup,
@@ -1516,20 +1515,22 @@ impl SettingsWindow {
             .setState(if snapshot.mouse_follows_focus { 1 } else { 0 });
         self.smart_resizing_checkbox
             .setState(if snapshot.smart_resizing { 1 } else { 0 });
-        self.window_direction_monitor_fallback_checkbox
-            .setState(if snapshot.window_direction_monitor_fallback {
+        self.window_direction_monitor_fallback_checkbox.setState(
+            if snapshot.window_direction_monitor_fallback {
                 1
             } else {
                 0
-            });
+            },
+        );
         self.preserve_split_checkbox
             .setState(if snapshot.preserve_split { 1 } else { 0 });
-        self.permanent_direction_override_checkbox
-            .setState(if snapshot.permanent_direction_override {
+        self.permanent_direction_override_checkbox.setState(
+            if snapshot.permanent_direction_override {
                 1
             } else {
                 0
-            });
+            },
+        );
         self.split_axis_popup
             .selectItemAtIndex(match snapshot.split_axis.as_str() {
                 "horizontal" => 1,
@@ -1542,16 +1543,18 @@ impl SettingsWindow {
                 "right" => 2,
                 _ => 0, // "follow_mouse"
             });
-        self.focal_point_source_popup
-            .selectItemAtIndex(match snapshot.focal_point_source.as_str() {
+        self.focal_point_source_popup.selectItemAtIndex(
+            match snapshot.focal_point_source.as_str() {
                 "cursor" => 1,
                 "active" => 2,
                 _ => 0, // "cursor_or_active"
-            });
+            },
+        );
         self.split_width_multiplier_field
-            .setStringValue(&NSString::from_str(
-                &format!("{:.2}", snapshot.split_width_multiplier),
-            ));
+            .setStringValue(&NSString::from_str(&format!(
+                "{:.2}",
+                snapshot.split_width_multiplier
+            )));
         self.drag_threshold_field
             .setStringValue(&NSString::from_str(&format!(
                 "{:.1}",
@@ -1836,7 +1839,11 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         cx,
         y,
         220.0,
-        &["Smart (aspect-driven)", "Horizontal (stacked)", "Vertical (side-by-side)"],
+        &[
+            "Smart (aspect-driven)",
+            "Horizontal (stacked)",
+            "Vertical (side-by-side)",
+        ],
         sel!(onSplitAxisChanged:),
     );
     y -= row;
@@ -1848,7 +1855,11 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         cx,
         y,
         220.0,
-        &["Follow mouse (default)", "Left / first child", "Right / second child"],
+        &[
+            "Follow mouse (default)",
+            "Left / first child",
+            "Right / second child",
+        ],
         sel!(onForceSplitChanged:),
     );
     y -= row;
@@ -1860,7 +1871,11 @@ fn build_general_view(mtm: MainThreadMarker, handler: &SettingsHandler) -> Gener
         cx,
         y,
         220.0,
-        &["Cursor or active (default)", "Cursor only", "Active window only"],
+        &[
+            "Cursor or active (default)",
+            "Cursor only",
+            "Active window only",
+        ],
         sel!(onFocalPointSourceChanged:),
     );
     y -= row;

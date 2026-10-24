@@ -156,12 +156,7 @@ impl HotkeyManager {
 
     /// Register a global hotkey, returning the assigned id on success
     /// (useful when the caller needs to later `unregister` it).
-    pub fn register_id(
-        &mut self,
-        modifiers: Modifiers,
-        key: Key,
-        action: Action,
-    ) -> Option<u32> {
+    pub fn register_id(&mut self, modifiers: Modifiers, key: Key, action: Action) -> Option<u32> {
         let carbon_mods = modifiers_to_carbon(modifiers);
         let Some(carbon_key) = key_to_carbon(key) else {
             tracing::warn!(?key, "no Carbon keycode for key");

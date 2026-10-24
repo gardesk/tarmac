@@ -35,11 +35,7 @@ pub struct Session {
 impl Session {
     /// Default on-disk location: `~/.config/tarmac/session.json`.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::home_dir().map(|home| {
-            home.join(".config")
-                .join("tarmac")
-                .join("session.json")
-        })
+        dirs::home_dir().map(|home| home.join(".config").join("tarmac").join("session.json"))
     }
 
     /// Load a session file. A missing or unparseable file is not an error —
@@ -118,7 +114,10 @@ mod tests {
                 entry("com.brave.Browser", "GitHub", "3"),
             ],
         };
-        assert_eq!(s.take_match("com.brave.Browser", "GitHub").as_deref(), Some("3"));
+        assert_eq!(
+            s.take_match("com.brave.Browser", "GitHub").as_deref(),
+            Some("3")
+        );
         // The exact one was consumed; the other remains.
         assert_eq!(s.entries.len(), 1);
         assert_eq!(s.entries[0].title, "Gmail");

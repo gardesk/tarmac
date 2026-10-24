@@ -155,7 +155,10 @@ impl Settings {
                     self.split_axis = value.to_string();
                 }
                 _ => {
-                    tracing::warn!(value, "unknown split_axis (expected smart|horizontal|vertical)");
+                    tracing::warn!(
+                        value,
+                        "unknown split_axis (expected smart|horizontal|vertical)"
+                    );
                 }
             },
             "force_split" => match value {
@@ -163,7 +166,10 @@ impl Settings {
                     self.force_split = value.to_string();
                 }
                 _ => {
-                    tracing::warn!(value, "unknown force_split (expected follow_mouse|left|right)");
+                    tracing::warn!(
+                        value,
+                        "unknown force_split (expected follow_mouse|left|right)"
+                    );
                 }
             },
             "split_width_multiplier" => {

@@ -37,21 +37,37 @@ fn main() {
         eprintln!("  swap <left|right|up|down>     Swap with window in direction");
         eprintln!("  move <left|right|up|down>     Relocate focused window in direction (HX-04)");
         eprintln!("  resize <left|right|up|down>   Resize split in direction");
-        eprintln!("  set_ratio <0.1..0.9>          Set focused window's parent split ratio (HX-02)");
+        eprintln!(
+            "  set_ratio <0.1..0.9>          Set focused window's parent split ratio (HX-02)"
+        );
         eprintln!("  close                         Close focused window");
         eprintln!("  equalize                      Equalize all splits");
         eprintln!("  unstack                       Restore the focused stacked subtree");
         eprintln!("  promote_stack                 Move the focused stack window to the top");
-        eprintln!("  toggle_split                  Flip focused window's parent split axis (HX-01)");
-        eprintln!("  swap_split                    Swap left/right children at parent split (HX-01)");
-        eprintln!("  promote_to_root               Lift focused window to a direct workspace-root child (HX-01)");
+        eprintln!(
+            "  toggle_split                  Flip focused window's parent split axis (HX-01)"
+        );
+        eprintln!(
+            "  swap_split                    Swap left/right children at parent split (HX-01)"
+        );
+        eprintln!(
+            "  promote_to_root               Lift focused window to a direct workspace-root child (HX-01)"
+        );
         eprintln!("  preselect <left|right|up|down>");
         eprintln!("                                Hint next new window's direction (HX-05)");
-        eprintln!("  toggle_pseudo                 Toggle pseudo-tile (preferred size, centered) (HX-06)");
+        eprintln!(
+            "  toggle_pseudo                 Toggle pseudo-tile (preferred size, centered) (HX-06)"
+        );
         eprintln!("  add_to_stack <left|right|up|down>");
-        eprintln!("                                Merge focused window into adjacent leaf as Stack (HX-07)");
-        eprintln!("  split_from_stack              Pull active stack member out as sibling (HX-07)");
-        eprintln!("  cancel_drag                   Abort an in-flight drag and restore pre-drag state (HX-99-C)");
+        eprintln!(
+            "                                Merge focused window into adjacent leaf as Stack (HX-07)"
+        );
+        eprintln!(
+            "  split_from_stack              Pull active stack member out as sibling (HX-07)"
+        );
+        eprintln!(
+            "  cancel_drag                   Abort an in-flight drag and restore pre-drag state (HX-99-C)"
+        );
         eprintln!("  spawn_terminal                Spawn the configured terminal");
         eprintln!("  workspace <1-10>              Switch workspace");
         eprintln!("  workspace_next                Cycle to the next workspace");

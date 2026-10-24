@@ -77,11 +77,7 @@ pub fn index_at_point(monitors: &[Monitor], x: f64, y: f64) -> Option<usize> {
 /// adjacency picks the same way window-level focus does (rect overlap
 /// is preferred over center-to-center distance, vertical/horizontal gap
 /// is the secondary key).
-pub fn next_in_direction(
-    monitors: &[Monitor],
-    from: usize,
-    direction: Direction,
-) -> Option<usize> {
+pub fn next_in_direction(monitors: &[Monitor], from: usize, direction: Direction) -> Option<usize> {
     // Strict edge test rather than center comparison: a candidate
     // counts as "in direction X" only when its leading edge in X has
     // passed `from`'s trailing edge in X (modulo a small tolerance for
@@ -186,10 +182,7 @@ mod tests {
     #[test]
     fn next_in_direction_horizontal() {
         let monitors = make_monitors();
-        assert_eq!(
-            next_in_direction(&monitors, 0, Direction::Right),
-            Some(1)
-        );
+        assert_eq!(next_in_direction(&monitors, 0, Direction::Right), Some(1));
         assert_eq!(next_in_direction(&monitors, 1, Direction::Left), Some(0));
         // No monitor to the left of the leftmost.
         assert_eq!(next_in_direction(&monitors, 0, Direction::Left), None);

@@ -152,7 +152,10 @@ fn main() {
         // inside the WM_STATE.with closure; we observe is_dragging before
         // and after to decide which hook to fire after the borrow drops.
         let was_dragging = WM_STATE.with(|s| {
-            s.borrow().as_ref().map(|st| st.is_dragging()).unwrap_or(false)
+            s.borrow()
+                .as_ref()
+                .map(|st| st.is_dragging())
+                .unwrap_or(false)
         });
         WM_STATE.with(|s| {
             if let Some(state) = s.borrow_mut().as_mut() {
@@ -188,7 +191,10 @@ fn main() {
             }
         });
         let is_dragging = WM_STATE.with(|s| {
-            s.borrow().as_ref().map(|st| st.is_dragging()).unwrap_or(false)
+            s.borrow()
+                .as_ref()
+                .map(|st| st.is_dragging())
+                .unwrap_or(false)
         });
         match (was_dragging, is_dragging) {
             (false, true) => register_drag_cancel_hotkey(),
@@ -1090,8 +1096,7 @@ fn process_ipc_command(
                                     })
                                     .collect()
                             });
-                        let stack_active_index =
-                            stack.as_ref().map(|(_, active)| *active);
+                        let stack_active_index = stack.as_ref().map(|(_, active)| *active);
                         serde_json::json!({
                             "id": wid,
                             "app_name": app_name,

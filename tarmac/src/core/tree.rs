@@ -256,8 +256,9 @@ impl Node {
             Node::Leaf {
                 window: Some(existing),
             } => {
-                let direction = split_override
-                    .unwrap_or_else(|| Self::smart_split_direction_with_multiplier(&rect, multiplier));
+                let direction = split_override.unwrap_or_else(|| {
+                    Self::smart_split_direction_with_multiplier(&rect, multiplier)
+                });
                 let existing_window = *existing;
                 *self = Node::Internal {
                     split: direction,
@@ -1200,9 +1201,7 @@ impl Node {
     fn extract_leaf_or_stack(&mut self, window: WindowId) -> Option<Node> {
         match self {
             Node::Leaf { window: Some(w) } if *w == window => Some(std::mem::take(self)),
-            Node::Stack { windows, .. } if windows.contains(&window) => {
-                Some(std::mem::take(self))
-            }
+            Node::Stack { windows, .. } if windows.contains(&window) => Some(std::mem::take(self)),
             Node::Internal { left, right, .. } => {
                 if let Some(extracted) = left.extract_leaf_or_stack(window) {
                     if left.is_empty() {
@@ -1820,10 +1819,7 @@ mod tests {
         // becomes width > height * 2 = 2160 — and 1920 < 2160 so we
         // pick Horizontal (stacked) even though the rect is "wider."
         assert_eq!(
-            Node::smart_split_direction_with_multiplier(
-                &Rect::new(0.0, 0.0, 1920.0, 1080.0),
-                2.0,
-            ),
+            Node::smart_split_direction_with_multiplier(&Rect::new(0.0, 0.0, 1920.0, 1080.0), 2.0,),
             SplitDirection::Horizontal
         );
     }
@@ -1834,10 +1830,7 @@ mod tests {
         // becomes width > height * 0.4 = 400 — and 500 > 400, so we
         // pick Vertical (side-by-side) even though the rect is taller.
         assert_eq!(
-            Node::smart_split_direction_with_multiplier(
-                &Rect::new(0.0, 0.0, 500.0, 1000.0),
-                0.4,
-            ),
+            Node::smart_split_direction_with_multiplier(&Rect::new(0.0, 0.0, 500.0, 1000.0), 0.4,),
             SplitDirection::Vertical
         );
     }
@@ -2520,7 +2513,10 @@ mod tests {
         assert!(tree.resize(1, Direction::Right, 0.05, true));
         let post = tree.calculate_geometries(SCREEN);
         let post_one_w = post.iter().find(|(w, _)| *w == 1).unwrap().1.width;
-        assert!(post_one_w > pre_one_w, "window 1 should widen via root split");
+        assert!(
+            post_one_w > pre_one_w,
+            "window 1 should widen via root split"
+        );
     }
 
     #[test]
@@ -2541,7 +2537,10 @@ mod tests {
         let post_three_w = post.iter().find(|(w, _)| *w == 3).unwrap().1.width;
         let post_four_w = post.iter().find(|(w, _)| *w == 4).unwrap().1.width;
 
-        assert!(approx_eq(pre_two_w, post_two_w), "A's ratio must not change");
+        assert!(
+            approx_eq(pre_two_w, post_two_w),
+            "A's ratio must not change"
+        );
         assert!(!approx_eq(pre_three_w, post_three_w));
         assert!(!approx_eq(pre_four_w, post_four_w));
     }
@@ -2564,7 +2563,10 @@ mod tests {
         let post_four_w = post.iter().find(|(w, _)| *w == 4).unwrap().1.width;
 
         assert!(!approx_eq(pre_two_w, post_two_w), "A's ratio must change");
-        assert!(approx_eq(post_three_w, post_four_w), "C's ratio must stay 0.5");
+        assert!(
+            approx_eq(post_three_w, post_four_w),
+            "C's ratio must stay 0.5"
+        );
         assert!(!approx_eq(pre_three_w, post_three_w));
     }
 
@@ -2659,12 +2661,14 @@ mod tests {
         let mut tree = Node::empty();
         tree.insert_with_rect(1, None, tall);
         tree.insert_with_rect(2, Some(1), tall);
-        assert!(tree
-            .find_resize_target_rect(1, Direction::Left, tall, true)
-            .is_none());
-        assert!(tree
-            .find_resize_target_rect(1, Direction::Right, tall, false)
-            .is_none());
+        assert!(
+            tree.find_resize_target_rect(1, Direction::Left, tall, true)
+                .is_none()
+        );
+        assert!(
+            tree.find_resize_target_rect(1, Direction::Right, tall, false)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2932,13 +2936,19 @@ mod tests {
         let pre = tree.calculate_geometries(SCREEN);
         let pre_four = pre.iter().find(|(w, _)| *w == 4).unwrap().1;
         let (pre_four_cx, _) = pre_four.center();
-        assert!(pre_four_cx > SCREEN.center().0, "test setup: 4 must start on right");
+        assert!(
+            pre_four_cx > SCREEN.center().0,
+            "test setup: 4 must start on right"
+        );
 
         assert!(tree.promote_to_root(4));
         let post = tree.calculate_geometries(SCREEN);
         let post_four = post.iter().find(|(w, _)| *w == 4).unwrap().1;
         let (post_four_cx, _) = post_four.center();
-        assert!(post_four_cx > SCREEN.center().0, "4 should remain visually on the right");
+        assert!(
+            post_four_cx > SCREEN.center().0,
+            "4 should remain visually on the right"
+        );
     }
 
     #[test]
@@ -2957,13 +2967,19 @@ mod tests {
         let pre = tree.calculate_geometries(SCREEN);
         let pre_four = pre.iter().find(|(w, _)| *w == 4).unwrap().1;
         let (pre_four_cx, _) = pre_four.center();
-        assert!(pre_four_cx < SCREEN.center().0, "test setup: 4 must start on left");
+        assert!(
+            pre_four_cx < SCREEN.center().0,
+            "test setup: 4 must start on left"
+        );
 
         assert!(tree.promote_to_root(4));
         let post = tree.calculate_geometries(SCREEN);
         let post_four = post.iter().find(|(w, _)| *w == 4).unwrap().1;
         let (post_four_cx, _) = post_four.center();
-        assert!(post_four_cx < SCREEN.center().0, "4 should remain visually on the left");
+        assert!(
+            post_four_cx < SCREEN.center().0,
+            "4 should remain visually on the left"
+        );
     }
 
     #[test]
@@ -3007,7 +3023,10 @@ mod tests {
         // 2 and 3 share the right half — neither overlaps window 1's
         // tile on the left half.
         assert!(rect_2.x >= 960.0, "2 should stay on the right");
-        assert!(rect_3.x >= 960.0, "3 should land on the right (cursor side)");
+        assert!(
+            rect_3.x >= 960.0,
+            "3 should land on the right (cursor side)"
+        );
     }
 
     #[test]

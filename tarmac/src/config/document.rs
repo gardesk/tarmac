@@ -707,7 +707,11 @@ fn write_settings(out: &mut String, settings: &Settings) {
     // were never emitted, so UI changes silently vanished.
     out.push_str(&format!(
         "gar.set(\"smart_resizing\", {})\n",
-        if settings.smart_resizing { "true" } else { "false" }
+        if settings.smart_resizing {
+            "true"
+        } else {
+            "false"
+        }
     ));
     out.push_str(&format!(
         "gar.set(\"window_direction_monitor_fallback\", {})\n",
@@ -731,7 +735,11 @@ fn write_settings(out: &mut String, settings: &Settings) {
     ));
     out.push_str(&format!(
         "gar.set(\"preserve_split\", {})\n",
-        if settings.preserve_split { "true" } else { "false" }
+        if settings.preserve_split {
+            "true"
+        } else {
+            "false"
+        }
     ));
     out.push_str(&format!(
         "gar.set(\"permanent_direction_override\", {})\n",
@@ -944,15 +952,24 @@ mod tests {
             out.contains("gar.set(\"window_direction_monitor_fallback\", false)"),
             "{out}"
         );
-        assert!(out.contains("gar.set(\"split_axis\", \"horizontal\")"), "{out}");
+        assert!(
+            out.contains("gar.set(\"split_axis\", \"horizontal\")"),
+            "{out}"
+        );
         assert!(out.contains("gar.set(\"force_split\", \"left\")"), "{out}");
-        assert!(out.contains("gar.set(\"split_width_multiplier\", 1.50)"), "{out}");
+        assert!(
+            out.contains("gar.set(\"split_width_multiplier\", 1.50)"),
+            "{out}"
+        );
         assert!(out.contains("gar.set(\"preserve_split\", true)"), "{out}");
         assert!(
             out.contains("gar.set(\"permanent_direction_override\", true)"),
             "{out}"
         );
-        assert!(out.contains("gar.set(\"focal_point_source\", \"cursor\")"), "{out}");
+        assert!(
+            out.contains("gar.set(\"focal_point_source\", \"cursor\")"),
+            "{out}"
+        );
         assert!(out.contains("gar.set(\"drag_threshold\", 12)"), "{out}");
     }
 
